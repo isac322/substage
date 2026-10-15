@@ -91,6 +91,8 @@ def _cmd_refeval(args: argparse.Namespace) -> int:
             "split": args.split,
             "cycle_id": args.cycle_id,
         }
+    if getattr(args, "decisions_model", None):
+        evaluation_kwargs["decisions_model"] = args.decisions_model
     report = refeval.run_refeval(
         args.video_id, evaluate.parse_arms(args.arms), ref, args.n_scenes, args.seed, out, judge=not args.no_judge,
         judge_models=refeval.parse_judge_models(args.judge_model, load_settings().model_main),
@@ -257,6 +259,11 @@ def main(argv: list[str] | None = None) -> int:
     ref_p.add_argument("--opus-ref", help="frozen Opus Korean subtitle artifact (required only for paired mode)")
     ref_p.add_argument("--split", choices=("dev", "heldout"), help="explicit dataset split (paired default: dev)")
     ref_p.add_argument("--cycle-id", help="experiment cycle identifier stored in the report")
+    ref_p.add_argument(
+        "--decisions-model",
+        metavar="MODEL",
+        help="run 6-axis Cloudflare Clef/Clef-omni Decisions pre-benchmark (e.g. clef-omni, clef, clef-flash)",
+    )
     ref_p.set_defaults(func=_cmd_refeval)
 
     ab_p = sub.add_parser("ablate", help="execute production translation architectures on frozen sampled scenes")

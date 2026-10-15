@@ -61,7 +61,9 @@ from pydantic import BaseModel, Field
 from .config import Settings, Workspace, load_settings, workspace
 from .evaluate import _en_text, arm_srt, evaluation_metadata, mmss, numeric_deltas, shuffle_labels
 from .levels import DASHES, addressed_levels, ending_level, jongseong, strip_bidi
+from .llm import ClefDecisionsClient
 from .models import Cue, ContextMap, RegisterMap, Scene
+from .style import PRO_SUBTITLE_LAWS
 from .store import Checkpoints, input_hash, load_model, load_models
 from .validate import cps_chars
 
@@ -1756,6 +1758,180 @@ def render_calibration_md(calibration: dict[str, dict]) -> list[str]:
     return out
 
 
+
+# ---------------------------------------------------------------- decisions pre-benchmark
+
+
+DECISIONS_AXES = ("meaning", "spoken", "condense", "register", "names", "dash")
+_DECISIONS_WEIGHTS = {
+    "meaning": 0.30,
+    "spoken": 0.25,
+    "condense": 0.15,
+    "register": 0.15,
+    "names": 0.10,
+    "dash": 0.05,
+}
+
+
+class _DecisionsCache(BaseModel):
+    answers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+def evaluate_decisions_prebenchmark(
+    ws: Workspace,
+    settings: Settings,
+    windows: list[Window],
+    arms: list[str],
+    *,
+    model: str = "clef-omni",
+    client: ClefDecisionsClient | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fast System One 6-axis decomposed pre-benchmark over sampled windows.
+
+    For each arm and each window (batched up to 10 groups * 6 axes = 60
+    questions per call), evaluates 6 orthogonal atomic questions comparing the
+    candidate against the Official Gold Korean subtitle under
+    ``PRO_SUBTITLE_LAWS`` (`output_tokens = 0`).
+    """
+    clef = client or ClefDecisionsClient(ws, settings, model)
+    cp = Checkpoints(ws, "refeval")
+    out: dict[str, dict[str, Any]] = {}
+    for arm in arms:
+        axis_sums = {ax: 0.0 for ax in DECISIONS_AXES}
+        total_items = 0
+        for w in windows:
+            scored_groups = [g for g in w.groups if g.official]
+            for idx in range(0, len(scored_groups), 10):
+                chunk = scored_groups[idx : idx + 10]
+                if not chunk:
+                    continue
+                cues_state = []
+                questions: dict[str, dict[str, Any]] = {}
+                for g in chunk:
+                    gid = g.id
+                    en_t = " / ".join(c.text.replace("\n", " ") for c in g.en)
+                    gold_t = " / ".join(l.text.replace("\n", " ") for l in g.official)
+                    cand_lines = g.candidates.get(arm) or []
+                    cand_t = " / ".join(l.text.replace("\n", " ") for l in cand_lines)
+                    cues_state.append({
+                        "id": gid,
+                        "en": en_t,
+                        "gold_ko": gold_t,
+                        "candidate_ko": cand_t,
+                    })
+                    if not cand_t.strip():
+                        continue
+                    if cand_t.strip() == gold_t.strip():
+                        continue
+                    questions[f"{gid}_meaning"] = {
+                        "type": "noul",
+                        "instructions": (
+                            f"Group {gid}: Does candidate_ko ({cand_t!r}) convey the same core pragmatic meaning, "
+                            f"joke, or speech act as gold_ko ({gold_t!r}) for EN ({en_t!r}) without omission or mistranslation?"
+                        ),
+                    }
+                    questions[f"{gid}_spoken"] = {
+                        "type": "noul",
+                        "instructions": (
+                            f"Group {gid}: Applying PRO_SUBTITLE_LAWS, does candidate_ko ({cand_t!r}) read like natural "
+                            f"spoken Korean dialogue (입말) free of literal English translationese (번역투), comparable to gold_ko ({gold_t!r})?"
+                        ),
+                    }
+                    questions[f"{gid}_condense"] = {
+                        "type": "noul",
+                        "instructions": (
+                            f"Group {gid}: Is candidate_ko ({cand_t!r}) briskly condensed for screen reading "
+                            f"(dropping filler/vocal noise like gold_ko {gold_t!r})?"
+                        ),
+                    }
+                    questions[f"{gid}_register"] = {
+                        "type": "noul",
+                        "instructions": (
+                            f"Group {gid}: Does candidate_ko ({cand_t!r}) match the Korean speech level (반말/존댓말) "
+                            f"and address tone of gold_ko ({gold_t!r})?"
+                        ),
+                    }
+                    questions[f"{gid}_names"] = {
+                        "type": "noul",
+                        "instructions": (
+                            f"Group {gid}: Are proper nouns, nicknames, or cultural terms in candidate_ko ({cand_t!r}) "
+                            f"handled accurately relative to gold_ko ({gold_t!r})?"
+                        ),
+                    }
+                    questions[f"{gid}_dash"] = {
+                        "type": "noul",
+                        "instructions": (
+                            f"Group {gid}: Does candidate_ko ({cand_t!r}) use valid multi-speaker '- ' dashes "
+                            f"matching gold_ko ({gold_t!r})?"
+                        ),
+                    }
+                state_obj = {
+                    "window_id": w.id,
+                    "PRO_SUBTITLE_LAWS": PRO_SUBTITLE_LAWS,
+                    "items": cues_state,
+                }
+                answers: dict[str, dict[str, Any]] = {}
+                if questions:
+                    h = input_hash(
+                        "decisions-prebench-v1",
+                        clef.model,
+                        arm,
+                        json.dumps(state_obj, ensure_ascii=False, sort_keys=True),
+                        json.dumps(questions, ensure_ascii=False, sort_keys=True),
+                    )
+                    key = f"clef_pre:{arm}:{w.id}:{idx}"
+                    cached = cp.get(key, h, _DecisionsCache)
+                    if cached is not None:
+                        answers = cached.answers
+                    else:
+                        answers = clef.decide(stage="refeval-clef", state=state_obj, questions=questions)
+                        cp.put(key, h, _DecisionsCache(answers=answers))
+                for g in chunk:
+                    gid = g.id
+                    gold_t = " / ".join(l.text.replace("\n", " ") for l in g.official)
+                    cand_t = " / ".join(l.text.replace("\n", " ") for l in (g.candidates.get(arm) or []))
+                    total_items += 1
+                    if not cand_t.strip():
+                        continue
+                    if cand_t.strip() == gold_t.strip():
+                        for ax in DECISIONS_AXES:
+                            axis_sums[ax] += 1.0
+                        continue
+                    for ax in DECISIONS_AXES:
+                        p = float((answers.get(f"{gid}_{ax}") or {}).get("noul", 0.5))
+                        axis_sums[ax] += p
+        denom = max(1, total_items)
+        axes_pct = {ax: round(axis_sums[ax] / denom * 100.0, 2) for ax in DECISIONS_AXES}
+        score = round(sum(axes_pct[ax] * _DECISIONS_WEIGHTS[ax] for ax in DECISIONS_AXES), 2)
+        out[arm] = {
+            "model": clef.model,
+            "items": total_items,
+            "score": score,
+            "axes": axes_pct,
+        }
+    return out
+
+
+def render_decisions_md(decisions: dict[str, dict[str, Any]]) -> list[str]:
+    if not decisions:
+        return []
+    first_model = next(iter(decisions.values())).get("model", "clef/clef-omni")
+    out = [
+        "",
+        f"## Decomposed 6-Axis Decisions Pre-Benchmark (`{first_model}`)",
+        "",
+        "| arm | 6-axis score | meaning | spoken (말맛) | condense (압축) | register | names | dash | items |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for arm, d in decisions.items():
+        ax = d.get("axes") or {}
+        out.append(
+            f"| {arm} | {_fmt(d.get('score'))} | {_fmt(ax.get('meaning'))} | {_fmt(ax.get('spoken'))} | "
+            f"{_fmt(ax.get('condense'))} | {_fmt(ax.get('register'))} | {_fmt(ax.get('names'))} | "
+            f"{_fmt(ax.get('dash'))} | {d.get('items', 0)} |"
+        )
+    return out
+
 # ---------------------------------------------------------------- report
 
 
@@ -1817,6 +1993,8 @@ def render_md(report: dict) -> str:
         out += render_calibration_md(report["calibration"])
     if report.get("paired"):
         out += render_paired_md(report)
+    if report.get("decisions"):
+        out += render_decisions_md(report["decisions"])
     return "\n".join(out) + "\n"
 
 
@@ -1837,6 +2015,8 @@ def run_refeval(
     opus_ref: Path | str | None = None,
     split: str | None = None,
     cycle_id: str | None = None,
+    decisions_model: str | None = None,
+    decisions_client: ClefDecisionsClient | None = None,
 ) -> dict:
     """Align, score, judge (every model in ``judge_models``, default
     ``settings.model_main``) and calibrate each judge; write ``refeval.json``
@@ -1909,6 +2089,21 @@ def run_refeval(
             }
             for i, w in enumerate(windows)
         ]
+    if decisions_model and n_scenes > 0:
+        ws_dec = Workspace(
+            video_id=video_id,
+            data_dir=inp.base,
+            cache_dir=workspace(video_id).cache_dir,
+            log_dir=workspace(video_id).log_dir,
+        )
+        targeted = targeted_cue_ids(inp.context_map, inp.register)
+        dec_windows = select_windows(build_windows(inp.groups), n_scenes, seed, targeted)
+        dec_res = evaluate_decisions_prebenchmark(
+            ws_dec, settings, dec_windows, names, model=decisions_model, client=decisions_client,
+        )
+        report["decisions"] = dec_res
+        for arm, d in dec_res.items():
+            metrics[arm]["decisions"] = d
     report["groups"] = [group_record(g, names) for g in inp.groups]
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "refeval.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

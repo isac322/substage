@@ -29,6 +29,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol, TypeVar
@@ -45,6 +46,7 @@ T = TypeVar("T", bound=BaseModel)
 
 ANTHROPIC_PREFIX = "anthropic/"
 CODEX_PREFIX = "codex/"
+CLEF_PREFIX = "clef/"
 # xhigh reasoning on a 40-cue scene can run well past 10 minutes
 _TIMEOUT_S = 1800.0
 
@@ -72,6 +74,9 @@ _LIST_PRICE: dict[str, tuple[float, float, float, float]] = {
     "claude-haiku-5-5": (0.1, 0.5, 0.01, 0.125),
     "gpt-6.1-sol": (2.0, 10.0, 0.1, 2.5),
     "gpt-6-luna": (0.1, 0.5, 0.01, 0.125),
+    "clef-omni": (0.15, 0.0, 0.0, 0.0),
+    "clef": (0.24, 0.0, 0.0, 0.0),
+    "clef-flash": (0.038, 0.0, 0.0, 0.0),
 }
 
 
@@ -654,3 +659,173 @@ class CodexClient(_ProxyClient):
                     return c.get("text") or ""
         raise ValueError(f"response contained no output text (status={status}, "
                          f"incomplete={data.get('incomplete_details')})")
+
+
+_CLEF_MODELS: dict[str, tuple[str, str]] = {
+    "clef-omni": ("@cf/cloudflare/clef-omni", "clef-omni"),
+    "clef": ("@cf/cloudflare/clef", "clef"),
+    "clef-flash": ("@cf/cloudflare/clef-flash", "clef-flash"),
+}
+
+
+class ClefDecisionsClient:
+    """Cloudflare Workers AI System One / Decisions API client (`clef-omni`, `clef`, `clef-flash`).
+
+    Evaluates up to 64 independent typed questions (`noul`, `choice`, `score`) in
+    a single forward pass (`output_tokens = 0`) over a shared ``state`` and
+    optional multimodal ``images`` (up to 4 base64 data URLs).
+    """
+
+    _ENV_ACCOUNT = "SUBSTAGE_CLOUDFLARE_ACCOUNT_ID"
+    _ENV_TOKEN = "SUBSTAGE_CLOUDFLARE_API_TOKEN"
+    _OMP_PROVIDER = "cloudflare-workers-ai"
+
+    def __init__(
+        self,
+        ws: Workspace,
+        settings: Settings,
+        model: str = "clef-omni",
+        *,
+        transport: Transport | None = None,
+        account_id: str | None = None,
+        api_token: str | None = None,
+        base_url: str | None = None,
+    ):
+        self.ws = ws
+        self.settings = settings
+        wire = model.removeprefix(CLEF_PREFIX).removeprefix("@cf/cloudflare/")
+        if wire not in _CLEF_MODELS:
+            raise GeminiError("init", f"unsupported Clef decisions model {model!r}; expected one of {tuple(_CLEF_MODELS)}")
+        self.model = f"{CLEF_PREFIX}{wire}"
+        self._cf_path, self._selector = _CLEF_MODELS[wire]
+        if not (account_id and api_token):
+            load_secrets()
+            account_id = account_id or os.environ.get(self._ENV_ACCOUNT)
+            api_token = api_token or os.environ.get(self._ENV_TOKEN)
+        if not (account_id and api_token):
+            omp_url, omp_key = _omp_model_creds(self._OMP_PROVIDER)
+            base_url = base_url or omp_url
+            if omp_key and omp_key.lstrip().startswith("{"):
+                try:
+                    parsed = json.loads(omp_key)
+                except ValueError:
+                    parsed = {}
+                account_id = account_id or parsed.get("accountId")
+                api_token = api_token or parsed.get("token")
+            elif omp_key:
+                api_token = api_token or omp_key
+        self._account_id = str(account_id or "").strip()
+        self._api_token = str(api_token or "").strip()
+        self._base_url = (base_url or f"https://api.cloudflare.com/client/v4/accounts/{self._account_id}/ai/run").rstrip("/")
+        if not self._account_id or not self._api_token:
+            raise GeminiError(
+                "init",
+                f"{self._ENV_ACCOUNT}/{self._ENV_TOKEN} not set (env or ~/.config/substage/secrets.env)",
+            )
+        self._transport = transport or urllib_transport
+
+    @property
+    def _url(self) -> str:
+        return f"{self._base_url}/{self._cf_path}"
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._api_token}",
+            "Content-Type": "application/json",
+        }
+
+    def _image_data_urls(self, stage: str, images: Sequence[Path | str]) -> list[str]:
+        out: list[str] = []
+        for img in list(images)[:4]:
+            if isinstance(img, str) and img.startswith("data:"):
+                out.append(img)
+                continue
+            p = Path(img)
+            mime = _IMAGE_MIME.get(p.suffix.lower())
+            if mime is None:
+                raise GeminiError(stage, f"unsupported image suffix {p.suffix!r} ({p})")
+            out.append(f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode('ascii')}")
+        return out
+
+    def _log_usage(self, stage: str, input_tokens: int, output_tokens: int) -> float:
+        price = _price_for(self.model, input_tokens, provider=self._OMP_PROVIDER)
+        cost = (input_tokens * price[0] + output_tokens * price[1]) / 1e6 if price else 0.0
+        record = UsageRecord(
+            stage=stage,
+            model=self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=0,
+            cache_write_tokens=0,
+            cost_usd=cost,
+        )
+        logged = record.model_dump()
+        logged.update(
+            requested_service_tier=None,
+            confirmed_service_tier=None,
+            priced_service_tier=None,
+            cost_basis="provider_list_price" if price else "unpriced_model",
+            usage_complete=True,
+        )
+        self.ws.log_dir.mkdir(parents=True, exist_ok=True)
+        with (self.ws.log_dir / "usage.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(logged, ensure_ascii=False) + "\n")
+        return record.cost_usd
+
+    def decide(
+        self,
+        *,
+        stage: str,
+        state: str | dict[str, Any] | list[Any],
+        questions: dict[str, dict[str, Any]],
+        images: Sequence[Path | str] = (),
+    ) -> dict[str, dict[str, Any]]:
+        """Evaluate 1..64 typed atomic questions on ``state`` (+ optional ``images``).
+
+        Returns the ``answers`` mapping ``{question_id: answer_dict}``.
+        """
+        if not questions or len(questions) > 64:
+            raise ValueError(f"Clef decisions API requires 1..64 questions per call, got {len(questions)}")
+        payload: dict[str, Any] = {
+            "model": self._selector,
+            "state": state,
+            "questions": questions,
+        }
+        img_urls = self._image_data_urls(stage, images)
+        if img_urls:
+            payload["images"] = img_urls
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        last_error = "unknown error"
+        for attempt in range(gemini._MAX_ATTEMPTS):
+            reservation = gemini._reserve(self.settings, self.model, stage, 0.0, provider=self._OMP_PROVIDER)
+            try:
+                resp = self._transport(self._url, self._headers(), body, _TIMEOUT_S)
+            except (OSError, TimeoutError) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                gemini._backoff(attempt)
+                continue
+            try:
+                data = json.loads(resp.body or b"{}")
+            except ValueError:
+                data = {}
+            if resp.status != 200 or not data.get("success", True):
+                msg = resp.body[:300].decode("utf-8", "replace")
+                if resp.status in (408, 429) or 500 <= resp.status < 600:
+                    last_error = f"HTTP {resp.status}: {msg}"
+                    gemini._backoff(attempt)
+                    continue
+                raise GeminiError(stage, f"Clef API error: HTTP {resp.status}: {msg}")
+            res = data.get("result") if isinstance(data.get("result"), dict) else data
+            usage = res.get("usage") if isinstance(res, dict) else None
+            cost = 0.0
+            if isinstance(usage, dict) and usage.get("input_tokens") is not None:
+                in_tok = _usage_tokens(usage.get("input_tokens"))
+                out_tok = _usage_tokens(usage.get("output_tokens", 0))
+                cost = self._log_usage(stage, in_tok, out_tok)
+            gemini._settle(reservation, cost, stage)
+            answers = res.get("answers") if isinstance(res, dict) else None
+            if isinstance(answers, dict):
+                return answers
+            last_error = "missing answers in Clef response"
+            gemini._backoff(attempt)
+        raise GeminiError(stage, f"Clef failed after {gemini._MAX_ATTEMPTS} attempts: {last_error}")

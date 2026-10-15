@@ -186,9 +186,9 @@ def test_mode_overridden_on_legacy_checkpoint_hit(tmp_path, monkeypatch):
     snaps = {"s001": Snapshot(scene_id="s001")}
     gc = FakeGemini(_junk_mode)
     # simulate a checkpoint written before mode was code-owned
-    monkeypatch.setattr(translate, "_align", lambda scene, sc, result, mode, obs: result)
-    translate.translate_video(w, gc, video(), scenes, cues, snaps, [], None, mode="text")
-    monkeypatch.undo()
+    with monkeypatch.context() as mp:
+        mp.setattr(translate, "_align", lambda scene, sc, result, mode, obs: result)
+        translate.translate_video(w, gc, video(), scenes, cues, snaps, [], None, mode="text")
     out = translate.translate_video(w, gc, video(), scenes, cues, snaps, [], None, mode="text")
     assert len(gc.calls) == 1  # checkpoint hit
     assert out["s001"].mode == "text"

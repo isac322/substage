@@ -1378,15 +1378,32 @@ def run(
     ko, finale_edits = _apply_edits(ko, list(finale_raw), gate, "finale", allow_omission=lineage is not None)
     semantic_stage("s4-finale")
     ko_hash = _hash_ko(ko)
-    flags = _ck(
-        ck,
-        "blind_read",
-        input_hash(ko_hash, (txt if plan is not None else gc).settings.model_light,
-                   *review.prompt_texts("blind", settings.narrative_context)),
-        _Flags,
-        lambda: _Flags(items=review.blind_read(
-            ws, txt if plan is not None else gc, [(c.id, ko.get(c.id, "")) for c in cues])),
-    ).items
+    if getattr(settings, "decisions_model", None):
+        clef_client = llm.ClefDecisionsClient(ws, settings, settings.decisions_model)
+        flags = _ck(
+            ck,
+            "blind_read",
+            input_hash(
+                ko_hash,
+                clef_client.model,
+                "clef-6axis-v1",
+                register_map,
+            ),
+            _Flags,
+            lambda: _Flags(items=review.diagnose_with_decisions(
+                ws, clef_client, scenes, cues_by_id, ko, levels=levels, scene_images=scene_images,
+            )),
+        ).items
+    else:
+        flags = _ck(
+            ck,
+            "blind_read",
+            input_hash(ko_hash, (txt if plan is not None else gc).settings.model_light,
+                       *review.prompt_texts("blind", settings.narrative_context)),
+            _Flags,
+            lambda: _Flags(items=review.blind_read(
+                ws, txt if plan is not None else gc, [(c.id, ko.get(c.id, "")) for c in cues])),
+        ).items
     regen_raw = _ck(
         ck,
         "regenerate",

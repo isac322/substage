@@ -150,6 +150,10 @@ class Settings:
         "codex/gpt-6-luna",
         "codex/gpt-6.1-sol",
     )
+    # Optional Cloudflare Clef / Clef-omni Decisions API model (e.g.
+    # "clef-omni", "clef", "clef-flash") for S4b decomposed 6-axis diagnosis;
+    # None keeps the default LLM blind_read path.
+    decisions_model: str | None = None
     # One explicit ID across every video, workspace and cycle in an experiment.
     # None fails closed for budgeted providers; OpenAI does not require an ID.
     experiment_id: str | None = None

@@ -460,3 +460,28 @@ def test_display_rates_reading_speed_metrics():
     assert r["cps_over_rate"] == round(1 / 3, 4)
     assert r["median_cps"] == 4.0 and r["median_duration_s"] == 2.0
     assert r["cpl_over_rate"] == round(1 / 3, 4)
+
+
+def test_run_refeval_decisions_prebenchmark(tmp_path, monkeypatch):
+    video, ref, resolve = _refeval_video(tmp_path, monkeypatch)
+    calls: list[dict] = []
+
+    class FakeClef:
+        model = "clef/clef-omni"
+
+        def decide(self, *, stage, state, questions, images=()):
+            calls.append({"stage": stage, "state": state, "questions": questions})
+            return {qid: {"type": "noul", "noul": 0.8} for qid in questions}
+
+    arms = {"A": f"{video}__a", "B": video}
+    report = refeval.run_refeval(
+        video, arms, ref, 3, 1, tmp_path / "out_dec",
+        settings=Settings(), judge=False, decisions_model="clef-omni",
+        decisions_client=FakeClef(), resolve=resolve,
+    )
+    assert "decisions" in report
+    # Arm B is identical to official gold on every group -> 100.0 with 0 network questions needed
+    assert report["decisions"]["B"]["score"] == 100.0
+    assert report["decisions"]["A"]["score"] < 100.0
+    md = (tmp_path / "out_dec" / "refeval.md").read_text(encoding="utf-8")
+    assert "## Decomposed 6-Axis Decisions Pre-Benchmark" in md

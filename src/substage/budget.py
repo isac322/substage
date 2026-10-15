@@ -28,7 +28,7 @@ class BudgetError(RuntimeError):
 
 def group_for(model: str, provider: str | None = None) -> str | None:
     # Endpoint, not the model's name, determines the billing family.
-    if provider in {"codex", "openai-codex"}:
+    if provider in {"codex", "openai-codex", "cloudflare-workers-ai"}:
         return None
     wire = model.split("/", 1)[-1]
     if provider == "anthropic":
@@ -38,6 +38,8 @@ def group_for(model: str, provider: str | None = None) -> str | None:
     if provider is not None:
         raise BudgetError(f"no validated budget classification for provider {provider!r}")
     if model.startswith("codex/"):
+        return None
+    if model.startswith(("clef/", "@cf/cloudflare/")):
         return None
     if model.startswith("anthropic/"):
         return "opus" if wire == "claude-opus-5-5" else None

@@ -584,3 +584,58 @@ def test_text_stages_send_text_model_ids(ws, monkeypatch):
     validate.run_s5(ws, tc, [cue], {"c0001": "가" * 15}, {}, {}, settings)
     layout.layout([cue], {"c0001": "가나다 " * 6}, {"c0001": "s001"}, {}, settings, tc)
     assert sent == ["claude-opus-5-5", "claude-opus-5-5"]
+
+
+def test_clef_decisions_client_and_decomposed_diagnosis(ws, monkeypatch):
+    from substage import review
+    from substage.llm import ClefDecisionsClient
+
+    _isolate_creds(monkeypatch)
+    monkeypatch.setenv("SUBSTAGE_CLOUDFLARE_ACCOUNT_ID", "acct-123")
+    monkeypatch.setenv("SUBSTAGE_CLOUDFLARE_API_TOKEN", "tok-456")
+    captured: list[dict] = []
+
+    def fake_transport(url, headers, body, timeout):
+        payload = json.loads(body)
+        captured.append({"url": url, "headers": headers, "payload": payload})
+        answers = {}
+        for qid in payload["questions"]:
+            # Flag c0001 on omission and translationese; keep c0002 clean
+            if qid in ("c0001_omission", "c0001_translat"):
+                answers[qid] = {"type": "noul", "noul": 0.91, "confidence": 0.82}
+            else:
+                answers[qid] = {"type": "noul", "noul": 0.12, "confidence": 0.76}
+        return HttpResponse(
+            200,
+            json.dumps({
+                "success": True,
+                "result": {
+                    "model": "clef-omni",
+                    "answers": answers,
+                    "usage": {"input_tokens": 1200, "output_tokens": 0},
+                },
+            }).encode("utf-8"),
+        )
+
+    client = ClefDecisionsClient(ws, Settings(), "clef-omni", transport=fake_transport)
+    assert client.model == "clef/clef-omni"
+    assert client._url.endswith("/accounts/acct-123/ai/run/@cf/cloudflare/clef-omni")
+    scenes = [Scene(id="s001", start_ms=1000, end_ms=5000, cue_ids=["c0001", "c0002"], act=1)]
+    cues_by_id = {
+        "c0001": Cue(id="c0001", start_ms=1000, end_ms=2500, text="So you gotta hold onto love...", raw=""),
+        "c0002": Cue(id="c0002", start_ms=2600, end_ms=4500, text="Excuse me. Whoo!", raw=""),
+    }
+    ko = {"c0001": "그러니까 사랑을", "c0002": "실례"}
+    flags = review.diagnose_with_decisions(
+        ws, client, scenes, cues_by_id, ko, levels={"c0001": ("alex>sam", "해"), "c0002": ("alex>crowd", "해")},
+    )
+    assert len(captured) == 1
+    assert len(captured[0]["payload"]["questions"]) == 12  # 2 cues * 6 atomic questions
+    assert "PRO_SUBTITLE_LAWS" in captured[0]["payload"]["state"]
+    assert [f.cue_id for f in flags] == ["c0001"]
+    assert "omission/truncation" in flags[0].problem and "translationese_calque" in flags[0].problem
+    # Second call hits checkpoint without invoking transport again
+    flags2 = review.diagnose_with_decisions(
+        ws, client, scenes, cues_by_id, ko, levels={"c0001": ("alex>sam", "해"), "c0002": ("alex>crowd", "해")},
+    )
+    assert len(captured) == 1 and flags2 == flags

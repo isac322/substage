@@ -17,9 +17,12 @@ from importlib import resources
 from typing import Any
 
 from pydantic import BaseModel, Field
+from pathlib import Path
 from .config import Workspace, narrative_context, narrative_text
 from .gemini import GeminiBlocked, GeminiClient
+from .llm import ClefDecisionsClient
 from .models import (
+    Cue,
     CueEdit,
     CueObservation,
     ContextMap,
@@ -30,7 +33,7 @@ from .models import (
 )
 from .register import render_scene_register
 from .store import Checkpoints, input_hash
-from .style import with_guide
+from .style import PRO_SUBTITLE_LAWS, with_guide
 from .translate import _NON_TRANSLATED, _fmt_ms
 from .validate import ost_kind
 
@@ -391,6 +394,155 @@ def blind_read(
         cp.put("blind", h, batch)
     return batch.flags
 
+
+_DECISIONS_CHUNK = 10  # 10 cues * 6 atomic questions = 60 questions <= 64 limit
+
+
+def diagnose_with_decisions(
+    ws: Workspace,
+    client: ClefDecisionsClient,
+    scenes: list[Scene],
+    cues_by_id: dict[str, Cue],
+    ko: dict[str, str],
+    *,
+    levels: dict[str, tuple[str, str]] | None = None,
+    scene_images: dict[str, list[Path]] | None = None,
+    threshold: float = 0.55,
+) -> list[ReadFlag]:
+    """Decomposed 6-axis System One diagnosis (60 atomic questions per 10-cue batch).
+
+    Evaluates each translated cue across 6 orthogonal atomic axes (`omission`,
+    `mistrans`, `translat`, `register`, `verbose`, `dash_err`) in a single
+    forward pass (`output_tokens = 0`) over the bilingual scene context,
+    ``PRO_SUBTITLE_LAWS``, and optional scene keyframes. Emits ``ReadFlag``
+    items carrying the structured diagnosis vector for surgical regeneration.
+    """
+    levels = levels or {}
+    scene_images = scene_images or {}
+    cp = Checkpoints(ws, "review")
+    flags: list[ReadFlag] = []
+    for scene in scenes:
+        active_cues = [
+            cues_by_id[cid]
+            for cid in scene.cue_ids
+            if cid in cues_by_id and ko.get(cid, "").strip()
+        ]
+        if not active_cues:
+            continue
+        imgs = (scene_images.get(scene.id) or [])[:4]
+        for c_idx in range(0, len(active_cues), _DECISIONS_CHUNK):
+            sub = active_cues[c_idx : c_idx + _DECISIONS_CHUNK]
+            cues_state = []
+            questions: dict[str, dict[str, Any]] = {}
+            for c in sub:
+                cid = c.id
+                en_txt = c.text.replace("\n", " / ")
+                ko_txt = ko.get(cid, "")
+                pair, lvl = levels.get(cid, ("-", "-"))
+                cues_state.append({
+                    "id": cid,
+                    "pair": pair,
+                    "target_level": lvl,
+                    "en": en_txt,
+                    "ko": ko_txt,
+                })
+                questions[f"{cid}_omission"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Cue {cid}: Is KO ({ko_txt!r}) cut off mid-sentence or missing the core verb/point "
+                        f"of EN ({en_txt!r})? (Dropping filler/noise per law_1_drop_noise is GOOD condensation, NOT omission.)"
+                    ),
+                }
+                questions[f"{cid}_mistrans"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Cue {cid}: Does KO ({ko_txt!r}) mistranslate the pragmatic meaning, wordplay, or joke "
+                        f"of EN ({en_txt!r}) in this scene?"
+                    ),
+                }
+                questions[f"{cid}_translat"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Cue {cid}: Does KO ({ko_txt!r}) violate PRO_SUBTITLE_LAWS with stiff English translationese "
+                        "(번역투: literal noun calques, phonetic US slang/names, unnecessary pronouns, or uncondensed vocal noise)?"
+                    ),
+                }
+                questions[f"{cid}_register"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Cue {cid}: Does KO ({ko_txt!r}) violate target speech level {lvl!r} for pair {pair!r} "
+                        "or use an unnatural vocative?"
+                    ),
+                }
+                questions[f"{cid}_verbose"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Cue {cid}: Is KO ({ko_txt!r}) overly wordy/cluttered instead of briskly condensed for screen reading?"
+                    ),
+                }
+                questions[f"{cid}_dash_err"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f"Cue {cid}: Does KO ({ko_txt!r}) have a multi-speaker '- ' dash error relative to EN ({en_txt!r})?"
+                    ),
+                }
+            state_obj = {
+                "scene_id": scene.id,
+                "PRO_SUBTITLE_LAWS": PRO_SUBTITLE_LAWS,
+                "cues": cues_state,
+            }
+            h = input_hash(
+                "clef-6axis-v1",
+                client.model,
+                f"{threshold:.3f}",
+                json.dumps(state_obj, ensure_ascii=False, sort_keys=True),
+                json.dumps(questions, ensure_ascii=False, sort_keys=True),
+                *[str(p) for p in imgs],
+            )
+            key = f"clef_diag:{scene.id}:{c_idx}"
+            cached = cp.get(key, h, _FlagBatch)
+            if cached is not None:
+                flags.extend(cached.flags)
+                continue
+            answers = client.decide(
+                stage=_STAGE_BLIND,
+                state=state_obj,
+                questions=questions,
+                images=imgs,
+            )
+            chunk_flags: list[ReadFlag] = []
+            for c in sub:
+                cid = c.id
+                p_om = float((answers.get(f"{cid}_omission") or {}).get("noul", 0.0))
+                p_mi = float((answers.get(f"{cid}_mistrans") or {}).get("noul", 0.0))
+                p_tr = float((answers.get(f"{cid}_translat") or {}).get("noul", 0.0))
+                p_rg = float((answers.get(f"{cid}_register") or {}).get("noul", 0.0))
+                p_vb = float((answers.get(f"{cid}_verbose") or {}).get("noul", 0.0))
+                p_da = float((answers.get(f"{cid}_dash_err") or {}).get("noul", 0.0))
+                reasons: list[str] = []
+                if p_om >= threshold:
+                    reasons.append(f"omission/truncation(P={p_om:.2f}: complete the missing predicate/point)")
+                if p_mi >= threshold:
+                    reasons.append(f"pragmatic_mistranslation(P={p_mi:.2f}: land the intended joke/sarcasm/wordplay)")
+                if p_tr >= max(threshold, 0.68):
+                    reasons.append(f"translationese_calque(P={p_tr:.2f}: replace literal calque with spoken Korean verb phrase)")
+                if p_rg >= threshold:
+                    reasons.append(f"register_mismatch(P={p_rg:.2f}: keep target speech level and natural vocative)")
+                if p_vb >= threshold:
+                    reasons.append(f"verbose_uncondensed(P={p_vb:.2f}: drop English filler/noise per subtitle laws)")
+                if p_da >= threshold:
+                    reasons.append(f"speaker_dash_error(P={p_da:.2f}: fix 2-speaker '- ' dash formatting)")
+                if reasons:
+                    chunk_flags.append(
+                        ReadFlag(
+                            cue_id=cid,
+                            problem="[6-Axis Diagnosis] " + "; ".join(reasons),
+                        )
+                    )
+            batch = _FlagBatch(flags=chunk_flags)
+            cp.put(key, h, batch)
+            flags.extend(chunk_flags)
+    return flags
 
 def regenerate_flagged(
     ws: Workspace,
