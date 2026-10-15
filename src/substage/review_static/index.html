@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>substage review</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a href="#/" class="brand">substage review</a>
+  <span id="video-title" class="video-title"></span>
+</header>
+
+<main id="list-view" hidden>
+  <h1>영상 목록</h1>
+  <ul id="video-list" class="video-list"></ul>
+  <p id="list-empty" class="muted" hidden>검토할 영상이 없습니다. <code>prepare_video</code>으로 데이터를 준비하세요.</p>
+</main>
+
+<main id="video-view" class="video-view" hidden>
+  <section class="player-col">
+    <div id="video-wrap" class="video-wrap">
+      <video id="video" controls preload="metadata" playsinline></video>
+      <div id="ov" class="ov" hidden>
+        <div id="ov-en" class="ov-en" hidden></div>
+        <div class="ov-cols">
+          <div class="ov-col">
+            <div class="ov-tag off">공식</div>
+            <div id="ov-off" class="ov-text"></div>
+          </div>
+          <div class="ov-col">
+            <div class="ov-tag ko">substage</div>
+            <div id="ov-ko" class="ov-text"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="textonly-bar" class="textonly-bar" hidden>
+      <span class="muted">영상 없음 · 텍스트 모드</span>
+      <button id="clock-toggle" type="button">▶ 재생</button>
+      <span id="clock-time" class="mono">00:00</span>
+    </div>
+    <div class="opts-bar">
+      <label title="영상 위에 공식/substage 자막 표시"><input id="opt-overlay" type="checkbox" checked> 자막 오버레이</label>
+      <label title="오버레이에 영어 자막도 표시"><input id="opt-ov-en" type="checkbox"> 오버레이 EN</label>
+      <label title="영상 아래 자막 패널 표시"><input id="opt-panel" type="checkbox" checked> 자막 패널</label>
+      <label title="큐가 끝나면 일시정지"><input id="opt-autopause" type="checkbox"> 큐 끝 자동정지</label>
+      <button id="help-btn" type="button" title="단축키 (?)">?</button>
+    </div>
+
+
+    <div id="subs-panel" class="subs-panel">
+      <div class="sub-line">
+        <span class="sub-label">EN</span>
+        <div id="sub-en" class="sub-text en"></div>
+      </div>
+      <div class="sub-line">
+        <span class="sub-label official">공식 자막</span>
+        <div id="sub-official" class="sub-text"></div>
+      </div>
+      <div class="sub-line">
+        <span class="sub-label substage">substage
+          <select id="arm-select" title="substage arm"></select>
+        </span>
+        <div id="sub-substage" class="sub-text"></div>
+      </div>
+    </div>
+
+    <div class="note-box">
+      <textarea id="free-note" rows="3" placeholder="현재 위치에 대한 자유 메모 (Ctrl/⌘+Enter 저장)"></textarea>
+      <div class="note-box-actions">
+        <span id="free-note-time" class="mono muted"></span>
+        <button id="free-note-save" type="button">메모 저장</button>
+      </div>
+    </div>
+
+    <details id="scenes-box" class="panel" open hidden>
+      <summary>평가 장면 <span id="scenes-count" class="muted"></span></summary>
+      <ol id="scene-list" class="scene-list"></ol>
+    </details>
+
+    <details id="metrics-box" class="panel" hidden>
+      <summary>refeval 지표</summary>
+      <div id="metrics" class="metrics"></div>
+    </details>
+
+    <details id="notes-box" class="panel" open>
+      <summary>메모 <span id="notes-count" class="muted"></span></summary>
+      <ol id="notes-list" class="notes-list"></ol>
+    </details>
+  </section>
+
+  <section class="table-col">
+    <div class="filters">
+      <input id="search" type="search" placeholder="검색 (EN / 공식 / substage / 메모)">
+      <label><input id="f-diff" type="checkbox"> 차이 큰 행만</label>
+      <label class="thr"><span id="thr-label">임계값</span>
+        <input id="f-thr" type="range" min="0" max="100" step="1" value="25">
+        <span id="thr-val" class="mono">25</span></label>
+      <label><input id="f-notes" type="checkbox"> 메모 있는 행만</label>
+      <label><input id="f-follow" type="checkbox" checked> 따라가기</label>
+      <span id="row-count" class="muted"></span>
+    </div>
+    <div id="table-scroll" class="table-scroll">
+      <table class="cues">
+        <thead><tr>
+          <th class="c-time">시간</th><th>EN</th><th>공식</th><th>substage</th><th class="c-score" id="score-head">유사도</th><th class="c-note">메모</th>
+        </tr></thead>
+        <tbody id="cue-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<dialog id="note-dialog">
+  <form method="dialog" id="note-form">
+    <h3>메모 <span id="note-dialog-time" class="mono muted"></span></h3>
+    <div id="note-dialog-cue" class="note-cue"></div>
+    <textarea id="note-dialog-text" rows="4" placeholder="이 행에 대한 피드백"></textarea>
+    <div class="dialog-actions">
+      <button value="cancel" type="submit" formnovalidate>취소</button>
+      <button value="save" type="submit" id="note-dialog-save">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="help-dialog">
+  <h3>단축키</h3>
+  <ul class="help-list">
+    <li><kbd>Space</kbd> 재생 / 일시정지</li>
+    <li><kbd>J</kbd> / <kbd>L</kbd> 이전 / 다음 큐로 이동</li>
+    <li><kbd>K</kbd> 현재 큐 다시 재생</li>
+    <li><kbd>1</kbd>–<kbd>9</kbd> substage arm 선택</li>
+    <li><kbd>N</kbd> 현재 위치에 메모</li>
+    <li><kbd>?</kbd> 이 도움말</li>
+  </ul>
+  <div class="dialog-actions">
+    <button onclick="document.getElementById('help-dialog').close()">닫기</button>
+  </div>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

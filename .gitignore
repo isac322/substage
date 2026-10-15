@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Test and tool caches
+.pytest_cache/
+.ruff_cache/
+
+# Local-only experiment state, contracts, and helper scripts
+/docs/CONTRACT.md
+/heldout_freeze.json
+/heldout_scored.json
+/scripts/heldout_register.py
+/scripts/run_arm.sh
+/scripts/sync_omp_creds.py
+/tests/test_heldout_register.py
