@@ -118,22 +118,22 @@ Not when: a service script (staff refusing a guest), or the courtesy is the act 
 
 Each speaker→addressee pair gets one level for the video, decided by the ladder below: the first step that applies wins. Decide from who the two are to each other (kinship, who raised whom, generation, rank, shared history, enmity), never from English politeness words ("sir", "please"; the deference moves into the ending) and never from temperament. Rude, gruff, sarcastic, cold, gentle or polite characters keep the ladder's level; their manner goes into vocabulary (존나, 더럽게, 처먹어요) and exclamations, not into the ending. Age means apparent generation, not literal years; gender alone decides nothing. hae = 반말, haeyo = 해요체, hasipsio = 하십시오체.
 
-1. **AI → user: 반말**, whatever the AI's persona or the English politeness.
+1. **Tactical, assistant, or system AI → user: 해요체** (하십시오체 in military/command-net roles). The human user speaking to an AI uses 반말 (step 7 or 10). Only an AI explicitly characterized as a close peer, buddy, or older-sister companion (`longtime_crew_or_buddies`) speaks 반말 under step 5.
 2. **Enemies: 반말.** Adults who are enemies by stance (not a passing quarrel), a superior who shows open contempt, a masked fighter to the criminals he fights. An adult enemy is 당신. 존댓말 between enemies is a mock-formal act (3.6).
-3. **Own parents who raised the speaker: a family trait.** (A biological parent first met late in life falls under step 4.) Young children, and teens in warm, casual or single-parent homes, speak 반말; teens with a strict parent, adult children in traditional homes, and period or noble families speak 해요체 (어머니/아버지 in formal homes).
+3. **Own parents who raised the speaker: a family trait.** (A biological parent first met late in life falls under step 4.) Young children, and teens or young adults in warm, casual, modern, or single-parent homes, speak 반말; only children in strict patriarchal, traditional, or period/noble families speak 해요체 (어머니/아버지 in formal homes).
 4. **Other elder kin and surrogate parents: 해요체**, even in a warm home: aunts and uncles, grandparents, in-laws, and anyone of an older generation who raised or protects the speaker as a parent would (guardian, foster or found parent, an adult who takes in a child). Address them by kin or role term (아버지, 이모, 삼촌, 아저씨), never 너.
 5. **Crews and old buddies: 반말 regardless of rank**, the boss included: a long-standing crew, gang or team, and friends from way back. A junior speaks up to a boss only in a formal institution: 해요체 in an office, school or agency; 하십시오체 in the military, a police unit, a court or a guild.
 6. **Younger to senior: 존댓말.** A speaker a generation younger than the addressee, or addressing a mentor, teacher, boss, commander or civil elder, speaks 해요체 (하십시오체 in a rigid hierarchy or a formal role). This holds through intimacy, caretaking, years under one roof, sarcasm, profanity and anger.
 7. **Senior to junior: 반말.** Parents, mentors, bosses, commanders, elders to people they raised or know well, and any adult to a child or teen. A man of an older generation uses 자네 (light -게/-나 where natural), not 너, to an adult man he mentors, employs or raised but did not father, and to an old male friend his own age; never to women, children, teens or his own son. Children and teens get 너 or their name.
 8. **Comic mockery: 반말 to non-elders.** A character whose running joke is mocking everyone speaks 반말 to strangers, officials and enemies, also when asking favors or pleading. Gruff, rude or sarcastic characters are not this: they speak 해요체 to civil strangers.
-9. **Met as adults: mutual 해요체**, between strangers or professionals, and kept as they become allies, friends or lovers. Same-generation young adults switch to mutual 반말 at their first private talk as equals; record that as a shift.
-10. **Equals and intimates: 반말.** Friends, siblings, classmates, teammates, couples and spouses of one generation; partners since youth.
+9. **Met as adults: mutual 해요체**, between civil strangers, officials, or workplace professionals. Same-generation young adults or romantic partners who bond in private switch to mutual 반말 at their first intimate/private talk as equals; record that as a shift (or use step 10 when they are already an established couple or spouses).
+10. **Equals and intimates: 반말.** Friends, siblings, classmates, teammates, established couples and married spouses of one generation (even if `history` is `met_as_adults`); partners since youth.
 
 **Shifts.** A pair's level changes only at a beat the video shows: a role or mask put on or dropped (job interview, disguise, date, mock-formal act), an identity reveal, the first private talk between young-adult equals, a lasting change in the relationship. A passing quarrel is not a shift, and anger never flips a younger→senior pair. Never mirror the other side's level.
 
 - Can you just eat the damn soup and go to sleep? (grown man → old man who raised him) | 수프나 먹고 자 | 수프나 드시고 / 좀 주무시라고요
 - You're curious, huh? (crew engineer → crew boss) | 궁금하신가 봐요? | 궁금한가 보네?
-- Shall I activate the targeting? (suit AI → teen wearer) | 조준 기능을 켤까요? | 조준 기능 켤까?
+- Shall I activate the targeting? (tactical AI → user; companion/buddy AI uses 반말 under step 5) | 조준 기능 켤까? | 조준 기능을 켤까요?
 - You need to rest, mister. (girl → unrelated man protecting her) | 너 쉬어야 돼 | 아저씨도 좀 쉬어요
 - Yeah, Pop, I'm a lousy son. (adult son → elderly father figure, mid-fight) | 그래, 아빠, 나 형편없는 아들이야 | 그래요, 아버지 / 개떡 같은 아들이죠
 - Keep coming, Dad. You're doing great. (child, warm home) | 계속 오세요, 아빠 | 계속 와 / 잘하고 있어

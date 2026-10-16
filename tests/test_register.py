@@ -454,3 +454,62 @@ def test_lite_snapshot_renders_level_address_and_shifts():
     assert "  may>peter: 반말 · 피터 · 너" in block
     assert "  peter>tony: 해요 · 아저씨" in block
     assert "    shift from c0040 until c0090: 반말 (first_private_talk_equals)" in block
+
+
+def test_tactical_ai_vs_companion_ai_and_paired_canonicalization():
+    tactical_ai = _edge(
+        "sys_ai", "user_a", "hae", step=1, relation="ai_to_user",
+        apparent_generation="same", history="none", ai_user=True,
+        basis="Tactical defense AI addressing its designated operator.",
+    )
+    user_to_tactical = _edge(
+        "user_a", "sys_ai", "hae", step=10, relation="ai_to_user",
+        apparent_generation="same", history="none", ai_user=True,
+        basis="Operator commands tactical AI utility.",
+    )
+    companion_ai = _edge(
+        "buddy_ai", "user_a", "hae", step=1, relation="ai_to_user",
+        apparent_generation="same", history="none", ai_user=True,
+        basis="Suit AI companion speaking to teen wearer.",
+    )
+    user_to_companion = _edge(
+        "user_a", "buddy_ai", "hae", step=10, relation="partner",
+        apparent_generation="same", history="none", ai_user=False,
+        basis="Teen wearer talks to suit AI companion.",
+    )
+    spouse_a = _edge(
+        "sp_a", "sp_b", "haeyo", step=9, relation="partner",
+        apparent_generation="same", history="met_as_adults",
+        basis="Married spouses.",
+    )
+    spouse_b = _edge(
+        "sp_b", "sp_a", "haeyo", step=9, relation="partner",
+        apparent_generation="same", history="met_as_adults",
+        basis="Married spouses.",
+    )
+    table = _table(tactical_ai, user_to_tactical, companion_ai, user_to_companion, spouse_a, spouse_b)
+    assert table.level_at("sys_ai", "user_a", "c0001") == "haeyo"
+    assert table.is_firm("sys_ai", "user_a", "c0001")
+    assert table.level_at("user_a", "sys_ai", "c0001") == "hae"
+    assert table.is_firm("user_a", "sys_ai", "c0001")
+    assert table.level_at("buddy_ai", "user_a", "c0001") == "hae"
+    assert table.is_firm("buddy_ai", "user_a", "c0001")
+    assert table.level_at("sp_a", "sp_b", "c0001") == "hae"
+    assert table.is_firm("sp_a", "sp_b", "c0001")
+
+
+def test_unmapped_acronym_ai_resolves_to_system_ai_haeyo_and_two_turn_dash_gate():
+    cues, obs = _observed([("A.I.S.", "Peter"), ("Peter", "A.I.S.")])
+    pairs = register.cue_pairs(_context_map(), cues, obs)
+    assert pairs["c0001"] == (register.SYSTEM_AI, "peter")
+    assert pairs["c0002"] == ("peter", register.SYSTEM_AI)
+    assert register.required_pairs(pairs) == []
+    table = _table(
+        _edge("peter", "tony", "hae", step=10, relation="peer", apparent_generation="same", history="raised_together"),
+        _edge("tony", "peter", "haeyo", step=1, relation="ai_to_user", apparent_generation="same", history="none", ai_user=True),
+    )
+    assert table.level_at(register.SYSTEM_AI, "peter", "c0001") == "haeyo"
+    assert table.level_at("peter", register.SYSTEM_AI, "c0002") == "hae"
+    gate = register.RegisterGate(table, {"c0001": (register.SYSTEM_AI, "peter"), "c0003": ("peter", "tony")})
+    assert gate.check("regen", ["c0001"], "드론 공격을 시작할 거야?", "드론 공격을 시작할까요?")
+    assert gate.check("regen", ["c0003"], "- 멋지다\n- 내 기능 한번 볼래?", "- 멋지다\n- 제 기능 보실래요?")

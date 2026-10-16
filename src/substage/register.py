@@ -80,7 +80,10 @@ LEVEL_KO = {"hae": "반말", "haera": "해라", "haeyo": "해요", "hasipsio": "
 # firm rule (decision.md §2.2): ladder steps with a fixed level (step 3 —
 # family trait — fixes none), and feature contradictions that point to an
 # earlier step than the one claimed
-_STEP_LEVEL: dict[int, str | None] = {1: "B", 2: "B", 3: None, 4: "J", 5: "B", 6: "J", 7: "B", 10: "B"}
+_STEP_LEVEL: dict[int, str | None] = {1: "J", 2: "B", 3: None, 4: "J", 5: "B", 6: "J", 7: "B", 10: "B"}
+SYSTEM_AI = "system_ai"
+_ACRONYM_AI_RE = re.compile(r"^(?:[A-Z]\.){2,}[A-Z]?\.?$")
+_SYSTEM_VOICE_WORDS = frozenset({"ai", "autopilot", "computer", "hud", "pa"})
 # a pronoun (너희 included) followed by up to three stacked particles:
 # 당신한테만, 너에게는, 너희한테서도
 _PRONOUN_PARTICLE = (
@@ -104,11 +107,21 @@ def same_level(a: str | None, b: str | None) -> bool:
     return a is not None and b is not None and binary(a) == binary(b) and binary(a) is not None
 
 
+def _is_companion_ai(edge: RegisterEdge, reverse: RegisterEdge | None = None) -> bool:
+    """True when an AI speaker is characterized as an intimate peer/buddy companion."""
+    if edge.history == "longtime_crew_or_buddies" or edge.relation in ("peer", "crew_buddy", "partner"):
+        return True
+    if reverse is not None and (reverse.relation == "partner" or "companion" in reverse.basis.lower()):
+        return True
+    basis_low = edge.basis.lower()
+    return "companion" in basis_low or "suit ai" in basis_low
+
+
 def _earliest_step(edge: RegisterEdge) -> int | None:
     """The first ladder step the edge's features point to, or None when no
     feature names a step."""
     if edge.ai_user or edge.relation == "ai_to_user":
-        return 1
+        return 5 if _is_companion_ai(edge) else 1
     if edge.stance != "civil" or edge.relation == "enemy":
         return 2
     if edge.relation == "own_parent":
@@ -121,8 +134,69 @@ def _earliest_step(edge: RegisterEdge) -> int | None:
         return 6
     if edge.relation in ("protege", "subordinate", "adult_to_kid", "own_child") or edge.apparent_generation == "speaker_older":
         return 7
+    if edge.relation in ("partner", "sibling", "crew_buddy") or (
+        edge.relation == "peer" and edge.apparent_generation == "same" and edge.history != "met_as_adults"
+    ):
+        return 10
     return None
 
+
+def canonicalize_edge(edge: RegisterEdge, *, reverse: RegisterEdge | None = None) -> RegisterEdge:
+    """Reconcile an edge's step and level with relational invariants."""
+    updates: dict[str, object] = {}
+    if edge.step == 1:
+        if _is_companion_ai(edge, reverse):
+            updates["step"] = 5
+            updates["relation"] = "crew_buddy"
+            updates["history"] = "longtime_crew_or_buddies"
+            updates["ai_user"] = False
+            if binary(edge.level) != "B":
+                updates["level"] = "hae"
+        elif binary(edge.level) != "J":
+            updates["level"] = "haeyo"
+    elif (
+        edge.step in (7, 10)
+        and (edge.ai_user or edge.relation == "ai_to_user")
+        and reverse is not None
+        and (reverse.step == 1 or reverse.ai_user or reverse.relation == "ai_to_user")
+    ):
+        updates["ai_user"] = False
+        if edge.relation == "ai_to_user":
+            updates["relation"] = "subordinate" if edge.step == 7 else "peer"
+        if binary(edge.level) != "B":
+            updates["level"] = "hae"
+    elif (
+        edge.relation == "own_parent"
+        and edge.history == "raised_by_addressee"
+        and reverse is not None
+        and reverse.relation in ("adult_to_kid", "own_child")
+    ):
+        basis_low = edge.basis.lower()
+        if not any(w in basis_low for w in ("adult", "traditional", "strict", "formal", "patriarch")):
+            updates["step"] = 3
+            updates["level"] = "hae"
+    elif (
+        edge.relation == "partner"
+        and edge.apparent_generation == "same"
+        and not edge.shifts
+        and reverse is not None
+        and reverse.relation == "partner"
+    ):
+        updates["step"] = 10
+        if binary(edge.level) != "B":
+            updates["level"] = "hae"
+    if edge.relation in ("elder_kin", "surrogate_parent") and edge.apparent_generation == "addressee_older" and edge.shifts:
+        kept = [sh for sh in edge.shifts if binary(sh.level) == "J" or sh.reason in ("role_on", "role_off")]
+        if len(kept) != len(edge.shifts):
+            updates["shifts"] = kept
+    return edge.model_copy(update=updates) if updates else edge
+
+
+def canonicalize_register_map(rmap: RegisterMap) -> RegisterMap:
+    """Canonicalize all directed edges in *rmap* using paired reverse context."""
+    by_pair = {(e.speaker, e.addressee): e for e in rmap.edges}
+    edges = [canonicalize_edge(e, reverse=by_pair.get((e.addressee, e.speaker))) for e in rmap.edges]
+    return rmap.model_copy(update={"edges": edges})
 
 def edge_firm(edge: RegisterEdge, cue_ids: Iterable[str]) -> bool:
     """The edge's level is beyond dispute: its ladder step fixes a level and
@@ -145,11 +219,10 @@ class RegisterTable:
     """Lookup over register.yaml with shifts applied in video cue order."""
 
     def __init__(self, rmap: RegisterMap, cue_order: Sequence[str]):
-        self.map = rmap
+        self.map = canonicalize_register_map(rmap)
         self._pos = {cid: i for i, cid in enumerate(cue_order)}
-        self._edges = {(e.speaker, e.addressee): e for e in rmap.edges}
+        self._edges = {(e.speaker, e.addressee): e for e in self.map.edges}
         self._firm = {k: edge_firm(e, self._pos) for k, e in self._edges.items()}
-
     @classmethod
     def load(cls, data_dir: Path) -> RegisterTable | None:
         """Table from a workspace data dir (register.yaml + cues.json for cue
@@ -169,8 +242,13 @@ class RegisterTable:
 
     def level_at(self, spk: str, adr: str, cue_id: str) -> str | None:
         e = self.edge(spk, adr)
-        return None if e is None else shifted_level(e.level, e.shifts, cue_id, self._pos)
-
+        if e is None:
+            if spk == SYSTEM_AI:
+                return "haeyo"
+            if adr == SYSTEM_AI:
+                return "hae"
+            return None
+        return shifted_level(e.level, e.shifts, cue_id, self._pos)
     def in_shift(self, spk: str, adr: str, cue_id: str) -> bool:
         """The cue lies inside one of the pair's shift spans."""
         e = self.edge(spk, adr)
@@ -185,8 +263,9 @@ class RegisterTable:
         return False
 
     def is_firm(self, spk: str, adr: str, cue_id: str) -> bool:
+        if spk == SYSTEM_AI or adr == SYSTEM_AI:
+            return True
         return self._firm.get((spk, adr), False) and not self.in_shift(spk, adr, cue_id)
-
     def address(self, spk: str, adr: str) -> tuple[str, str]:
         e = self.edge(spk, adr)
         return ("none", "none") if e is None else (e.pronoun, e.vocative)
@@ -285,6 +364,16 @@ def name_resolver(context_map: ContextMap) -> Callable[[str | None], str | None]
 
     return resolve
 
+def _is_system_ai_speaker(name: str | None) -> bool:
+    """True for unmapped acronym or system/HUD interface speaker labels."""
+    if not name or not name.strip():
+        return False
+    s = name.strip()
+    if _ACRONYM_AI_RE.match(s):
+        return True
+    toks = _words(s)
+    return bool(toks) and any(t in _SYSTEM_VOICE_WORDS for t in toks)
+
 
 def cue_pairs(
     context_map: ContextMap,
@@ -294,21 +383,26 @@ def cue_pairs(
     """cue id -> (speaker id, addressee id) for addressed lines: the viewing
     observation names the speaker (else the SDH speaker hint) and addressee,
     both resolved to video-map character ids (:func:`name_resolver`); the
-    addressee may be ``group`` (audience, crowd, press, viewers, everyone…).
+    addressee may be ``group`` (audience, crowd, press, viewers, everyone...).
+    Unmapped acronym/system AI voices resolve to ``system_ai``.
     Lines to nobody, oneself or unresolved names are skipped."""
     rid = name_resolver(context_map)
     obs = _flat_observations(observations)
     out: dict[str, Pair] = {}
     for c in cues:
         o = obs.get(c.id)
+        raw_spk = o.speaker if o and o.speaker else c.speaker_hint
         spk = rid(o.speaker if o and o.speaker else None) or rid(c.speaker_hint)
+        if spk is None and _is_system_ai_speaker(raw_spk):
+            spk = SYSTEM_AI
         if spk is None or o is None or not o.addressee:
             continue
         adr = GROUP if is_group(o.addressee) else rid(o.addressee)
+        if adr is None and _is_system_ai_speaker(o.addressee):
+            adr = SYSTEM_AI
         if adr is not None and adr != spk:
             out[c.id] = (spk, adr)
     return out
-
 
 def cue_turn_pairs(
     context_map: ContextMap,
@@ -386,11 +480,14 @@ def required_pairs(
     def first(p: Pair) -> int:
         return min((pos.get(c, end) for c in (*det.get(p, ()), *llm.get(p, ()))), default=end)
 
-    req = sorted((p for p, n in counts.items() if n >= _MIN_LINES), key=first)
+    req = sorted(
+        (p for p, n in counts.items() if n >= _MIN_LINES and SYSTEM_AI not in p),
+        key=first,
+    )
     seen = set(req)
     for spk, adr in list(req):
         rev = (adr, spk)
-        if adr != GROUP and rev not in seen and counts.get(rev, 0) >= 1:
+        if adr != GROUP and SYSTEM_AI not in rev and rev not in seen and counts.get(rev, 0) >= 1:
             req.append(rev)
             seen.add(rev)
     return req
@@ -577,9 +674,11 @@ def build_register(
         )
     if missing:
         logger.warning("s2r: pairs left without an edge: %s", ", ".join(f"{s}>{a}" for s, a in missing))
-    return RegisterMap(
-        edges=[got[p] for p in required if p in got],
-        required_pairs=[f"{s}>{a}" for s, a in required],
+    return canonicalize_register_map(
+        RegisterMap(
+            edges=[got[p] for p in required if p in got],
+            required_pairs=[f"{s}>{a}" for s, a in required],
+        )
     )
 
 
@@ -773,9 +872,15 @@ class RegisterGate:
             if not turn_levels_match(new[0], table_level, old[0]):
                 reason = "level"
         else:
-            # dash lines: speakers per turn are unknown, so only the old levels count
+            rev_level = (
+                self.table.level_at(pair[1], pair[0], cue_ids[0])
+                if use_table and pair and self.table is not None and cue_ids
+                else None
+            )
             for i, lvl in enumerate(new):
-                allowed = [old[i]] if len(old) == len(new) else old
+                allowed = [old[i]] if len(old) == len(new) else list(old)
+                if len(new) == 2 and table_level is not None and rev_level is not None:
+                    allowed.append(table_level if i == 0 else rev_level)
                 if lvl is not None and not any(same_level(lvl, a) for a in allowed):
                     reason = "level"
                     break

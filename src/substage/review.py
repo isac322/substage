@@ -32,7 +32,8 @@ from .models import (
     SceneTranslation,
     Snapshot,
 )
-from .register import render_scene_register
+from .levels import addressed_levels, speaker_turns
+from .register import RegisterTable, binary, render_scene_register, same_level
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
 from .translate import _NON_TRANSLATED, _fmt_ms
@@ -194,17 +195,82 @@ def _obs_by_id(observations) -> dict[str, CueObservation]:
     return out
 
 
+def _reverse_level_map(
+    levels: dict[str, tuple[str, str]] | None,
+    ws: Workspace | None = None,
+) -> dict[tuple[str, str], str]:
+    """(spk, adr) -> latest level string from *levels* and optional workspace table."""
+    rev: dict[tuple[str, str], str] = {}
+    if ws is not None:
+        table = RegisterTable.load(ws.data_dir)
+        if table is not None:
+            for e in table.map.edges:
+                rev[(e.speaker, e.addressee)] = e.level
+    for pair, lvl in (levels or {}).values():
+        if ">" in pair and "/" not in pair and binary(lvl) is not None:
+            s, a = pair.split(">", 1)
+            rev.setdefault((s, a), lvl)
+            if s == "system_ai":
+                rev.setdefault((a, s), "hae")
+    return rev
+
+
+def _effective_cue_level(
+    c: Cue | None,
+    ko_txt: str,
+    pair: str,
+    lvl: str,
+    rev_map: dict[tuple[str, str], str],
+) -> tuple[str, str]:
+    """Expand a 2-turn dash cue into ``(spk>adr/adr>spk, T1:lvl1/T2:lvl2)`` when asymmetric."""
+    if ">" in pair and "/" not in pair and binary(lvl) is not None:
+        en_turns = len(speaker_turns(c.text)) if c is not None else 1
+        ko_turns = len(speaker_turns(ko_txt)) if ko_txt else 1
+        if en_turns == 2 or ko_turns == 2:
+            s, a = pair.split(">", 1)
+            rev_lvl = rev_map.get((a, s))
+            if rev_lvl is not None and not same_level(lvl, rev_lvl):
+                return (f"{s}>{a}/{a}>{s}", f"T1:{lvl}/T2:{rev_lvl}")
+    return (pair, lvl)
+
+
+def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
+    """True when *ko_txt* has a clear morphological ending that violates *target_spec*."""
+    if not ko_txt or not target_spec or target_spec == "-":
+        return False
+    turns = list(addressed_levels(ko_txt))
+    if target_spec.startswith("T1:") and "/T2:" in target_spec:
+        t1_part, t2_part = target_spec.split("/T2:", 1)
+        w1, w2 = t1_part.removeprefix("T1:"), t2_part
+        if len(turns) == 2:
+            v1 = turns[0] is not None and binary(w1) is not None and not same_level(turns[0], w1)
+            v2 = turns[1] is not None and binary(w2) is not None and not same_level(turns[1], w2)
+            return v1 or v2
+        if len(turns) == 1 and turns[0] is not None:
+            return not (same_level(turns[0], w1) or same_level(turns[0], w2))
+        return False
+    if binary(target_spec) is None:
+        return False
+    if len(speaker_turns(ko_txt)) == 1:
+        known = [t for t in turns if t is not None]
+        if known:
+            return not same_level(known[-1], target_spec)
+    return False
+
+
 def _cue_lines(
     cues: list[Cue],
     ko_by_id: dict[str, str],
     observations,
     mark: set[str] | None = None,
     levels: dict[str, tuple[str, str]] | None = None,
+    ws: Workspace | None = None,
 ) -> str:
     """Rows ``id | spk>adr | LEVEL | kind | EN | KO``; *levels* maps cue id ->
     (pair, table level at the cue) (:func:`substage.register.cue_levels`)."""
     obs_by_id = _obs_by_id(observations)
     levels = levels or {}
+    rev_map = _reverse_level_map(levels, ws)
     rows = []
     for c in cues:
         ko = ko_by_id.get(c.id, "")
@@ -222,7 +288,8 @@ def _cue_lines(
             kind = "dialogue"
         flag = "*" if mark and c.id in mark else " "
         shown = ko if ko else "∅"
-        pair, level = levels.get(c.id, ("-", "-"))
+        raw_pair, raw_level = levels.get(c.id, ("-", "-"))
+        pair, level = _effective_cue_level(c, ko, raw_pair, raw_level, rev_map)
         rows.append(f"{flag}{c.id} | {pair} | {level} | kind={kind} | EN: {en} | KO: {shown}")
     return "\n".join(rows)
 
@@ -419,6 +486,7 @@ def diagnose_with_decisions(
     items carrying the structured diagnosis vector for surgical regeneration.
     """
     levels = levels or {}
+    rev_map = _reverse_level_map(levels, ws)
     scene_images = scene_images or {}
     cp = Checkpoints(ws, "review")
     flags: list[ReadFlag] = []
@@ -440,7 +508,8 @@ def diagnose_with_decisions(
                 cid = c.id
                 en_txt = c.text.replace("\n", " / ")
                 ko_txt = ko.get(cid, "")
-                pair, lvl = levels.get(cid, ("-", "-"))
+                raw_pair, raw_lvl = levels.get(cid, ("-", "-"))
+                pair, lvl = _effective_cue_level(c, ko_txt, raw_pair, raw_lvl, rev_map)
                 cues_state.append({
                     "id": cid,
                     "pair": pair,
@@ -516,6 +585,7 @@ def diagnose_with_decisions(
             images=imgs,
         )
         chunk_flags: list[ReadFlag] = []
+        cues_meta = {item_c["id"]: item_c for item_c in state_obj.get("cues", [])}
         for c in sub:
             cid = c.id
             p_om = float((answers.get(f"{cid}_omission") or {}).get("noul", 0.0))
@@ -524,6 +594,9 @@ def diagnose_with_decisions(
             p_rg = float((answers.get(f"{cid}_register") or {}).get("noul", 0.0))
             p_vb = float((answers.get(f"{cid}_verbose") or {}).get("noul", 0.0))
             p_da = float((answers.get(f"{cid}_dash_err") or {}).get("noul", 0.0))
+            meta = cues_meta.get(cid) or {}
+            if _violates_target_level(str(meta.get("ko", "")), str(meta.get("target_level", "-"))):
+                p_rg = max(p_rg, 0.95)
             reasons: list[str] = []
             if p_om >= threshold:
                 reasons.append(f"omission/truncation(P={p_om:.2f}: complete the missing predicate/point)")
@@ -603,6 +676,7 @@ def filter_edits_with_decisions(
     if not candidates:
         return []
     levels = levels or {}
+    rev_map = _reverse_level_map(levels, ws)
     cp = Checkpoints(ws, "review")
     accepted: list[CueEdit] = []
     for idx in range(0, len(candidates), 5):
@@ -615,7 +689,8 @@ def filter_edits_with_decisions(
             en_txt = c.text.replace("\n", " / ")
             curr_ko = ko.get(cid, "").strip()
             cand_ko = e.new_ko.strip()
-            pair, lvl = levels.get(cid, ("-", "-"))
+            raw_pair, raw_lvl = levels.get(cid, ("-", "-"))
+            pair, lvl = _effective_cue_level(c, curr_ko, raw_pair, raw_lvl, rev_map)
             cases.append({
                 "id": cid,
                 "pair": pair,
@@ -661,8 +736,16 @@ def filter_edits_with_decisions(
             continue
         answers = client.decide(stage="s4b_gate", state=state_obj, questions=questions)
         chunk_keep: list[str] = []
+        cases_by_id = {item_c["id"]: item_c for item_c in cases}
         for e in chunk:
             cid = e.cue_id
+            case_meta = cases_by_id.get(cid) or {}
+            target_lvl = str(case_meta.get("target_level", "-"))
+            curr_ko_s = str(case_meta.get("current_ko", ""))
+            cand_ko_s = str(case_meta.get("candidate_ko", ""))
+            if _violates_target_level(cand_ko_s, target_lvl):
+                continue
+            fixed_reg_violation = _violates_target_level(curr_ko_s, target_lvl) and not _violates_target_level(cand_ko_s, target_lvl)
             d_omiss = float((answers.get(f"{cid}_cand_omiss") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_omiss") or {}).get("noul", 0.0))
             d_mist = float((answers.get(f"{cid}_cand_mistrans") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_mistrans") or {}).get("noul", 0.0))
             d_reg = float((answers.get(f"{cid}_cand_reg") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_reg") or {}).get("noul", 0.0))
@@ -670,8 +753,8 @@ def filter_edits_with_decisions(
             d_spk = float((answers.get(f"{cid}_cand_spoken") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_spoken") or {}).get("noul", 0.0))
             if (
                 d_omiss <= 0.05
-                and d_verb <= 0.08
-                and (d_mist <= -0.15 or d_reg <= -0.15 or d_verb <= -0.15 or d_spk >= 0.08)
+                and d_verb <= (0.15 if fixed_reg_violation else 0.08)
+                and (fixed_reg_violation or d_mist <= -0.15 or d_reg <= -0.15 or d_verb <= -0.15 or d_spk >= 0.08)
             ):
                 chunk_keep.append(cid)
                 accepted.append(e)
@@ -722,7 +805,7 @@ def regenerate_flagged(
             _REGEN_TASK.format(sid=sid)
             + (ctx + "\n\n" if ctx else "")
             + "## LINES (* = flagged; id | speaker>addressee | LEVEL | kind | EN | current KO)\n"
-            + _cue_lines(scene_cues, ko, observations, mark=flagged, levels=levels)
+            + _cue_lines(scene_cues, ko, observations, mark=flagged, levels=levels, ws=ws)
             + "\n\n## FLAGGED PROBLEMS\n" + problems
         )
         h = input_hash(
@@ -753,7 +836,7 @@ def regenerate_flagged(
             cp.put(key, h, batch)
         return batch.edits
 
-    if len(sorted_scenes) <= 1:
+    if len(sorted_scenes) <= 2:
         for item in sorted_scenes:
             edits.extend(_run_regen(item))
     else:
