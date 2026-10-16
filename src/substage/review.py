@@ -1220,12 +1220,19 @@ def repair_pragmatic_literal_traps(
     levels: dict[str, tuple[str, str]] | None = None,
     trap_threshold: float = 0.50,
     extra_risk_cues: dict[str, str] | None = None,
+    proxy_video: Path | None = None,
 ) -> list[CueEdit]:
     """Pragma-DPAF 3-Stage Situational, Nonverbal, and Pragmatic Implicature Repair."""
+    import subprocess
+    from . import media
+
     levels = levels or {}
     rev_map = _reverse_level_map(levels, ws)
     obs_map = _obs_by_id(observations)
     extra_risk_cues = extra_risk_cues or {}
+    frames_dir = ws.cache_dir / "pragma_frames"
+    if proxy_video is not None and proxy_video.is_file():
+        frames_dir.mkdir(parents=True, exist_ok=True)
 
     routed_scenes: list[tuple[Scene, dict[str, str]]] = []
     for sc in scenes:
@@ -1287,9 +1294,36 @@ def repair_pragmatic_literal_traps(
             f"   - Example 6 (`conversational_implicature`): 'Where else do you put one out?' (about putting cigarettes out on skin) -> Trap: '딴 데도 꺼요?' -> Anchor: '내 몸 말고 딴 데도 꺼? / 난 온몸이 재떨이야'.\n"
             f"3. If a cue is genuinely literal in context, set `category='literal'` and keep Current KO unchanged. For non-literal cues, provide the natural spoken Korean subtitle in `translations` (<=14 chars/line, <=2 lines, preserving exact `target_level` and '- ' dashes)."
         )
+        scene_frames: list[Path] = []
+        if proxy_video is not None and proxy_video.is_file():
+            for r_cid in sorted(risk_map)[:3]:
+                if r_cid not in cues_by_id:
+                    continue
+                rc = cues_by_id[r_cid]
+                mid_s = (rc.start_ms + rc.end_ms) / 2000.0
+                jpg_p = frames_dir / f"{sc.id}_{r_cid}.jpg"
+                if not jpg_p.is_file():
+                    subprocess.run(
+                        [
+                            media.ffmpeg_bin(),
+                            "-v", "error",
+                            "-ss", f"{mid_s:.2f}",
+                            "-i", str(proxy_video),
+                            "-frames:v", "1",
+                            "-vf", "scale=-2:360",
+                            "-y", str(jpg_p),
+                        ],
+                        check=False,
+                    )
+                if jpg_p.is_file() and jpg_p.stat().st_size > 0:
+                    scene_frames.append(jpg_p)
         try:
             av_batch = av_helper_client.generate(
-                stage=_STAGE_REGEN, prompt=stage1_prompt, schema=_PragmaCardAndKoBatch, system=sys_prompt
+                stage=_STAGE_REGEN,
+                prompt=stage1_prompt,
+                schema=_PragmaCardAndKoBatch,
+                system=sys_prompt,
+                images=scene_frames,
             )
         except GeminiBlocked:
             return []

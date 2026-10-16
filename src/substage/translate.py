@@ -447,10 +447,20 @@ _PRAGMA_IMPLICATURE_RE = re.compile(
     r"well,\s+maybe\s+not\s+the\s+most|"
     r"well,\s+he\s+better|"
     r"tell\s+the\s+difference|"
-    r"army\s+of\s+the\s+insane)\b",
+    r"army\s+of\s+the\s+insane|"
+    r"you\s+come\s+for\s+me.*you\s+come\s+for|"
+    r"it\s+says,\s*['\"]?ibuprofen|"
+    r"endeared\s+herself\s+to\s+him|"
+    r"spanked\s+it\s+to|"
+    r"how\s+you\s+screwed\s+up\s+everything|"
+    r"not\s+what\s+it\s+looks\s+like|"
+    r"not\s+for\s+me\b|"
+    r"how\s+tough\s+can\s+he\s+be|"
+    r"with\s+a\s+name\s+like|"
+    r"is\s+that\s+a\s+band|"
+    r"showed\s+up\s+in\s+the\s+elevator)\b",
     re.IGNORECASE,
 )
-
 def detect_pragmatic_risk_cues(
     cues: Sequence[Cue],
     obs_by_id: dict[str, CueObservation] | None = None,
