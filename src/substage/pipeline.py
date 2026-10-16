@@ -1085,9 +1085,13 @@ def run(
     decisions_cfg = getattr(settings, "decisions_model", None)
     lean_decisions_pipeline = bool(
         decisions_cfg
-        and plan is not None
-        and plan.architecture in {Architecture.DIRECT_AV, Architecture.MIXED}
-        and not plan.semantic_passes
+        and (
+            plan is None
+            or (
+                plan.architecture in {Architecture.DIRECT_AV, Architecture.MIXED}
+                and not plan.semantic_passes
+            )
+        )
     )
     if lean_decisions_pipeline and stop_after != "timeline":
         timeline = Timeline(scenes=[])
@@ -1141,7 +1145,7 @@ def run(
     ost = _ck(
         ck,
         "ost",
-        input_hash(_Observations(items=observations), _Cues(items=cues), _Scenes(items=scenes), *view_tag),
+        input_hash(_Observations(items=observations), _Cues(items=cues), _Scenes(items=scenes), "ost-mmss-norm-v2", *view_tag),
         _Cues,
         lambda: _Cues(items=translate.ost_cues(observations, cues, scenes)),
     ).items
