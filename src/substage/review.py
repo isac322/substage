@@ -995,13 +995,14 @@ def repair_span_calques(
     *,
     levels: dict[str, tuple[str, str]] | None = None,
     calque_threshold: float = 0.25,
+    excluded_cues: set[str] | None = None,
 ) -> list[CueEdit]:
     """Detect right-branching English multi-cue spans with SVO calque and jointly invert into Korean SOV."""
     levels = levels or {}
     rev_map = _reverse_level_map(levels, ws)
     obs_map = _obs_by_id(observations)
     candidate_spans: list[CueSpan] = []
-    seen_cues: set[str] = set()
+    seen_cues: set[str] = set(excluded_cues or ())
     for sc in scenes:
         sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
         idx_c = 0
@@ -1101,8 +1102,10 @@ def repair_span_calques(
                 return None
             if res.strategy == "preserve_reveal_order":
                 return None
-            raw1 = res.c1_ko.strip() if curr1.lstrip().startswith("-") else " ".join(res.c1_ko.splitlines())
-            raw2 = res.c2_ko.strip() if curr2.lstrip().startswith("-") else " ".join(res.c2_ko.splitlines())
+            c1_clean = res.c1_ko.replace("\\n", "\n").strip()
+            c2_clean = res.c2_ko.replace("\\n", "\n").strip()
+            raw1 = c1_clean if curr1.lstrip().startswith("-") else " ".join(c1_clean.splitlines())
+            raw2 = c2_clean if curr2.lstrip().startswith("-") else " ".join(c2_clean.splitlines())
             n1 = rewrap(raw1, 14, 12)
             n2 = rewrap(raw2, 14, 12)
             if _is_valid_sov_rewrite(curr1, curr2, n1, n2, tl1, tl2, require_open_c1=True):
