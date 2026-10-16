@@ -573,11 +573,30 @@ def diagnose_with_decisions(
             key = f"clef_diag:{scene.id}:{c_idx}"
             tasks.append((key, h, sub, state_obj, questions, imgs))
 
+    def _ensure_reg_flags(base_flags: list[ReadFlag], sub: list[Cue], state_obj: dict[str, Any]) -> list[ReadFlag]:
+        by_cid = {f.cue_id: f for f in base_flags}
+        cues_meta = {item_c["id"]: item_c for item_c in state_obj.get("cues", [])}
+        out: list[ReadFlag] = []
+        reg_note = "register_mismatch(P=0.95: keep target speech level and natural vocative)"
+        for c in sub:
+            cid = c.id
+            meta = cues_meta.get(cid) or {}
+            viol = _violates_target_level(str(meta.get("ko", "")), str(meta.get("target_level", "-")))
+            existing = by_cid.get(cid)
+            if existing is not None:
+                if viol and "register_mismatch" not in existing.problem:
+                    out.append(ReadFlag(cue_id=cid, problem=f"{existing.problem}; {reg_note}"))
+                else:
+                    out.append(existing)
+            elif viol:
+                out.append(ReadFlag(cue_id=cid, problem=f"[6-Axis Diagnosis] {reg_note}"))
+        return out
+
     def _run_diag(item: tuple[str, str, list[Cue], dict[str, Any], dict[str, dict[str, Any]], list[Path]]) -> list[ReadFlag]:
         key, h, sub, state_obj, questions, imgs = item
         cached = cp.get(key, h, _FlagBatch)
         if cached is not None:
-            return cached.flags
+            return _ensure_reg_flags(cached.flags, sub, state_obj)
         answers = client.decide(
             stage=_STAGE_BLIND,
             state=state_obj,
