@@ -400,14 +400,25 @@ Why: a long single line makes the eye travel, and the line break already does th
 - Sam! What was the first rule? | 샘, 첫 번째 규칙이 뭐였지? | 샘! / 첫 번째 규칙이 뭐지?
 Reading budget: about 4 Korean characters per second of screen time (spaces not counted) is typical, about 6 is busy, over 8 is rare. Slow, formal videos sit lower.
 
-### 8.1 Ellipsis "..." only for a real cut-off, trail-off or interruption, once per cue, at the end of the words it cuts.
-Write three periods "...". Never open a line or a cue with it, and never copy English "..." that only shows a sentence continuing: when a sentence runs across two cues, finish cue 1 with a connective ending and write no dots on either side. An English "--" interruption becomes "...". A cut-off insult is often better completed (You big... → 이 자식이). Aim for 5% of cues or fewer.
-Why: in Korean "..." reads as hesitation the actor never had, and costs characters.
-Not when: a cut-off threat, a deliberate pause before a punchline, a stammer.
-- So you gotta hold onto love… | 그러니 사랑을... | 그러니까 사랑을 / 붙잡으란 말야
-- In the studio today... / ...singer Sam Lee! (two cues) | 오늘 스튜디오엔... / ...가수 샘 리! | 오늘 스튜디오엔 / 가수 샘 리가 나왔어요!
-- Oh, gosh, I'm sorry. I thought this was a-- | 미안, 이게 그건 줄 알고 | 맞다, 미안해 / 내가 또...
-
+### 8.1 Multi-cue sentences, Korean SOV inversion across cues, and ellipsis "...":
+Write three periods "..." only for a real cut-off, trail-off or interruption, once per cue, at the end of the words it cuts. Never open a line or a cue with "...", and never copy English "..." that only shows a sentence continuing. Aim for 5% of cues or fewer.
+When one English sentence runs across two consecutive cues, decide by its syntactic structure:
+1. **Right-branching English modifier / PP in Cue 2 (`REVERSE_SOV_PERMITTED` -> Mandatory Korean SOV Reordering)**:
+   - English (SVO, head-initial) puts the main verb and object in Cue 1 and a prepositional phrase (`with / for / from / in / into / between / of / by / through`), relative clause, or instrument in Cue 2. Korean (SOV, head-final) MUST place modifiers and postpositional phrases BEFORE the main verb.
+   - NEVER finish the English main verb at the end of Cue 1 and leave Cue 2 as an English-order afterthought fragment (`그것도 ~랑!`, `~에서요`, `~까지요`).
+   - Instead, move the main verb from English Cue 1 to the end of Korean Cue 2:
+     * **Full SOV Inversion**: Put Cue 2's modifier/PP + noun in Cue 1 (ending with an adnominal/case particle `~의`, `~에서`, `~로`, `~에`, `~하나`), and put Cue 1's main verb predicate in Cue 2.
+       - You couldn't even save a relationship… / with a goddamn stripper! | 연애 하나 못 지킨 놈이! / 그것도 망할 스트리퍼랑! | 스트리퍼 따위와의 관계 하나 / 못 지켜내는 새끼가!
+       - you are under arrest by the TVA… / for too many crimes to list. | TVA가 당신을 체포한다 / 죄목은 셀 수도 없다 | 시간 변동 관리국에서 수많은 범죄 혐의로 / 당신을 체포한다
+       - To distribute gene therapy discreetly through everything... / from sweet drinks to breakfast cereals. | 유전자 치료제를 몰래 섞었어 / 단 음료부터 아침 시리얼까지 | 음료수부터 시리얼까지 모든 식품에 / 유전자 치료를 적용해 몰래 퍼뜨렸고
+       - Okay, so how do we calculate linear acceleration... / Between points a and b? | 선가속도는 어떻게 계산하지? / A와 B 지점 사이에서? | 그럼 A와 B 사이의 / 선가속도 계산법은?
+     * **Verb Deferral (when Cue 1 has a 2-speaker `-` dash or long subject/object)**: Leave Cue 1's object open (`~을/를/은/는`) and put Cue 2's modifier + Cue 1's main verb in Cue 2.
+       - -It looks great. -And you decimated dozens of my men… / with the exhumed corpse of a hero. | - 보기 좋네 - 내 부하들을 몰살했지 / 영웅의 시체를 파내서 | - 보기 좋잖아 - 내 부하 열댓 명을 / 파묘한 영웅의 유골로 죽이고
+2. **Dramatic reveals, hesitant pauses, and coordinate clauses (`DRAMATIC_REVEAL_KEEP_ORDER` -> Preserve Order)**:
+   - When Cue 1 is a hesitant setup (`Said I was...`, `speak to this...`) before a 1-2 word reveal/name in Cue 2 (`unstable.`, `Spider-Man.`), or when Cue 2 is a coordinate clause (`and / but / so`) or a `that / if` clause after a self-contained statement: preserve the chronological cue order so the punchline/reveal is never spoiled in Cue 1.
+   - So you gotta hold onto love… | 그러니 사랑을... | 그러니까 사랑을 / 붙잡으란 말야
+   - Said I was... / unstable. (two cues, reveal) | 불안정하다고... / 내가 그랬지 | 내가... / 불안정하다고 했지
+   - Oh, gosh, I'm sorry. I thought this was a-- | 미안, 이게 그건 줄 알고 | 맞다, 미안해 / 내가 또...
 ### 8.2 Speaker dashes only when two distinct speakers remain in the same displayed cue.
 Use "- " with a space on both lines, one speaker per line. Never put a dash inside one speaker's turn or on a one-line cue. One speaker's long speech or multiple sentences still gets no speaker dashes. If an incidental backchannel is omitted, or the speakers' turns appear in separate cues, leave each single-speaker cue without dashes. An unknown speaker label alone does not establish a speaker change.
 Keep an essential answer to a question, or agreement that changes what the viewer understands, as the responding speaker's own turn; its wording may be compressed. A word such as "Yeah" or "Mm-hmm" can be an answer, meaningful agreement or an incidental backchannel: decide by its function in context, never by the word alone. You may omit a backchannel that adds no meaning needed to follow the exchange.

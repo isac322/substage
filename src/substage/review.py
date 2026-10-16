@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources
@@ -36,8 +37,8 @@ from .levels import addressed_levels, speaker_turns
 from .register import RegisterTable, binary, render_scene_register, same_level
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
-from .translate import _NON_TRANSLATED, _fmt_ms
-from .validate import ost_kind
+from .translate import CueSpan, _NON_TRANSLATED, _fmt_ms, detect_syntactic_spans
+from .validate import ost_kind, rewrap
 
 WINDOW_SCENES = 3
 
@@ -891,3 +892,247 @@ def regenerate_flagged(
             for sc_edits in ex.map(_run_regen, sorted_scenes):
                 edits.extend(sc_edits)
     return edits
+
+
+_FINITE_CLOSE_RE = re.compile(
+    r"(?:잖아|잖아요|다|란다|단다|네|네요|군|군요|구나|구먼|래|래요|대|대요|답니다|"
+    r"어요|아요|해요|지요|죠|습니다|ㅂ니다|소|오|까|까요|니|냐|거든|거든요|거야|거예요|"
+    r"건가|건가요|테야|텐데|텐데요|말이야|말이죠|일걸|일걸요|할걸|할걸요|했지|했죠|됐지|됐죠|"
+    r"있지|있죠|없지|없죠|맞지|맞죠|알지|알죠|보지|보죠|주지|주죠)[.?!…\"'’”)]*$"
+)
+_DANGLING_PP_RE = re.compile(
+    r"(?:랑|이랑|랑도|이랑도|랑요|이랑요|와|과|와도|과도|에서|에서요|에선|에선요|"
+    r"으로|로|으로도|로도|까지|까지요|부터|한테|한테요|에게|에게요|사이에서|"
+    r"통해서요|소리를요|말이야|말이지)[.?!…\"'’”)]*$"
+)
+
+
+class _AVSpanPairEdit(BaseModel):
+    strategy: str = Field(description="One of: 'full_sov_inversion', 'verb_deferral_sov', 'preserve_reveal_order'")
+    c1_ko: str
+    c2_ko: str
+
+
+class _HybridCoTSpanPairEdit(BaseModel):
+    strategy: str = Field(description="One of: 'full_sov_inversion', 'verb_deferral_sov', 'preserve_reveal_order'")
+    unified_sov_ko: str
+    c1_ko: str
+    c2_ko: str
+
+
+def _last_turn_text(ko_txt: str) -> str:
+    turns = speaker_turns(ko_txt)
+    return turns[-1].strip() if turns else ko_txt.strip()
+
+
+def _has_cross_cue_duplicate(ko1: str, ko2: str) -> bool:
+    w1 = {w.strip(".,?!…\"'’”)-") for w in ko1.split() if len(w.strip(".,?!…\"'’”)-")) >= 3}
+    w2 = {w.strip(".,?!…\"'’”)-") for w in ko2.split() if len(w.strip(".,?!…\"'’”)-")) >= 3}
+    return bool(w1 & w2)
+
+
+def _is_svo_premature_verb_close(ko1: str, ko2: str) -> bool:
+    """True when Cue 1 closes with a finite verb or Cue 2 ends with a dangling PP/duplicate."""
+    last1 = _last_turn_text(ko1)
+    last2 = _last_turn_text(ko2)
+    if _has_cross_cue_duplicate(ko1, ko2):
+        return True
+    if _FINITE_CLOSE_RE.search(last1) or _DANGLING_PP_RE.search(last2):
+        return True
+    return False
+
+
+def _is_valid_sov_rewrite(
+    curr1: str,
+    curr2: str,
+    new1: str,
+    new2: str,
+    target_lvl1: str,
+    target_lvl2: str,
+    *,
+    require_open_c1: bool = True,
+) -> bool:
+    """Gate B: deterministic physical, dash, register, and SOV open-head check."""
+    lines1 = [l for l in new1.splitlines() if l.strip()]
+    lines2 = [l for l in new2.splitlines() if l.strip()]
+    if not lines1 or not lines2 or len(lines1) > 2 or len(lines2) > 2:
+        return False
+    if any(len(l) > 16 for l in lines1 + lines2):
+        return False
+    if curr1.lstrip().startswith("-") != new1.lstrip().startswith("-"):
+        return False
+    if curr2.lstrip().startswith("-") != new2.lstrip().startswith("-"):
+        return False
+    if _violates_target_level(new1, target_lvl1) or _violates_target_level(new2, target_lvl2):
+        return False
+    if _has_cross_cue_duplicate(new1, new2):
+        return False
+    if require_open_c1:
+        last1 = _last_turn_text(new1)
+        last2 = _last_turn_text(new2)
+        if _FINITE_CLOSE_RE.search(last1) or _DANGLING_PP_RE.search(last2):
+            return False
+    return True
+
+
+def repair_span_calques(
+    ws: Workspace,
+    txt_client: Any,
+    gate_client: ClefDecisionsClient,
+    scenes: list[Scene],
+    cues_by_id: dict[str, Cue],
+    ko: dict[str, str],
+    observations,
+    *,
+    levels: dict[str, tuple[str, str]] | None = None,
+    calque_threshold: float = 0.48,
+) -> list[CueEdit]:
+    """Detect right-branching English multi-cue spans with SVO calque and jointly invert into Korean SOV."""
+    levels = levels or {}
+    rev_map = _reverse_level_map(levels, ws)
+    obs_map = _obs_by_id(observations)
+    candidate_spans: list[CueSpan] = []
+    seen_spans: set[str] = set()
+    for sc in scenes:
+        sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+        sp_map = detect_syntactic_spans(sc_cues, obs_map)
+        for sp in sp_map.values():
+            if sp.policy == "REVERSE_SOV_PERMITTED" and sp.span_id not in seen_spans:
+                c1_id, c2_id = sp.cue_ids
+                k1, k2 = ko.get(c1_id, "").strip(), ko.get(c2_id, "").strip()
+                if k1 and k2 and _is_svo_premature_verb_close(k1, k2):
+                    seen_spans.add(sp.span_id)
+                    candidate_spans.append(sp)
+    if not candidate_spans:
+        return []
+
+    # Role-2 Clef Span-Pair Calque Diagnosis (batched <= 20 spans per decide call)
+    flagged_spans: list[CueSpan] = []
+    for b_start in range(0, len(candidate_spans), 20):
+        sub_spans = candidate_spans[b_start : b_start + 20]
+        state_obj: dict[str, Any] = {}
+        questions: dict[str, dict[str, Any]] = {}
+        for idx, sp in enumerate(sub_spans):
+            c1_id, c2_id = sp.cue_ids
+            c1, c2 = cues_by_id[c1_id], cues_by_id[c2_id]
+            k1, k2 = ko.get(c1_id, "").strip(), ko.get(c2_id, "").strip()
+            pid = f"sp{idx}"
+            state_obj[pid] = {
+                "en_cue1": c1.text.replace("\n", " "),
+                "en_cue2": c2.text.replace("\n", " "),
+                "ko_cue1": k1.replace("\n", " "),
+                "ko_cue2": k2.replace("\n", " "),
+            }
+            questions[f"{pid}_calque"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Span {sp.span_id}: EN splits one sentence across Cue 1 ({state_obj[pid]['en_cue1']!r}) "
+                    f"and Cue 2 ({state_obj[pid]['en_cue2']!r}). Current KO is Cue 1 ({state_obj[pid]['ko_cue1']!r}) "
+                    f"-> Cue 2 ({state_obj[pid]['ko_cue2']!r}). Did Current KO prematurely close the English main verb "
+                    "in Cue 1 (or repeat a phrase across both cues) so Cue 2 is a dangling post-verbal modifier/PP "
+                    "that would read more naturally in Korean SOV order with the main verb at the end of Cue 2?"
+                ),
+            }
+        ans = gate_client.decide(stage=_STAGE_BLIND, state=state_obj, questions=questions)
+        for idx, sp in enumerate(sub_spans):
+            c1_id, c2_id = sp.cue_ids
+            k1, k2 = ko.get(c1_id, "").strip(), ko.get(c2_id, "").strip()
+            p_calq = float((ans.get(f"sp{idx}_calque") or {}).get("noul", 0.0))
+            if p_calq >= calque_threshold or _has_cross_cue_duplicate(k1, k2) or _DANGLING_PP_RE.search(_last_turn_text(k2)):
+                flagged_spans.append(sp)
+
+    if not flagged_spans:
+        return []
+
+    model_name = getattr(txt_client.settings, "model_main", "")
+    is_av_model = "gemini" in model_name.lower()
+    sys_prompt = "You are a professional subtitle localization specialist translating fictional motion picture dialogue into Korean."
+
+    def _rewrite_one(sp: CueSpan) -> tuple[CueSpan, str, str] | None:
+        c1_id, c2_id = sp.cue_ids
+        c1, c2 = cues_by_id[c1_id], cues_by_id[c2_id]
+        curr1, curr2 = ko.get(c1_id, "").strip(), ko.get(c2_id, "").strip()
+        _, tl1 = _effective_cue_level(c1, curr1, *levels.get(c1_id, ("-", "-")), rev_map)
+        _, tl2 = _effective_cue_level(c2, curr2, *levels.get(c2_id, ("-", "-")), rev_map)
+        dur1 = (c1.end_ms - c1.start_ms) / 1000.0
+        dur2 = (c2.end_ms - c2.start_ms) / 1000.0
+        max1 = min(26, max(10, int(dur1 * 10)))
+        max2 = min(26, max(10, int(dur2 * 10)))
+        base_prompt = (
+            f"You are fixing English SVO word-order calque across a 2-cue subtitle span into natural Korean head-final (SOV) order.\n"
+            f"- Cue 1 ({c1_id}, {dur1:.1f}s, max={max1} chars, target_level={tl1}): EN={c1.text.replace(chr(10),' ')!r} | Current KO={curr1!r}\n"
+            f"- Cue 2 ({c2_id}, {dur2:.1f}s, max={max2} chars, target_level={tl2}): EN={c2.text.replace(chr(10),' ')!r} | Current KO={curr2!r}\n\n"
+            f"Current KO prematurely closed the English main verb in Cue 1 (or duplicated a phrase across Cue 1 and Cue 2), leaving Cue 2 as an unnatural post-verbal fragment.\n"
+            f"## Mandatory Korean SOV Rules:\n"
+            f"1. Move the main verb predicate from Cue 1 to the VERY END of Cue 2!\n"
+            f"2. Cue 1 (`c1_ko`) MUST end with an OPEN modifier/PP/object particle (~의, ~와의, ~에서, ~로, ~부터, ~까지, ~을/를, ~은/는, ~해서) or noun, NEVER with a closed sentence-final verb ending (-다, -잖아, -지, -요, -죠, -거든, -네)!\n"
+            f"   - Example A ('full_sov_inversion'): EN1 'You couldn't even save a relationship...' + EN2 'with a goddamn stripper!' -> c1_ko: '스트리퍼 따위와의 관계 하나' + c2_ko: '못 지켜내는 새끼가!'\n"
+            f"   - Example B ('full_sov_inversion'): EN1 'To distribute gene therapy discreetly through everything...' + EN2 'from sweet drinks to breakfast cereals.' -> c1_ko: '단 음료부터 시리얼까지 모든 식품에' + c2_ko: '유전자 치료제를 몰래 퍼뜨렸고'\n"
+            f"   - Example C ('verb_deferral_sov' with 2-speaker dash): EN1 '-It looks great. -And you decimated dozens of my men...' + EN2 'with the exhumed corpse of a hero.' -> c1_ko: '- 보기 좋잖아\\n- 내 부하 열댓 명을' + c2_ko: '파묘한 영웅의 유골로 몰살했지'\n"
+            f"3. Preserve exact speech level ({tl1} / {tl2}) and 2-speaker '- ' dashes if present in Current KO. Never repeat the same phrase in both cues."
+        )
+        schema_cls = _AVSpanPairEdit if is_av_model else _HybridCoTSpanPairEdit
+        for attempt in range(2):
+            p_txt = base_prompt if attempt == 0 else (
+                base_prompt
+                + "\n\n[RETRY NOTICE: Your previous attempt left a closed finite verb at the end of c1_ko or a dangling particle in c2_ko! "
+                "Ensure the last line of c1_ko ends with an open modifier/object particle (~의/~에서/~로/~에/~을/~를/~은/~는/~해서) and the main verb is at the end of c2_ko!]"
+            )
+            try:
+                res = txt_client.generate(stage=_STAGE_REGEN, prompt=p_txt, schema=schema_cls, system=sys_prompt)
+            except GeminiBlocked:
+                return None
+            if res.strategy == "preserve_reveal_order":
+                return None
+            n1 = rewrap(res.c1_ko.strip(), 14, 12)
+            n2 = rewrap(res.c2_ko.strip(), 14, 12)
+            if _is_valid_sov_rewrite(curr1, curr2, n1, n2, tl1, tl2, require_open_c1=True):
+                return (sp, n1, n2)
+        return None
+
+    candidates_out: list[tuple[CueSpan, str, str]] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(flagged_spans))) as ex:
+        for item_res in ex.map(_rewrite_one, flagged_spans):
+            if item_res is not None:
+                candidates_out.append(item_res)
+    if not candidates_out:
+        return []
+
+    # Gate A: Span-Aware Clef Role-3 Semantic & Fluency Gate
+    accepted_edits: list[CueEdit] = []
+    for b_start in range(0, len(candidates_out), 10):
+        sub_cands = candidates_out[b_start : b_start + 10]
+        state_obj = {}
+        questions = {}
+        for idx, (sp, n1, n2) in enumerate(sub_cands):
+            c1_id, c2_id = sp.cue_ids
+            en_span = f"{cues_by_id[c1_id].text.replace(chr(10),' ').strip()} {cues_by_id[c2_id].text.replace(chr(10),' ').strip()}"
+            curr_span = f"{ko.get(c1_id,'').replace(chr(10),' ').strip()} {ko.get(c2_id,'').replace(chr(10),' ').strip()}"
+            cand_span = f"{n1.replace(chr(10),' ').strip()} {n2.replace(chr(10),' ').strip()}"
+            pid = f"g{idx}"
+            state_obj[pid] = {"en_span": en_span, "curr_span": curr_span, "cand_span": cand_span}
+            for side, val in (("curr", curr_span), ("cand", cand_span)):
+                questions[f"{pid}_{side}_omiss"] = {
+                    "type": "noul",
+                    "instructions": f"Span {sp.span_id}: Does combined Korean {val!r} omit the core point of combined English {en_span!r} (allowing normal subtitle condensation)?",
+                }
+                questions[f"{pid}_{side}_mistrans"] = {
+                    "type": "noul",
+                    "instructions": f"Span {sp.span_id}: Does combined Korean {val!r} mistranslate the intent or joke of combined English {en_span!r}?",
+                }
+                questions[f"{pid}_{side}_spoken"] = {
+                    "type": "noul",
+                    "instructions": f"Span {sp.span_id}: Does combined Korean {val!r} read in natural Korean head-final SOV order without English afterthought calque?",
+                }
+        ans = gate_client.decide(stage="s4b_gate", state=state_obj, questions=questions)
+        for idx, (sp, n1, n2) in enumerate(sub_cands):
+            pid = f"g{idx}"
+            c1_id, c2_id = sp.cue_ids
+            d_om = float((ans.get(f"{pid}_cand_omiss") or {}).get("noul", 0.0)) - float((ans.get(f"{pid}_curr_omiss") or {}).get("noul", 0.0))
+            d_mi = float((ans.get(f"{pid}_cand_mistrans") or {}).get("noul", 0.0)) - float((ans.get(f"{pid}_curr_mistrans") or {}).get("noul", 0.0))
+            cand_om = float((ans.get(f"{pid}_cand_omiss") or {}).get("noul", 0.0))
+            cand_mi = float((ans.get(f"{pid}_cand_mistrans") or {}).get("noul", 0.0))
+            if (d_om <= 0.25 or cand_om <= 0.35) and (d_mi <= 0.15 or cand_mi <= 0.25):
+                accepted_edits.append(CueEdit(cue_id=c1_id, new_ko=n1, reason="span_sov_inversion", kind="polish"))
+                accepted_edits.append(CueEdit(cue_id=c2_id, new_ko=n2, reason="span_sov_inversion", kind="polish"))
+    return accepted_edits

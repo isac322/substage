@@ -1777,3 +1777,33 @@ def test_semantic_media_safety_block_retries_same_media_with_sanitized_prompt_an
     assert "## PREVIOUS ATTEMPT STRUCTURAL VALIDATION ERROR" in write_calls[2]["prompt"]
     assert "['c1:t2:a1']" in write_calls[2]["prompt"]
     assert "[Media attachment was safety-blocked" not in write_calls[2]["prompt"]
+
+
+def test_detect_syntactic_spans_and_sov_rewrite_gates():
+    c1 = Cue(id="c1172", index=1, start_ms=1000, end_ms=3000, text="You couldn't even save a relationship…", raw="", speaker_hint="Wade")
+    c2 = Cue(id="c1173", index=2, start_ms=3080, end_ms=5000, text="with a goddamn stripper!", raw="", speaker_hint="Wade")
+    c3 = Cue(id="c0920", index=3, start_ms=7000, end_ms=8500, text="Said I was...", raw="", speaker_hint="Beck")
+    c4 = Cue(id="c0921", index=4, start_ms=8600, end_ms=10000, text="unstable.", raw="", speaker_hint="Beck")
+    spans = translate.detect_syntactic_spans([c1, c2, c3, c4], {})
+    assert spans["c1172"].policy == "REVERSE_SOV_PERMITTED"
+    assert spans["c1173"].policy == "REVERSE_SOV_PERMITTED"
+    assert spans["c0920"].policy == "DRAMATIC_REVEAL_KEEP_ORDER"
+    assert spans["c0921"].policy == "DRAMATIC_REVEAL_KEEP_ORDER"
+    assert review._is_svo_premature_verb_close("연애 하나 못 지킨 놈이!", "그것도 망할 스트리퍼랑!")
+    assert not review._is_svo_premature_verb_close("스트리퍼 따위와의\n관계 하나", "못 지켜내는 새끼가!")
+    assert review._is_valid_sov_rewrite(
+        "연애 하나 못 지킨 놈이!",
+        "그것도 망할 스트리퍼랑!",
+        "스트리퍼 따위와의\n관계 하나",
+        "못 지켜내는 새끼가!",
+        "hae",
+        "hae",
+    )
+    assert not review._is_valid_sov_rewrite(
+        "연애 하나 못 지킨 놈이!",
+        "그것도 망할 스트리퍼랑!",
+        "그깟 관계 하나도\n제대로 못 지켰잖아",
+        "빌어먹을 스트리퍼랑도!",
+        "hae",
+        "hae",
+    )

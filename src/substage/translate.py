@@ -28,7 +28,7 @@ import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from functools import lru_cache
 from importlib import resources
@@ -316,10 +316,78 @@ def _render_prev_tail(prev_ko_tail: list[tuple[str, str]]) -> str:
     return "## PREVIOUS SCENE KOREAN TAIL (continuity anchor; do not re-translate)\n" + rows
 
 
+_SPAN_TRAIL_RE = re.compile(r"(?:\.\.\.|…|--|—|,)\s*[\"'’”)\]]*\s*$")
+_SPAN_TERM_RE = re.compile(r"[.?!][\"'’”)\]]*\s*$")
+_SPAN_PP_MOD_RE = re.compile(
+    r"^(?:with|without|for|from|in|into|between|of|by|through|on|at|to|"
+    r"who|whom|whose|which|because|before|until|than|as|while)\b",
+    re.IGNORECASE,
+)
+_SPAN_COORD_RE = re.compile(r"^(?:and|but|or|so|then|yet)\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class CueSpan:
+    span_id: str
+    cue_ids: tuple[str, str]
+    policy: str  # "REVERSE_SOV_PERMITTED" | "DRAMATIC_REVEAL_KEEP_ORDER"
+
+
+def detect_syntactic_spans(
+    cues: Sequence[Cue],
+    obs_by_id: dict[str, CueObservation],
+    *,
+    max_gap_ms: int = 1500,
+) -> dict[str, CueSpan]:
+    """Map cue_id -> CueSpan for consecutive 2-cue split English sentences."""
+    by_cid: dict[str, CueSpan] = {}
+    i = 0
+    while i < len(cues) - 1:
+        c1, c2 = cues[i], cues[i + 1]
+        gap_ms = c2.start_ms - c1.end_ms
+        if gap_ms < 0 or gap_ms > max_gap_ms or c1.lyric or c2.lyric:
+            i += 1
+            continue
+        o1, o2 = obs_by_id.get(c1.id), obs_by_id.get(c2.id)
+        spk1 = (o1.speaker if o1 and o1.speaker else c1.speaker_hint) or ""
+        spk2 = (o2.speaker if o2 and o2.speaker else c2.speaker_hint) or ""
+        if spk1 and spk2 and spk1.strip().lower() != spk2.strip().lower():
+            i += 1
+            continue
+        if en_speaker_turns(c2, observation=o2) >= 2:
+            i += 1
+            continue
+        t1 = c1.text.replace("\n", " ").strip()
+        t2 = c2.text.replace("\n", " ").strip()
+        t2_clean = t2.lstrip(" -\"'‘“(.[")
+        has_trail = bool(_SPAN_TRAIL_RE.search(t1))
+        no_term = not bool(_SPAN_TERM_RE.search(t1))
+        c2_pp_mod = bool(_SPAN_PP_MOD_RE.match(t2_clean))
+        c2_lower = bool(t2_clean and t2_clean[0].islower()) or t2.lstrip().startswith(("...", "…"))
+        if not (has_trail or (no_term and (c2_pp_mod or c2_lower)) or c2_pp_mod):
+            i += 1
+            continue
+        words2 = [w for w in re.split(r"\s+", t2_clean) if w]
+        is_short_reveal = has_trail and len(words2) <= 2 and not c2_pp_mod
+        is_coord = bool(_SPAN_COORD_RE.match(t2_clean))
+        is_that_if_after_complete = bool(re.match(r"^(?:that|if)\b", t2_clean, re.I)) and len(t1.split()) >= 5 and not c2_pp_mod
+        policy = (
+            "DRAMATIC_REVEAL_KEEP_ORDER"
+            if (is_short_reveal or is_coord or is_that_if_after_complete or gap_ms >= 1000)
+            else "REVERSE_SOV_PERMITTED"
+        )
+        span = CueSpan(span_id=f"{c1.id}..{c2.id}", cue_ids=(c1.id, c2.id), policy=policy)
+        by_cid[c1.id] = span
+        by_cid[c2.id] = span
+        i += 2
+    return by_cid
+
+
 def _render_cues(
     cues: list[Cue], obs_by_id: dict[str, CueObservation], aim_ratio: float
 ) -> str:
     lines = ["## CUES (id | start-end | speaker | sound | dur s | aim/max chars | turns | text)"]
+    spans = detect_syntactic_spans(cues, obs_by_id)
     for n, c in enumerate(cues):
         dur = (c.end_ms - c.start_ms) / 1000.0
         speaker = c.speaker_hint or "-"
@@ -337,6 +405,9 @@ def _render_cues(
             tags.append("SOUND-ONLY")
         if o and o.delivery:
             tags.append(o.delivery)
+        sp = spans.get(c.id)
+        if sp is not None:
+            tags.append(f"SPAN {sp.span_id}: {sp.policy}")
         tag = f" [{' | '.join(tags)}]" if tags else ""
         text = c.text.replace("\n", " / ")
         budget = _budget(c, cues[n + 1].start_ms if n + 1 < len(cues) else None)
@@ -345,7 +416,6 @@ def _render_cues(
             f"{sound} | {dur:.1f} | {_aim(budget, aim_ratio)}/{budget} | turns={en_speaker_turns(c, observation=o)} | {text}{tag}"
         )
     return "\n".join(lines)
-
 
 def _scene_prompt(
     scene: Scene,
