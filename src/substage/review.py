@@ -960,8 +960,10 @@ def _is_valid_sov_rewrite(
     target_lvl2: str,
     *,
     require_open_c1: bool = True,
+    prev_ko: str = "",
+    next_ko: str = "",
 ) -> bool:
-    """Gate B: deterministic physical, dash, register, and SOV open-head check."""
+    """Gate B: deterministic physical, dash, register, neighbor-duplicate, and SOV open-head check."""
     lines1 = [l for l in new1.splitlines() if l.strip()]
     lines2 = [l for l in new2.splitlines() if l.strip()]
     if not lines1 or not lines2 or len(lines1) > 2 or len(lines2) > 2:
@@ -976,13 +978,16 @@ def _is_valid_sov_rewrite(
         return False
     if _has_cross_cue_duplicate(new1, new2):
         return False
+    if prev_ko and _has_cross_cue_duplicate(prev_ko, new1):
+        return False
+    if next_ko and _has_cross_cue_duplicate(new2, next_ko):
+        return False
     if require_open_c1:
         last1 = _last_turn_text(new1)
         last2 = _last_turn_text(new2)
         if _FINITE_CLOSE_RE.search(last1) or _DANGLING_PP_RE.search(last2):
             return False
     return True
-
 
 def repair_span_calques(
     ws: Workspace,
@@ -1003,8 +1008,23 @@ def repair_span_calques(
     obs_map = _obs_by_id(observations)
     candidate_spans: list[CueSpan] = []
     seen_cues: set[str] = set(excluded_cues or ())
+    neighbor_map: dict[str, tuple[str, str]] = {}
     for sc in scenes:
         sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+        # Pass 1: Protect already-inverted spans (unless they have a duplicate with an adjacent cue)
+        for idx_p in range(len(sc_cues) - 1):
+            c1, c2 = sc_cues[idx_p], sc_cues[idx_p + 1]
+            k1, k2 = ko.get(c1.id, "").strip(), ko.get(c2.id, "").strip()
+            if not k1 or not k2 or k2.lstrip().startswith("-"):
+                continue
+            sp = detect_syntactic_spans([c1, c2], obs_map).get(c1.id)
+            if sp is not None and sp.policy == "REVERSE_SOV_PERMITTED" and not _is_svo_premature_verb_close(k1, k2):
+                prev_k = ko.get(sc_cues[idx_p - 1].id, "").strip() if idx_p > 0 else ""
+                next_k = ko.get(sc_cues[idx_p + 2].id, "").strip() if idx_p + 2 < len(sc_cues) else ""
+                if not (prev_k and _has_cross_cue_duplicate(prev_k, k1)) and not (next_k and _has_cross_cue_duplicate(k2, next_k)):
+                    seen_cues.add(c1.id)
+                    seen_cues.add(c2.id)
+        # Pass 2: Collect remaining uninverted or duplicate-bearing spans
         idx_c = 0
         while idx_c < len(sc_cues) - 1:
             c1, c2 = sc_cues[idx_c], sc_cues[idx_c + 1]
@@ -1017,6 +1037,9 @@ def repair_span_calques(
             if sp is not None and sp.policy == "REVERSE_SOV_PERMITTED" and _is_svo_premature_verb_close(k1, k2):
                 seen_cues.add(c1.id)
                 seen_cues.add(c2.id)
+                prev_k = ko.get(sc_cues[idx_c - 1].id, "").strip() if idx_c > 0 else ""
+                next_k = ko.get(sc_cues[idx_c + 2].id, "").strip() if idx_c + 2 < len(sc_cues) else ""
+                neighbor_map[sp.span_id] = (prev_k, next_k)
                 candidate_spans.append(sp)
                 idx_c += 2
                 continue
@@ -1108,7 +1131,8 @@ def repair_span_calques(
             raw2 = c2_clean if curr2.lstrip().startswith("-") else " ".join(c2_clean.splitlines())
             n1 = rewrap(raw1, 14, 12)
             n2 = rewrap(raw2, 14, 12)
-            if _is_valid_sov_rewrite(curr1, curr2, n1, n2, tl1, tl2, require_open_c1=True):
+            prev_k, next_k = neighbor_map.get(sp.span_id, ("", ""))
+            if _is_valid_sov_rewrite(curr1, curr2, n1, n2, tl1, tl2, require_open_c1=True, prev_ko=prev_k, next_ko=next_k):
                 return (sp, n1, n2)
         return None
 
