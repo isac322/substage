@@ -28,8 +28,10 @@ from .models import (
     CueEdit,
     CueObservation,
     ContextMap,
+    PragmaticCueNote,
     ReadFlag,
     Scene,
+    SceneSituationCard,
     SceneTranslation,
     Snapshot,
 )
@@ -37,7 +39,13 @@ from .levels import addressed_levels, speaker_turns
 from .register import RegisterTable, binary, render_scene_register, same_level
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
-from .translate import CueSpan, _NON_TRANSLATED, _fmt_ms, detect_syntactic_spans
+from .translate import (
+    CueSpan,
+    _NON_TRANSLATED,
+    _fmt_ms,
+    detect_pragmatic_risk_cues,
+    detect_syntactic_spans,
+)
 from .validate import ost_kind, rewrap
 
 WINDOW_SCENES = 3
@@ -1182,3 +1190,212 @@ def repair_span_calques(
                 accepted_edits.append(CueEdit(cue_id=c1_id, new_ko=n1, reason="span_sov_inversion", kind="polish"))
                 accepted_edits.append(CueEdit(cue_id=c2_id, new_ko=n2, reason="span_sov_inversion", kind="polish"))
     return accepted_edits
+
+
+class _PragmaKoItem(BaseModel):
+    cue_id: str
+    ko: str
+
+
+class _PragmaCardAndKoBatch(BaseModel):
+    situation: SceneSituationCard
+    translations: list[_PragmaKoItem] = Field(default_factory=list)
+
+
+class _PragmaKoOnlyBatch(BaseModel):
+    translations: list[_PragmaKoItem] = Field(default_factory=list)
+
+
+def repair_pragmatic_literal_traps(
+    ws: Workspace,
+    txt_client: Any,
+    av_helper_client: Any,
+    gate_client: ClefDecisionsClient,
+    scenes: list[Scene],
+    cues_by_id: dict[str, Cue],
+    snapshots: dict[str, Snapshot],
+    ko: dict[str, str],
+    observations,
+    *,
+    levels: dict[str, tuple[str, str]] | None = None,
+    trap_threshold: float = 0.50,
+    extra_risk_cues: dict[str, str] | None = None,
+) -> list[CueEdit]:
+    """Pragma-DPAF 3-Stage Situational, Nonverbal, and Pragmatic Implicature Repair."""
+    levels = levels or {}
+    rev_map = _reverse_level_map(levels, ws)
+    obs_map = _obs_by_id(observations)
+    extra_risk_cues = extra_risk_cues or {}
+
+    routed_scenes: list[tuple[Scene, dict[str, str]]] = []
+    for sc in scenes:
+        sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+        if not sc_cues:
+            continue
+        risk_map = detect_pragmatic_risk_cues(sc_cues, obs_map)
+        for c in sc_cues:
+            if c.id in extra_risk_cues:
+                risk_map[c.id] = extra_risk_cues[c.id]
+        if risk_map:
+            routed_scenes.append((sc, risk_map))
+    if not routed_scenes:
+        return []
+
+    model_name = getattr(txt_client.settings, "model_main", "")
+    is_av_writer = "gemini" in model_name.lower()
+    sys_prompt = "You are a professional motion picture subtitle localization specialist."
+
+    def _process_scene(item: tuple[Scene, dict[str, str]]) -> list[CueEdit]:
+        sc, risk_map = item
+        sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+        idx_by_id = {c.id: idx for idx, c in enumerate(sc_cues)}
+        target_indices: set[int] = set()
+        for cid in risk_map:
+            if cid in idx_by_id:
+                i0 = idx_by_id[cid]
+                for j in range(max(0, i0 - 2), min(len(sc_cues), i0 + 3)):
+                    target_indices.add(j)
+        win_cues = [sc_cues[j] for j in sorted(target_indices)]
+        snap = snapshots.get(sc.id)
+        snap_txt = _scene_context(snap, "full") if snap else ""
+
+        cues_block_lines = []
+        for c in win_cues:
+            curr_k = ko.get(c.id, "").strip()
+            _, tl = _effective_cue_level(c, curr_k, *levels.get(c.id, ("-", "-")), rev_map)
+            o = obs_map.get(c.id)
+            obs_note = f" [obs: spk={getattr(o,'speaker',None)} adr={getattr(o,'addressee',None)} deliv={getattr(o,'delivery',None)} nonverb={getattr(o,'nonverbal',None)}]" if o else ""
+            r_cat = risk_map.get(c.id, "context_only")
+            cues_block_lines.append(
+                f"  {c.id} (risk={r_cat}, target_level={tl}, dur={(c.end_ms-c.start_ms)/1000.0:.1f}s): "
+                f"EN={c.text.replace(chr(10),' ')!r} | Current KO={curr_k!r}{obs_note}"
+            )
+        cues_block = "\n".join(cues_block_lines)
+
+        stage1_prompt = (
+            f"Scene {sc.id} Situational & Pragmatic Grounding (Pragma-DPAF):\n"
+            f"{snap_txt}\n\n"
+            f"## Window Cues:\n{cues_block}\n\n"
+            f"## Instructions:\n"
+            f"1. Fill `situation.physical_blocking`: describe what is physically happening in this scene beat (posture, physical contact/restraints, spatial positions, mood).\n"
+            f"2. For each cue with `risk != 'context_only'`, analyze whether Current KO fell into a `surface_literal_trap` (translating the words literally while missing the physical blocking, body-part metonymy, spatial vector, rhetorical sarcasm, or idiom):\n"
+            f"   - Example 1 (`body_or_partitive_metonymy`): 'Not all of you was asleep.' after waking up pressed chest-to-chest -> Trap: '다 잔 건 아니던데' (sleep depth) -> Anchor: '깨어 있는 데도 있더군 / 딴 데는 깨어 있던데' (a body part was awake).\n"
+            f"   - Example 2 (`visual_action_deixis`): 'You look ridiculous.' right before a fight -> Trap: '꼴값 떠네' -> Anchor: '이 꼴로 싸우게? / 이 꼴로 하게?'.\n"
+            f"   - Example 3 (`visual_action_deixis`): 'Put her down over here.' when strapping a captive to a chair -> Trap: '여기 내려놔' -> Anchor: '이쪽에 묶어놔'.\n"
+            f"   - Example 4 (`visual_action_deixis`): 'Stay down there, Will!' from upstairs -> Trap: '거기 있어' -> Anchor: '올라오지 마, 윌!'.\n"
+            f"   - Example 5 (`idiom_or_slang`): \"Oh, I smell what you're steppin' in.\" -> Trap: '똥 밟은 기분' -> Anchor: '뭔 소린지 딱 감 오네 / 뭔지 감이 왔어'.\n"
+            f"   - Example 6 (`conversational_implicature`): 'Where else do you put one out?' (about putting cigarettes out on skin) -> Trap: '딴 데도 꺼요?' -> Anchor: '내 몸 말고 딴 데도 꺼? / 난 온몸이 재떨이야'.\n"
+            f"3. If a cue is genuinely literal in context, set `category='literal'` and keep Current KO unchanged. For non-literal cues, provide the natural spoken Korean subtitle in `translations` (<=14 chars/line, <=2 lines, preserving exact `target_level` and '- ' dashes)."
+        )
+        try:
+            av_batch = av_helper_client.generate(
+                stage=_STAGE_REGEN, prompt=stage1_prompt, schema=_PragmaCardAndKoBatch, system=sys_prompt
+            )
+        except GeminiBlocked:
+            return []
+
+        notes_by_cid = {n.cue_id: n for n in av_batch.situation.cues if n.cue_id in risk_map and n.category != "literal"}
+        if not notes_by_cid:
+            return []
+
+        if is_av_writer:
+            cand_map = {item_t.cue_id: item_t.ko for item_t in av_batch.translations}
+        else:
+            card_json = av_batch.situation.model_dump_json(indent=2)
+            op_prompt = (
+                f"Scene {sc.id} Situational Card (from Visual Perception Helper):\n{card_json}\n\n"
+                f"## Window Cues:\n{cues_block}\n\n"
+                f"Rewrite ONLY the cues in `situation.cues` where `category != 'literal'` so the Korean subtitle avoids `surface_literal_trap` and naturally conveys `situational_intent` using `korean_explicitation_anchor`.\n"
+                f"Keep exact `target_level` (반말/존댓말), '- ' speaker dashes, and <=14 chars/line."
+            )
+            try:
+                op_batch = txt_client.generate(
+                    stage=_STAGE_REGEN, prompt=op_prompt, schema=_PragmaKoOnlyBatch, system=sys_prompt
+                )
+                cand_map = {item_t.cue_id: item_t.ko for item_t in op_batch.translations}
+            except GeminiBlocked:
+                cand_map = {item_t.cue_id: item_t.ko for item_t in av_batch.translations}
+
+        # Stage 3: Situation-Grounded Clef Role-2/Role-3 Verification Gate
+        questions: dict[str, dict[str, Any]] = {}
+        cases_state = []
+        valid_cids: list[tuple[str, str]] = []
+        for cid, note in notes_by_cid.items():
+            raw_new = (cand_map.get(cid) or "").replace("\\n", "\n").strip()
+            if not raw_new:
+                continue
+            curr_k = ko.get(cid, "").strip()
+            c_obj = cues_by_id[cid]
+            _, tl = _effective_cue_level(c_obj, curr_k, *levels.get(cid, ("-", "-")), rev_map)
+            norm_in = raw_new if curr_k.lstrip().startswith("-") else " ".join(raw_new.splitlines())
+            new_k = rewrap(norm_in, 14, 12)
+            if new_k == curr_k:
+                continue
+            lines_n = [l for l in new_k.splitlines() if l.strip()]
+            if not lines_n or len(lines_n) > 2 or any(len(l) > 16 for l in lines_n):
+                continue
+            if curr_k.lstrip().startswith("-") != new_k.lstrip().startswith("-"):
+                continue
+            if _violates_target_level(new_k, tl):
+                continue
+            valid_cids.append((cid, new_k))
+            cases_state.append({
+                "id": cid,
+                "en": c_obj.text.replace("\n", " "),
+                "curr_ko": curr_k.replace("\n", " "),
+                "cand_ko": new_k.replace("\n", " "),
+                "surface_literal_trap": note.surface_literal_trap,
+                "situational_intent": note.situational_intent,
+                "korean_explicitation_anchor": note.korean_explicitation_anchor,
+            })
+            questions[f"{cid}_curr_trap"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Cue {cid}: Given physical_blocking={av_batch.situation.physical_blocking!r} and "
+                    f"situational_intent={note.situational_intent!r}, did Current KO ({curr_k!r}) fall into "
+                    f"the surface_literal_trap ({note.surface_literal_trap!r}) or miss the situational meaning?"
+                ),
+            }
+            questions[f"{cid}_cand_trap"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Cue {cid}: Given physical_blocking={av_batch.situation.physical_blocking!r} and "
+                    f"situational_intent={note.situational_intent!r}, does Candidate KO ({new_k!r}) fall into "
+                    f"the surface_literal_trap ({note.surface_literal_trap!r})?"
+                ),
+            }
+            questions[f"{cid}_cand_fit"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Cue {cid}: Does Candidate KO ({new_k!r}) naturally convey situational_intent={note.situational_intent!r} "
+                    f"in spoken Korean for EN ({c_obj.text!r})?"
+                ),
+            }
+        if not valid_cids:
+            return []
+        ans = gate_client.decide(
+            stage="s4b_gate",
+            state={"physical_blocking": av_batch.situation.physical_blocking, "cases": cases_state},
+            questions=questions,
+        )
+        sc_edits: list[CueEdit] = []
+        for cid, new_k in valid_cids:
+            p_curr_trap = float((ans.get(f"{cid}_curr_trap") or {}).get("noul", 0.0))
+            p_cand_trap = float((ans.get(f"{cid}_cand_trap") or {}).get("noul", 0.0))
+            p_cand_fit = float((ans.get(f"{cid}_cand_fit") or {}).get("noul", 0.0))
+            if p_curr_trap >= trap_threshold and p_cand_trap < p_curr_trap and p_cand_fit >= 0.55:
+                sc_edits.append(
+                    CueEdit(
+                        cue_id=cid,
+                        new_ko=new_k,
+                        reason=f"pragma_dpaf:{notes_by_cid[cid].category}",
+                        kind="polish",
+                    )
+                )
+        return sc_edits
+
+    all_edits: list[CueEdit] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(routed_scenes))) as ex:
+        for sc_ed in ex.map(_process_scene, routed_scenes):
+            all_edits.extend(sc_ed)
+    return all_edits

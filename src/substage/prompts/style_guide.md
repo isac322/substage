@@ -33,10 +33,12 @@ Not when: the English is not clearly ironic. Don't make neutral lines snarky.
 Why: freedom of form makes the subtitle land; freedom of content is mistranslation.
 - Never invent content, motives or jokes. Ambiguous English: pick the reading the scene supports (who speaks, to whom, what just happened).
 - An English name used as a nickname, joke or insult: translate its function (the mockery), not just its sound.
-- Make implicit information explicit only when a Korean viewer would miss it (about 1 line in 12).
-Not when: explicitation would add plot information the English withholds, or resolve what the video leaves open.
+- Make implicit situational, nonverbal, or partitive information explicit when a literal Korean gloss would lose the point:
+  * Partitive / body metonymy (singular verb with quantifier over a person, e.g., `all/part of you + was`): Korean has no singular/plural verb agreement, so you MUST explicitate the spatial/partitive noun (`데 / 곳 / 쪽`: `Not all of you was asleep.` -> `깨어 있는 데도 있더군` / `딴 데는 깨어 있던데`, NEVER `다 잔 건 아니던데`).
+  * Visual posture & action deixis (`Put her down over here` while tying to a chair -> `이쪽에 묶어놔`; `Stay down there` from upstairs -> `올라오지 마`; `You look ridiculous` about a fighting crouch -> `이 꼴로 싸우게?`).
+  * Colloquial idioms & rhetorical implicatures (`Oh, I smell what you're steppin' in` -> `뭔지 감이 왔어`, NEVER literal `똥 밟은...`; `Where else do you put one out?` -> `내 몸 말고 딴 데도 꺼?` / `난 온몸이 재떨이야`).
+Not when: explicitation would add plot spoilers the English withholds, or metaphorize a plain literal question (`How long was I asleep?` -> `나 얼마나 잤어?`).
 - Thank Ganesh while you're at it. | 가네샤에게도 감사해 | 여긴 인도니까 / 가네샤 신께 감사해
-
 ### 1.4 Use Korean's question/statement flexibility both ways.
 Korean voices taunts, reproaches and disbelief as questions (누가 ~래?, -냐?) and English rhetorical questions as flat statements. In every genre about 1 English question in 10 becomes a Korean statement, and 1 statement in 40 becomes a question.
 Why: keeping the English mood sounds stilted.

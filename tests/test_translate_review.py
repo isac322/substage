@@ -1807,3 +1807,17 @@ def test_detect_syntactic_spans_and_sov_rewrite_gates():
         "hae",
         "hae",
     )
+
+
+def test_detect_pragmatic_risk_cues_and_scene_situation_card():
+    c_sleep = Cue(id="c0767", index=1, start_ms=1000, end_ms=2000, text="How long was I asleep?", raw="", speaker_hint="Deadpool")
+    c_part = Cue(id="c0768", index=2, start_ms=2100, end_ms=3500, text="Not all of you was asleep.", raw="", speaker_hint="Wolverine")
+    c_deix = Cue(id="c1456", index=3, start_ms=4000, end_ms=5500, text="Put her down over here.", raw="", speaker_hint="Ajax")
+    c_idiom = Cue(id="c0376", index=4, start_ms=6000, end_ms=7500, text="Oh, I smell what you're steppin' in.", raw="", speaker_hint="Deadpool")
+    c_imp = Cue(id="c0403", index=5, start_ms=8000, end_ms=9500, text="Where else do you put one out?", raw="", speaker_hint="Wade")
+    risks = translate.detect_pragmatic_risk_cues([c_sleep, c_part, c_deix, c_idiom, c_imp])
+    assert "c0767" not in risks
+    assert risks["c0768"] == "body_or_partitive_metonymy"
+    assert risks["c1456"] == "visual_action_deixis"
+    assert risks["c0376"] == "idiom_or_slang"
+    assert risks["c0403"] == "conversational_implicature"

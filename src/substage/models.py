@@ -431,6 +431,20 @@ class TimelineErratum(BaseModel):
     evidence: str
 
 
+
+class PragmaticCueNote(BaseModel):
+    cue_id: str
+    category: str = "literal"  # literal | body_or_partitive_metonymy | visual_action_deixis | idiom_or_slang | conversational_implicature | referent_or_ellipsis
+    surface_literal_trap: str = ""
+    situational_intent: str = ""
+    korean_explicitation_anchor: str = ""
+
+
+class SceneSituationCard(BaseModel):
+    scene_id: str
+    physical_blocking: str = ""
+    cues: list[PragmaticCueNote] = Field(default_factory=list)
+
 class SceneTranslation(BaseModel):
     scene_id: str
     mode: str  # text | av

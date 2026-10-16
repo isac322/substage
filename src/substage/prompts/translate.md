@@ -19,6 +19,13 @@ Output: JSON matching the requested schema. One cues[] entry per input cue id, i
 - When consecutive cues carry `[SPAN c1..c2: REVERSE_SOV_PERMITTED]`, they form a single right-branching English sentence split across two cues (e.g., main verb/object in `c1` + prepositional phrase/relative clause/modifier in `c2`).
 - Never close the main verb at the end of `c1` and leave `c2` as a dangling English-order fragment (`그것도 ~랑!`, `~에서요`, `~까지`). Instead, move the English `c1` main verb to the end of `c2`: either invert so `c2`'s modifier/PP + noun sits in `c1` and `c1`'s main verb sits in `c2`, or (when `c1` has `turns=2` or a long subject/object) leave `c1` open on an object/topic particle (`~을/를/은/는`) and put `c2`'s modifier + the main verb in `c2`. Never repeat the same phrase in both `c1` and `c2`.
 - When tagged `[SPAN c1..c2: DRAMATIC_REVEAL_KEEP_ORDER]`, preserve chronological cue order so a hesitant reveal or punchline in `c2` is never spoiled in `c1`.
+
+## Situational grounding, nonverbal context, and pragmatic implicature (Pragma-DPAF)
+- When a cue carries `[PRAGMA <category>]`, do not emit a flat word-for-word literal gloss (`surface_literal_trap`) that misses the physical blocking or speaker's pragmatic intent:
+  * `body_or_partitive_metonymy`: e.g. `Not all of you was asleep` (with singular `was` when two characters are pressed together) -> explicitate the spatial/body-part noun (`깨어 있는 데도 있더군` / `딴 데는 깨어 있던데`), never `다 잔 건 아니던데`.
+  * `visual_action_deixis`: ground verbs like `put down / stay down / look ridiculous / up / down` in the actual physical action on screen (`이쪽에 묶어놔`, `올라오지 마`, `이 꼴로 싸우게?`, `올려요 / 내려요`).
+  * `idiom_or_slang` & `conversational_implicature`: translate the intended pragmatic meaning (`smell what you're steppin' in` -> `무슨 말인지 감 오네`, `Where else do you put one out?` -> `내 몸 말고 딴 데도 꺼?`), never the literal words.
+- Keep ordinary neighboring cues (`category == 'literal'`) strictly literal; never smear a joke onto an adjacent literal question or command.
 ## Using the context
 - PERSONAS and VIDEO tone/rating in CONTEXT give each character's attitude — let them set vocabulary, tone and the profanity ceiling, never the speech level.
 - The REGISTERS table gives each speaker→addressee pair's level and address term (pronoun · vocative), with shifts at their cue ids: write every line of that pair at that level and use that address term. Unlisted pairs follow the style guide's register section, one level per pair through the conversation — never oscillate. If a table level plainly contradicts the scene, still write the table level and report an erratum.

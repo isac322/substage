@@ -388,6 +388,72 @@ def detect_syntactic_spans(
     return by_cid
 
 
+_PRAGMA_PARTITIVE_RE = re.compile(
+    r"\b(?:(?:not\s+)?(?:all|part|most|half|none|rest|every\s+inch|every\s+part)\s+of\s+(?:you|me|him|her|us|it)\b"
+    r"|\b(?:all|part)\s+of\s+(?:you|me)\s+(?:was|is|wasn't|isn't)\b)",
+    re.IGNORECASE,
+)
+_PRAGMA_DEIXIS_RE = re.compile(
+    r"\b(?:you\s+look\s+(?:ridiculous|insane|crazy|like\s+shit|great)|"
+    r"put\s+(?:him|her|it|them)\s+(?:down|up)\s+(?:over\s+)?(?:here|there)|"
+    r"stay\s+(?:down|up|back)\s+(?:here|there)|"
+    r"(?:up,\s*up|down,\s*down)|"
+    r"fall\s+backwards|"
+    r"keep\s+it\s+steady|"
+    r"just\s+take\s+it\s+slow|"
+    r"right\s+there\b|"
+    r"look\s+at\s+(?:this|that)\b)",
+    re.IGNORECASE,
+)
+_PRAGMA_IDIOM_RE = re.compile(
+    r"\b(?:smell\s+what\s+you(?:'re|\s+are)\s+stepp?in'?|"
+    r"sit\s+on\s+a\s+stick|"
+    r"have\s+nuts\s+in\s+it|"
+    r"money\s+shot|"
+    r"shake\s+weight|"
+    r"calling\s+wang|"
+    r"flicking\s+my\s+bean|"
+    r"full\s+of\s+shit|"
+    r"doesn't\s+run\s+shit|"
+    r"there's\s+a\s+stupid|"
+    r"what\s+does\s+.*\s+taste\s+like|"
+    r"cinnamon\s+ring|"
+    r"i'd\s+love\s+a\s+blow\s+job|"
+    r"are\s+you\s+there\s+god\??\s+it's\s+me,\s+margaret)\b",
+    re.IGNORECASE,
+)
+_PRAGMA_IMPLICATURE_RE = re.compile(
+    r"\b(?:where\s+else\s+(?:do|would|could)\s+you\s+put|"
+    r"maybe\s+not\s+start\s+with\s+that|"
+    r"that\s+suit\s+says\s+different|"
+    r"and\s+there\s+he\s+goes|"
+    r"great,\s+it's\s+just\s+some\s+random\s+guy|"
+    r"your\s+piece\s+of\s+it\s+is\s+at\s+its\s+very\s+center)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_pragmatic_risk_cues(
+    cues: Sequence[Cue],
+    obs_by_id: dict[str, CueObservation] | None = None,
+) -> dict[str, str]:
+    """Map cue_id -> pragmatic risk category for cues requiring situational/implicature grounding."""
+    out: dict[str, str] = {}
+    for c in cues:
+        if c.lyric or ost_kind(c) == "credit":
+            continue
+        t = c.text.replace("\n", " ").strip()
+        if _PRAGMA_PARTITIVE_RE.search(t):
+            out[c.id] = "body_or_partitive_metonymy"
+        elif _PRAGMA_IDIOM_RE.search(t):
+            out[c.id] = "idiom_or_slang"
+        elif _PRAGMA_IMPLICATURE_RE.search(t):
+            out[c.id] = "conversational_implicature"
+        elif _PRAGMA_DEIXIS_RE.search(t):
+            out[c.id] = "visual_action_deixis"
+    return out
+
+
 def _render_cues(
     cues: list[Cue], obs_by_id: dict[str, CueObservation], aim_ratio: float
 ) -> str:
