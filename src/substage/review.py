@@ -748,14 +748,23 @@ def filter_edits_with_decisions(
             json.dumps(questions, ensure_ascii=False, sort_keys=True),
         )
         key = f"clef_gate:{idx}"
+        cases_by_id = {item_c["id"]: item_c for item_c in cases}
         cached = cp.get(key, h, _AcceptanceCache)
         if cached is not None:
             keep_set = set(cached.accepted_ids)
-            accepted.extend(e for e in chunk if e.cue_id in keep_set)
+            for e in chunk:
+                cid = e.cue_id
+                cm_meta = cases_by_id.get(cid) or {}
+                tl = str(cm_meta.get("target_level", "-"))
+                ck = str(cm_meta.get("current_ko", ""))
+                nk = str(cm_meta.get("candidate_ko", ""))
+                if _violates_target_level(nk, tl):
+                    continue
+                if cid in keep_set or (_violates_target_level(ck, tl) and not _violates_target_level(nk, tl)):
+                    accepted.append(e)
             continue
         answers = client.decide(stage="s4b_gate", state=state_obj, questions=questions)
         chunk_keep: list[str] = []
-        cases_by_id = {item_c["id"]: item_c for item_c in cases}
         for e in chunk:
             cid = e.cue_id
             case_meta = cases_by_id.get(cid) or {}
@@ -771,8 +780,8 @@ def filter_edits_with_decisions(
             d_verb = float((answers.get(f"{cid}_cand_verbose") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_verbose") or {}).get("noul", 0.0))
             d_spk = float((answers.get(f"{cid}_cand_spoken") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_spoken") or {}).get("noul", 0.0))
             if (
-                d_omiss <= 0.05
-                and d_verb <= (0.15 if fixed_reg_violation else 0.08)
+                d_omiss <= (0.25 if fixed_reg_violation else 0.05)
+                and d_verb <= (0.35 if fixed_reg_violation else 0.08)
                 and (fixed_reg_violation or d_mist <= -0.15 or d_reg <= -0.15 or d_verb <= -0.15 or d_spk >= 0.08)
             ):
                 chunk_keep.append(cid)
