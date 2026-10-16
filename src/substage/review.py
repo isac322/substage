@@ -1271,7 +1271,7 @@ def repair_pragmatic_literal_traps(
             curr_k = ko.get(c.id, "").strip()
             _, tl = _effective_cue_level(c, curr_k, *levels.get(c.id, ("-", "-")), rev_map)
             o = obs_map.get(c.id)
-            obs_note = f" [obs: spk={getattr(o,'speaker',None)} adr={getattr(o,'addressee',None)} deliv={getattr(o,'delivery',None)} nonverb={getattr(o,'nonverbal',None)}]" if o else ""
+            obs_note = f" [obs_hint: spk={getattr(o,'speaker',None)} adr={getattr(o,'addressee',None)} deliv={getattr(o,'delivery',None)} nonverb={getattr(o,'nonverbal',None)}]" if o else ""
             r_cat = risk_map.get(c.id, "context_only")
             cues_block_lines.append(
                 f"  {c.id} (risk={r_cat}, target_level={tl}, dur={(c.end_ms-c.start_ms)/1000.0:.1f}s): "
@@ -1284,10 +1284,10 @@ def repair_pragmatic_literal_traps(
             f"{snap_txt}\n\n"
             f"## Window Cues:\n{cues_block}\n\n"
             f"## Instructions:\n"
-            f"1. Fill `situation.physical_blocking`: describe what is physically happening in this scene beat (posture, physical contact/restraints, spatial positions, mood).\n"
-            f"2. For each cue with `risk != 'context_only'`, analyze whether Current KO fell into a `surface_literal_trap` (translating the words literally while missing the physical blocking, body-part metonymy, spatial vector, rhetorical sarcasm, or idiom):\n"
+            f"1. SPEAKER & PROP CONTINUITY CHECK: `obs_hint` is an automated first-pass guess and is frequently WRONG when a masked speaker speaks during a reaction shot of the listener, creating a false `A -> B -> A` speaker flip inside one continuous speech. Verify who is actually speaking each cue from discourse continuity and visual props/actions across the window (e.g., blades embedded in the listener's body being pulled out in the next cue), then fill `situation.physical_blocking`.\n"
+            f"2. For each cue with `risk != 'context_only'`, analyze whether Current KO fell into a `surface_literal_trap` or a speaker-misattributed generic insult ('꼴값 떨고 있네', '꼴값 떠네'):\n"
             f"   - Example 1 (`body_or_partitive_metonymy`): 'Not all of you was asleep.' after waking up pressed chest-to-chest -> Trap: '다 잔 건 아니던데' (sleep depth) -> Anchor: '깨어 있는 데도 있더군 / 딴 데는 깨어 있던데' (a body part was awake).\n"
-            f"   - Example 2 (`visual_action_deixis`): 'You look ridiculous.' right before a fight -> Trap: '꼴값 떠네' -> Anchor: '이 꼴로 싸우게? / 이 꼴로 하게?'.\n"
+            f"   - Example 2 (`visual_action_deixis`): 'You look ridiculous.' right before a fight while blades are sticking out of the listener's body -> Trap: '꼴값 떨고 있네 / 꼴값 떠네' -> Anchor: '이 꼴로 싸우게? / 이 꼴로 하게? / 그 꼴로 싸우게?'.\n"
             f"   - Example 3 (`visual_action_deixis`): 'Put her down over here.' when strapping a captive to a chair -> Trap: '여기 내려놔' -> Anchor: '이쪽에 묶어놔'.\n"
             f"   - Example 4 (`visual_action_deixis`): 'Stay down there, Will!' from upstairs -> Trap: '거기 있어' -> Anchor: '올라오지 마, 윌!'.\n"
             f"   - Example 5 (`idiom_or_slang`): \"Oh, I smell what you're steppin' in.\" -> Trap: '똥 밟은 기분' -> Anchor: '뭔 소린지 딱 감 오네 / 뭔지 감이 왔어'.\n"
@@ -1296,12 +1296,17 @@ def repair_pragmatic_literal_traps(
         )
         scene_frames: list[Path] = []
         if proxy_video is not None and proxy_video.is_file():
-            for r_cid in sorted(risk_map)[:3]:
-                if r_cid not in cues_by_id:
-                    continue
-                rc = cues_by_id[r_cid]
+            frame_cids: list[str] = []
+            for r_cid in sorted(risk_map)[:2]:
+                if r_cid in idx_by_id:
+                    ri = idx_by_id[r_cid]
+                    for j in (ri - 1, ri, ri + 1):
+                        if 0 <= j < len(sc_cues) and sc_cues[j].id not in frame_cids:
+                            frame_cids.append(sc_cues[j].id)
+            for f_cid in frame_cids[:4]:
+                rc = cues_by_id[f_cid]
                 mid_s = (rc.start_ms + rc.end_ms) / 2000.0
-                jpg_p = frames_dir / f"{sc.id}_{r_cid}.jpg"
+                jpg_p = frames_dir / f"{sc.id}_{f_cid}.jpg"
                 if not jpg_p.is_file():
                     subprocess.run(
                         [
