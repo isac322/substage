@@ -230,7 +230,7 @@ def _effective_cue_level(
             s, a = pair.split(">", 1)
             rev_lvl = rev_map.get((a, s))
             if rev_lvl is not None and not same_level(lvl, rev_lvl):
-                return (f"{s}>{a}/{a}>{s}", f"T1:{lvl}/T2:{rev_lvl}")
+                return (f"{s}>{a}/{a}>{s}", f"{s}:{lvl}/{a}:{rev_lvl}")
     return (pair, lvl)
 
 
@@ -249,9 +249,9 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
         return False
     turns = list(addressed_levels(ko_txt))
     t_strs = speaker_turns(ko_txt)
-    if target_spec.startswith("T1:") and "/T2:" in target_spec:
-        t1_part, t2_part = target_spec.split("/T2:", 1)
-        w1, w2 = t1_part.removeprefix("T1:"), t2_part
+    if ":" in target_spec and "/" in target_spec:
+        p1, p2 = target_spec.split("/", 1)
+        w1, w2 = p1.split(":", 1)[1], p2.split(":", 1)[1]
         if len(t_strs) == 2 and len(turns) == 2:
             bins = []
             for idx in (0, 1):
