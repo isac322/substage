@@ -260,11 +260,10 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
                 if b is None and re.search(_BANMAL_MARKER_RE, t_strs[idx].strip()):
                     b = "B"
                 bins.append(b)
+            allowed_bins = {b for b in (binary(w1), binary(w2)) if b is not None}
             if bins[0] is not None and bins[1] is not None:
-                return set(bins) != {binary(w1), binary(w2)}
-            v1 = bins[0] is not None and binary(w1) is not None and bins[0] != binary(w1)
-            v2 = bins[1] is not None and binary(w2) is not None and bins[1] != binary(w2)
-            return v1 or v2
+                return set(bins) != allowed_bins
+            return any(b is not None and b not in allowed_bins for b in bins)
         if len(turns) == 1 and turns[0] is not None:
             return not (same_level(turns[0], w1) or same_level(turns[0], w2))
         return False
@@ -898,12 +897,15 @@ _FINITE_CLOSE_RE = re.compile(
     r"(?:잖아|잖아요|다|란다|단다|네|네요|군|군요|구나|구먼|래|래요|대|대요|답니다|"
     r"어요|아요|해요|지요|죠|습니다|ㅂ니다|소|오|까|까요|니|냐|거든|거든요|거야|거예요|"
     r"건가|건가요|테야|텐데|텐데요|말이야|말이죠|일걸|일걸요|할걸|할걸요|했지|했죠|됐지|됐죠|"
-    r"있지|있죠|없지|없죠|맞지|맞죠|알지|알죠|보지|보죠|주지|주죠)[.?!…\"'’”)]*$"
+    r"있지|있죠|없지|없죠|맞지|맞죠|알지|알죠|보지|보죠|주지|주죠|야지|야죠|겠지|겠죠|"
+    r"했어|봤어|왔어|갔어|줬어|났어|졌어|렸어|겼어|켰어|쳤어|었어|았어|였어|겠어|싶어|없어|있어|"
+    r"몰라|알아|맞아|같아|싶네요|던데요)[.?!…\"'’”)]*$"
 )
 _DANGLING_PP_RE = re.compile(
     r"(?:랑|이랑|랑도|이랑도|랑요|이랑요|와|과|와도|과도|에서|에서요|에선|에선요|"
-    r"으로|로|으로도|로도|까지|까지요|부터|한테|한테요|에게|에게요|사이에서|"
-    r"통해서요|소리를요|말이야|말이지)[.?!…\"'’”)]*$"
+    r"으로|로|으로도|로도|으로부터|으로부터요|로부터|로부터요|까지|까지요|부터|"
+    r"한테|한테요|한테서|에게|에게요|에게서|사이에서|통해서|통해서요|위해서|위해서요|"
+    r"소리를요|혐의로|죄목으로|유골로|시체로|파내서|말이야|말이지)[.?!…\"'’”)]*$"
 )
 
 
@@ -985,24 +987,33 @@ def repair_span_calques(
     observations,
     *,
     levels: dict[str, tuple[str, str]] | None = None,
-    calque_threshold: float = 0.48,
+    calque_threshold: float = 0.25,
 ) -> list[CueEdit]:
     """Detect right-branching English multi-cue spans with SVO calque and jointly invert into Korean SOV."""
     levels = levels or {}
     rev_map = _reverse_level_map(levels, ws)
     obs_map = _obs_by_id(observations)
     candidate_spans: list[CueSpan] = []
-    seen_spans: set[str] = set()
+    seen_cues: set[str] = set()
     for sc in scenes:
         sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
-        sp_map = detect_syntactic_spans(sc_cues, obs_map)
-        for sp in sp_map.values():
-            if sp.policy == "REVERSE_SOV_PERMITTED" and sp.span_id not in seen_spans:
-                c1_id, c2_id = sp.cue_ids
-                k1, k2 = ko.get(c1_id, "").strip(), ko.get(c2_id, "").strip()
+        idx_c = 0
+        while idx_c < len(sc_cues) - 1:
+            c1, c2 = sc_cues[idx_c], sc_cues[idx_c + 1]
+            if c1.id in seen_cues or c2.id in seen_cues:
+                idx_c += 1
+                continue
+            sp_pair = detect_syntactic_spans([c1, c2], obs_map)
+            sp = sp_pair.get(c1.id)
+            if sp is not None and sp.policy == "REVERSE_SOV_PERMITTED":
+                k1, k2 = ko.get(c1.id, "").strip(), ko.get(c2.id, "").strip()
                 if k1 and k2 and _is_svo_premature_verb_close(k1, k2):
-                    seen_spans.add(sp.span_id)
+                    seen_cues.add(c1.id)
+                    seen_cues.add(c2.id)
                     candidate_spans.append(sp)
+                    idx_c += 2
+                    continue
+            idx_c += 1
     if not candidate_spans:
         return []
 
