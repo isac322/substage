@@ -390,7 +390,10 @@ def detect_syntactic_spans(
 
 _PRAGMA_PARTITIVE_RE = re.compile(
     r"\b(?:(?:not\s+)?(?:all|part|most|half|none|rest|every\s+inch|every\s+part)\s+of\s+(?:you|me|him|her|us|it)\b"
-    r"|\b(?:all|part)\s+of\s+(?:you|me)\s+(?:was|is|wasn't|isn't)\b)",
+    r"|\b(?:all|part)\s+of\s+(?:you|me)\s+(?:was|is|wasn't|isn't)\b"
+    r"|\blove\s+\w+'s\s+brain\b"
+    r"|\byou\s+are\s+haunting\b"
+    r"|\balways\s+the\s+wrong\s+guy\b)",
     re.IGNORECASE,
 )
 _PRAGMA_DEIXIS_RE = re.compile(
@@ -402,7 +405,11 @@ _PRAGMA_DEIXIS_RE = re.compile(
     r"keep\s+it\s+steady|"
     r"just\s+take\s+it\s+slow|"
     r"right\s+there\b|"
-    r"look\s+at\s+(?:this|that)\b)",
+    r"look\s+at\s+(?:this|that)\b|"
+    r"shooting\s+myself\s+with\s+it\b|"
+    r"get\s+this\s+thing\s+off|"
+    r"as\s+soon\s+as\s+you\s+do\s+that|"
+    r"screaming\s+at\s+a\s+machine)",
     re.IGNORECASE,
 )
 _PRAGMA_IDIOM_RE = re.compile(
@@ -419,6 +426,12 @@ _PRAGMA_IDIOM_RE = re.compile(
     r"what\s+does\s+.*\s+taste\s+like|"
     r"cinnamon\s+ring|"
     r"i'd\s+love\s+a\s+blow\s+job|"
+    r"i'd\s+hit\s+that|"
+    r"she\s+don't\s+play|"
+    r"gargling\s+juggernaut|"
+    r"pixie\s+slab|"
+    r"metaphysical\s+junkyard|"
+    r"afrangry|"
     r"are\s+you\s+there\s+god\??\s+it's\s+me,\s+margaret)\b",
     re.IGNORECASE,
 )
@@ -428,10 +441,15 @@ _PRAGMA_IMPLICATURE_RE = re.compile(
     r"that\s+suit\s+says\s+different|"
     r"and\s+there\s+he\s+goes|"
     r"great,\s+it's\s+just\s+some\s+random\s+guy|"
-    r"your\s+piece\s+of\s+it\s+is\s+at\s+its\s+very\s+center)\b",
+    r"your\s+piece\s+of\s+it\s+is\s+at\s+its\s+very\s+center|"
+    r"nothing\s+easy\s+about\s+you|"
+    r"forces,\s+forces|"
+    r"well,\s+maybe\s+not\s+the\s+most|"
+    r"well,\s+he\s+better|"
+    r"tell\s+the\s+difference|"
+    r"army\s+of\s+the\s+insane)\b",
     re.IGNORECASE,
 )
-
 
 def detect_pragmatic_risk_cues(
     cues: Sequence[Cue],

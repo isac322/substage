@@ -1383,7 +1383,7 @@ def repair_pragmatic_literal_traps(
             p_curr_trap = float((ans.get(f"{cid}_curr_trap") or {}).get("noul", 0.0))
             p_cand_trap = float((ans.get(f"{cid}_cand_trap") or {}).get("noul", 0.0))
             p_cand_fit = float((ans.get(f"{cid}_cand_fit") or {}).get("noul", 0.0))
-            if p_curr_trap >= trap_threshold and p_cand_trap < p_curr_trap and p_cand_fit >= 0.55:
+            if p_curr_trap >= trap_threshold and (p_cand_trap < p_curr_trap or p_cand_fit >= 0.65) and p_cand_fit >= 0.45:
                 sc_edits.append(
                     CueEdit(
                         cue_id=cid,
