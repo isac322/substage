@@ -639,3 +639,43 @@ def test_clef_decisions_client_and_decomposed_diagnosis(ws, monkeypatch):
         ws, client, scenes, cues_by_id, ko, levels={"c0001": ("alex>sam", "해"), "c0002": ("alex>crowd", "해")},
     )
     assert len(captured) == 1 and flags2 == flags
+
+    assert review.resolve_decisions_model("auto", has_images=True) == "clef-omni"
+    assert review.resolve_decisions_model("auto", has_images=False) == "clef"
+    assert review.resolve_decisions_model("clef-flash", has_images=True) == "clef-flash"
+
+    from substage.models import CueEdit
+
+    def gate_transport(url, headers, body, timeout):
+        payload = json.loads(body)
+        ans = {}
+        for qid in payload["questions"]:
+            if qid.startswith("c0001_curr_"):
+                ans[qid] = {"type": "noul", "noul": 0.75 if "mistrans" in qid else 0.20}
+            elif qid.startswith("c0001_cand_"):
+                ans[qid] = {"type": "noul", "noul": 0.10 if "mistrans" in qid else (0.85 if "spoken" in qid else 0.15)}
+            elif qid.startswith("c0002_curr_"):
+                ans[qid] = {"type": "noul", "noul": 0.05}
+            elif qid.startswith("c0002_cand_"):
+                ans[qid] = {"type": "noul", "noul": 0.65 if "verbose" in qid else 0.05}
+        return HttpResponse(
+            200,
+            json.dumps({
+                "success": True,
+                "result": {
+                    "model": "clef",
+                    "answers": ans,
+                    "usage": {"input_tokens": 900, "output_tokens": 0},
+                },
+            }).encode("utf-8"),
+        )
+
+    gate_client = ClefDecisionsClient(ws, Settings(), "clef", transport=gate_transport)
+    raw_edits = [
+        CueEdit(cue_id="c0001", old_ko="그러니까 사랑을", new_ko="그러니까 사랑을\n꼭 붙잡아", reason="fix truncation", kind="omission"),
+        CueEdit(cue_id="c0002", old_ko="실례", new_ko="실례합니다 여러분 모두 비켜주세요", reason="over-expand", kind="naturalness"),
+        CueEdit(cue_id="c0001", old_ko="그러니까 사랑을", new_ko="줄 1\n줄 2\n줄 3", reason="3-line illegal", kind="omission"),
+    ]
+    accepted = review.filter_edits_with_decisions(ws, gate_client, raw_edits, cues_by_id, ko)
+    assert [e.cue_id for e in accepted] == ["c0001"]
+    assert accepted[0].new_ko == "그러니까 사랑을\n꼭 붙잡아"

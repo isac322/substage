@@ -544,6 +544,128 @@ def diagnose_with_decisions(
             flags.extend(chunk_flags)
     return flags
 
+
+def resolve_decisions_model(model: str, *, has_images: bool) -> str:
+    """Select the optimal Clef variant based on whether keyframe images are attached.
+
+    When ``model == "auto"``, routes multimodal calls (with keyframe images) to
+    ``clef-omni`` and pure-text calls to ``clef`` (27B dense, sharper text
+    calibration) or ``clef-flash`` when explicitly requested.
+    """
+    if model == "auto":
+        return "clef-omni" if has_images else "clef"
+    return model
+
+
+class _AcceptanceCache(BaseModel):
+    accepted_ids: list[str] = Field(default_factory=list)
+
+
+def filter_edits_with_decisions(
+    ws: Workspace,
+    client: ClefDecisionsClient,
+    edits: list[CueEdit],
+    cues_by_id: dict[str, Cue],
+    ko: dict[str, str],
+    *,
+    levels: dict[str, tuple[str, str]] | None = None,
+) -> list[CueEdit]:
+    """Clef Role-3 4-Pillar Acceptance Gate for surgical regeneration / polish edits.
+
+    Evaluates ``current_ko`` vs ``new_ko`` side-by-side (`output_tokens = 0`) and
+    commits an edit if and only if:
+      1. Line count <= 2 and non-empty.
+      2. Meaning/omission guard: ``delta_omiss <= +0.05`` (does not introduce truncation).
+      3. Verbosity/collateral guard: ``delta_verbose <= +0.08``.
+      4. Positive progress: target error drops (`delta_mistrans <= -0.15` or
+         `delta_reg <= -0.15` or `delta_verbose <= -0.15`) OR spoken fluency
+         improves (`delta_spoken >= +0.08`).
+    """
+    candidates = [
+        e for e in edits
+        if e.cue_id in cues_by_id
+        and e.new_ko.strip()
+        and e.new_ko.strip() != ko.get(e.cue_id, "").strip()
+        and len(e.new_ko.strip().splitlines()) <= 2
+    ]
+    if not candidates:
+        return []
+    levels = levels or {}
+    cp = Checkpoints(ws, "review")
+    accepted: list[CueEdit] = []
+    for idx in range(0, len(candidates), 5):
+        chunk = candidates[idx : idx + 5]
+        cases = []
+        questions: dict[str, dict[str, Any]] = {}
+        for e in chunk:
+            cid = e.cue_id
+            c = cues_by_id[cid]
+            en_txt = c.text.replace("\n", " / ")
+            curr_ko = ko.get(cid, "").strip()
+            cand_ko = e.new_ko.strip()
+            pair, lvl = levels.get(cid, ("-", "-"))
+            cases.append({
+                "id": cid,
+                "pair": pair,
+                "target_level": lvl,
+                "en": en_txt,
+                "current_ko": curr_ko,
+                "candidate_ko": cand_ko,
+                "reason": e.reason,
+            })
+            for side, val in (("curr", curr_ko), ("cand", cand_ko)):
+                questions[f"{cid}_{side}_omiss"] = {
+                    "type": "noul",
+                    "instructions": f"Cue {cid}: Does {val!r} omit or cut off the core meaning of {en_txt!r}?",
+                }
+                questions[f"{cid}_{side}_mistrans"] = {
+                    "type": "noul",
+                    "instructions": f"Cue {cid}: Does {val!r} mistranslate the joke/wordplay/intent of {en_txt!r}?",
+                }
+                questions[f"{cid}_{side}_reg"] = {
+                    "type": "noul",
+                    "instructions": f"Cue {cid}: Does {val!r} violate target speech level {lvl!r} for pair {pair!r}?",
+                }
+                questions[f"{cid}_{side}_verbose"] = {
+                    "type": "noul",
+                    "instructions": f"Cue {cid}: Is {val!r} overly wordy/cluttered for a screen subtitle?",
+                }
+                questions[f"{cid}_{side}_spoken"] = {
+                    "type": "noul",
+                    "instructions": f"Cue {cid}: Does {val!r} read as natural spoken Korean dialogue (말맛)?",
+                }
+        state_obj = {"PRO_SUBTITLE_LAWS": PRO_SUBTITLE_LAWS, "cases": cases}
+        h = input_hash(
+            "clef-role3-gate-v1",
+            client.model,
+            json.dumps(state_obj, ensure_ascii=False, sort_keys=True),
+            json.dumps(questions, ensure_ascii=False, sort_keys=True),
+        )
+        key = f"clef_gate:{idx}"
+        cached = cp.get(key, h, _AcceptanceCache)
+        if cached is not None:
+            keep_set = set(cached.accepted_ids)
+            accepted.extend(e for e in chunk if e.cue_id in keep_set)
+            continue
+        answers = client.decide(stage="s4b_gate", state=state_obj, questions=questions)
+        chunk_keep: list[str] = []
+        for e in chunk:
+            cid = e.cue_id
+            d_omiss = float((answers.get(f"{cid}_cand_omiss") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_omiss") or {}).get("noul", 0.0))
+            d_mist = float((answers.get(f"{cid}_cand_mistrans") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_mistrans") or {}).get("noul", 0.0))
+            d_reg = float((answers.get(f"{cid}_cand_reg") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_reg") or {}).get("noul", 0.0))
+            d_verb = float((answers.get(f"{cid}_cand_verbose") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_verbose") or {}).get("noul", 0.0))
+            d_spk = float((answers.get(f"{cid}_cand_spoken") or {}).get("noul", 0.0)) - float((answers.get(f"{cid}_curr_spoken") or {}).get("noul", 0.0))
+            if (
+                d_omiss <= 0.05
+                and d_verb <= 0.08
+                and (d_mist <= -0.15 or d_reg <= -0.15 or d_verb <= -0.15 or d_spk >= 0.08)
+            ):
+                chunk_keep.append(cid)
+                accepted.append(e)
+        cp.put(key, h, _AcceptanceCache(accepted_ids=chunk_keep))
+    return accepted
+
 def regenerate_flagged(
     ws: Workspace,
     gc: GeminiClient,

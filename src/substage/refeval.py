@@ -1783,7 +1783,7 @@ def evaluate_decisions_prebenchmark(
     windows: list[Window],
     arms: list[str],
     *,
-    model: str = "clef-omni",
+    model: str = "clef-flash",
     client: ClefDecisionsClient | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fast System One 6-axis decomposed pre-benchmark over sampled windows.

@@ -1082,14 +1082,24 @@ def run(
         return ws.data_dir
 
     # ---- S2b timeline ------------------------------------------------------
-    timeline = _editable(
-        ck,
-        "timeline",
-        _timeline_hash(txt.settings, context_map, scenes, cues, observations, view_tag),
-        Timeline,
-        ws.path("timeline.yaml"),
-        lambda: narrative.build_timeline(ws, txt, context_map, scenes, cues, observations),
+    decisions_cfg = getattr(settings, "decisions_model", None)
+    lean_decisions_pipeline = bool(
+        decisions_cfg
+        and plan is not None
+        and plan.architecture in {Architecture.DIRECT_AV, Architecture.MIXED}
+        and not plan.semantic_passes
     )
+    if lean_decisions_pipeline and stop_after != "timeline":
+        timeline = Timeline(scenes=[])
+    else:
+        timeline = _editable(
+            ck,
+            "timeline",
+            _timeline_hash(txt.settings, context_map, scenes, cues, observations, view_tag),
+            Timeline,
+            ws.path("timeline.yaml"),
+            lambda: narrative.build_timeline(ws, txt, context_map, scenes, cues, observations),
+        )
     if _stopped(stop_after, "timeline", ws):
         return ws.data_dir
 
@@ -1341,45 +1351,51 @@ def run(
     semantic_stage("s3-consumer-input")
 
     levels = register_mod.cue_levels(table, pairs_by_cue)
-    review_edits = list(
-        _ck(
-            ck,
-            "review",
-            input_hash(
-                _Translations(items=translations_list),
-                _Snapshots(items=list(snapshots.values())),
-                context_map,
-                register_map,
-                txt.settings.model_main,
-                *review.prompt_texts("review", settings.narrative_context),
-                *([lineage.model_dump_json(), "semantic-output-v1", _SEMANTIC_ADVISORY_SUFFIX]
-                  if lineage is not None else []),
-            ),
-            _Edits,
-            lambda: _Edits(items=review.review_windows(
-                _semantic_workspace(ws, lineage, "review"), txt, scenes, cues, translations,
-                snapshots, context_map, observations, levels=levels)),
-        ).items
-    )
-    ko, edits = _apply_edits(ko, review_edits, gate, "review", allow_omission=lineage is not None)
-    semantic_stage("s4-review")
-    ko_hash = _hash_ko(ko)
+    if lean_decisions_pipeline:
+        review_edits = []
+        edits = []
+        finale_edits = []
+    else:
+        review_edits = list(
+            _ck(
+                ck,
+                "review",
+                input_hash(
+                    _Translations(items=translations_list),
+                    _Snapshots(items=list(snapshots.values())),
+                    context_map,
+                    register_map,
+                    txt.settings.model_main,
+                    *review.prompt_texts("review", settings.narrative_context),
+                    *([lineage.model_dump_json(), "semantic-output-v1", _SEMANTIC_ADVISORY_SUFFIX]
+                      if lineage is not None else []),
+                ),
+                _Edits,
+                lambda: _Edits(items=review.review_windows(
+                    _semantic_workspace(ws, lineage, "review"), txt, scenes, cues, translations,
+                    snapshots, context_map, observations, levels=levels)),
+            ).items
+        )
+        ko, edits = _apply_edits(ko, review_edits, gate, "review", allow_omission=lineage is not None)
+        semantic_stage("s4-review")
+        ko_hash = _hash_ko(ko)
 
-    finale_raw = _ck(
-        ck,
-        "finale_audit",
-        input_hash(ko_hash, context_map, register_map, txt.settings.model_main,
-                   *review.prompt_texts("finale", settings.narrative_context),
-                   *([lineage.model_dump_json(), _SEMANTIC_ADVISORY_SUFFIX] if lineage is not None else [])),
-        _Edits,
-        lambda: _Edits(items=review.finale_audit(
-            _semantic_workspace(ws, lineage, "finale"), txt, cues, ko, context_map, observations, levels=levels)),
-    ).items
-    ko, finale_edits = _apply_edits(ko, list(finale_raw), gate, "finale", allow_omission=lineage is not None)
-    semantic_stage("s4-finale")
+        finale_raw = _ck(
+            ck,
+            "finale_audit",
+            input_hash(ko_hash, context_map, register_map, txt.settings.model_main,
+                       *review.prompt_texts("finale", settings.narrative_context),
+                       *([lineage.model_dump_json(), _SEMANTIC_ADVISORY_SUFFIX] if lineage is not None else [])),
+            _Edits,
+            lambda: _Edits(items=review.finale_audit(
+                _semantic_workspace(ws, lineage, "finale"), txt, cues, ko, context_map, observations, levels=levels)),
+        ).items
+        ko, finale_edits = _apply_edits(ko, list(finale_raw), gate, "finale", allow_omission=lineage is not None)
+        semantic_stage("s4-finale")
     ko_hash = _hash_ko(ko)
-    if getattr(settings, "decisions_model", None):
-        clef_client = llm.ClefDecisionsClient(ws, settings, settings.decisions_model)
+    if decisions_cfg:
+        diag_model = review.resolve_decisions_model(decisions_cfg, has_images=bool(scene_images))
+        clef_client = llm.ClefDecisionsClient(ws, settings, diag_model)
         flags = _ck(
             ck,
             "blind_read",
@@ -1415,6 +1431,12 @@ def run(
             _semantic_workspace(ws, lineage, "regenerate"), txt, list(flags), cues_by_id,
             snapshots, scene_of, ko, observations, levels=levels)),
     ).items
+    if decisions_cfg and regen_raw:
+        gate_model = review.resolve_decisions_model(decisions_cfg, has_images=False)
+        gate_client = llm.ClefDecisionsClient(ws, settings, gate_model)
+        regen_raw = review.filter_edits_with_decisions(
+            ws, gate_client, list(regen_raw), cues_by_id, ko, levels=levels,
+        )
     ko, regen_edits = _apply_edits(ko, list(regen_raw), gate, "regen", allow_omission=lineage is not None)
     semantic_stage("s4-regeneration")
     edits += finale_edits + regen_edits
@@ -1462,7 +1484,9 @@ def run(
     picture_kwargs = {"strict": True} if plan is not None else {}
     if plan is not None and not plan.mixed_team and not plan.av_passes:
         picture_kwargs["writer"] = txt
-    if plan is not None and plan.architecture is Architecture.SEMANTIC_IMAGE:
+    if lean_decisions_pipeline:
+        pic_edits = []
+    elif plan is not None and plan.architecture is Architecture.SEMANTIC_IMAGE:
         pic_edits = _semantic_picture_check(
             ws, txt, scenes, scene_images, cues_by_id, ko, targets, snapshots, scene_of, gate, lineage,
         )
@@ -1479,7 +1503,6 @@ def run(
     if pic_edits:
         ko = _apply_picture_edits(ko, pic_edits, settings, {c.id: c for c in cues}, lineage=lineage)
         save_model(ws.path("edits.json"), edits)
-    _save_report()
     semantic_stage("c7-picture-output")
     issues = [
         issue for cue in cues for issue in validate.check(
