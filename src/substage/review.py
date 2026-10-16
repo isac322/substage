@@ -234,8 +234,17 @@ def _effective_cue_level(
     return (pair, lvl)
 
 
+_BANMAL_MARKER_RE = (
+    r"(?:(?:텐데|건데|는데|던데)[.?!…\"'’”)]*$)"
+    r"|(?<![가-힣])안녕(?![가-힣])"
+    r"|(?:^|[\s,\-—])(?:난|내가)(?=[\s,.?!]|$)"
+)
+
+
 def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
     """True when *ko_txt* has a clear morphological ending that violates *target_spec*."""
+    import re
+
     if not ko_txt or not target_spec or target_spec == "-":
         return False
     turns = list(addressed_levels(ko_txt))
@@ -249,14 +258,16 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
         if len(turns) == 1 and turns[0] is not None:
             return not (same_level(turns[0], w1) or same_level(turns[0], w2))
         return False
-    if binary(target_spec) is None:
+    want_bin = binary(target_spec)
+    if want_bin is None:
         return False
     if len(speaker_turns(ko_txt)) == 1:
         known = [t for t in turns if t is not None]
         if known:
             return not same_level(known[-1], target_spec)
+        if want_bin == "J" and re.search(_BANMAL_MARKER_RE, ko_txt.strip()):
+            return True
     return False
-
 
 def _cue_lines(
     cues: list[Cue],

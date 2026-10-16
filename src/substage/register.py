@@ -387,6 +387,10 @@ def cue_pairs(
     Unmapped acronym/system AI voices resolve to ``system_ai``.
     Lines to nobody, oneself or unresolved names are skipped."""
     rid = name_resolver(context_map)
+    sys_ai_chars = {
+        ch.id for ch in context_map.characters
+        if _is_system_ai_speaker(ch.en_name) or any(_is_system_ai_speaker(al) for al in ch.aliases)
+    }
     obs = _flat_observations(observations)
     out: dict[str, Pair] = {}
     for c in cues:
@@ -402,6 +406,17 @@ def cue_pairs(
             adr = SYSTEM_AI
         if adr is not None and adr != spk:
             out[c.id] = (spk, adr)
+    if sys_ai_chars:
+        counts = line_counts(out)
+        sparse_ai = {
+            ch_id for ch_id in sys_ai_chars
+            if all(n < _MIN_LINES for (s, a), n in counts.items() if s == ch_id or a == ch_id)
+        }
+        if sparse_ai:
+            out = {
+                cid: (SYSTEM_AI if s in sparse_ai else s, SYSTEM_AI if a in sparse_ai else a)
+                for cid, (s, a) in out.items()
+            }
     return out
 
 def cue_turn_pairs(
