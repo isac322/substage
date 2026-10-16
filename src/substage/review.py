@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources
 from typing import Any
@@ -421,6 +422,7 @@ def diagnose_with_decisions(
     scene_images = scene_images or {}
     cp = Checkpoints(ws, "review")
     flags: list[ReadFlag] = []
+    tasks: list[tuple[str, str, list[Cue], dict[str, Any], dict[str, dict[str, Any]], list[Path]]] = []
     for scene in scenes:
         active_cues = [
             cues_by_id[cid]
@@ -500,48 +502,58 @@ def diagnose_with_decisions(
                 *[str(p) for p in imgs],
             )
             key = f"clef_diag:{scene.id}:{c_idx}"
-            cached = cp.get(key, h, _FlagBatch)
-            if cached is not None:
-                flags.extend(cached.flags)
-                continue
-            answers = client.decide(
-                stage=_STAGE_BLIND,
-                state=state_obj,
-                questions=questions,
-                images=imgs,
-            )
-            chunk_flags: list[ReadFlag] = []
-            for c in sub:
-                cid = c.id
-                p_om = float((answers.get(f"{cid}_omission") or {}).get("noul", 0.0))
-                p_mi = float((answers.get(f"{cid}_mistrans") or {}).get("noul", 0.0))
-                p_tr = float((answers.get(f"{cid}_translat") or {}).get("noul", 0.0))
-                p_rg = float((answers.get(f"{cid}_register") or {}).get("noul", 0.0))
-                p_vb = float((answers.get(f"{cid}_verbose") or {}).get("noul", 0.0))
-                p_da = float((answers.get(f"{cid}_dash_err") or {}).get("noul", 0.0))
-                reasons: list[str] = []
-                if p_om >= threshold:
-                    reasons.append(f"omission/truncation(P={p_om:.2f}: complete the missing predicate/point)")
-                if p_mi >= threshold:
-                    reasons.append(f"pragmatic_mistranslation(P={p_mi:.2f}: land the intended joke/sarcasm/wordplay)")
-                if p_tr >= max(threshold, 0.68):
-                    reasons.append(f"translationese_calque(P={p_tr:.2f}: replace literal calque with spoken Korean verb phrase)")
-                if p_rg >= threshold:
-                    reasons.append(f"register_mismatch(P={p_rg:.2f}: keep target speech level and natural vocative)")
-                if p_vb >= threshold:
-                    reasons.append(f"verbose_uncondensed(P={p_vb:.2f}: drop English filler/noise per subtitle laws)")
-                if p_da >= threshold:
-                    reasons.append(f"speaker_dash_error(P={p_da:.2f}: fix 2-speaker '- ' dash formatting)")
-                if reasons:
-                    chunk_flags.append(
-                        ReadFlag(
-                            cue_id=cid,
-                            problem="[6-Axis Diagnosis] " + "; ".join(reasons),
-                        )
+            tasks.append((key, h, sub, state_obj, questions, imgs))
+
+    def _run_diag(item: tuple[str, str, list[Cue], dict[str, Any], dict[str, dict[str, Any]], list[Path]]) -> list[ReadFlag]:
+        key, h, sub, state_obj, questions, imgs = item
+        cached = cp.get(key, h, _FlagBatch)
+        if cached is not None:
+            return cached.flags
+        answers = client.decide(
+            stage=_STAGE_BLIND,
+            state=state_obj,
+            questions=questions,
+            images=imgs,
+        )
+        chunk_flags: list[ReadFlag] = []
+        for c in sub:
+            cid = c.id
+            p_om = float((answers.get(f"{cid}_omission") or {}).get("noul", 0.0))
+            p_mi = float((answers.get(f"{cid}_mistrans") or {}).get("noul", 0.0))
+            p_tr = float((answers.get(f"{cid}_translat") or {}).get("noul", 0.0))
+            p_rg = float((answers.get(f"{cid}_register") or {}).get("noul", 0.0))
+            p_vb = float((answers.get(f"{cid}_verbose") or {}).get("noul", 0.0))
+            p_da = float((answers.get(f"{cid}_dash_err") or {}).get("noul", 0.0))
+            reasons: list[str] = []
+            if p_om >= threshold:
+                reasons.append(f"omission/truncation(P={p_om:.2f}: complete the missing predicate/point)")
+            if p_mi >= threshold:
+                reasons.append(f"pragmatic_mistranslation(P={p_mi:.2f}: land the intended joke/sarcasm/wordplay)")
+            if p_tr >= max(threshold, 0.68):
+                reasons.append(f"translationese_calque(P={p_tr:.2f}: replace literal calque with spoken Korean verb phrase)")
+            if p_rg >= threshold:
+                reasons.append(f"register_mismatch(P={p_rg:.2f}: keep target speech level and natural vocative)")
+            if p_vb >= threshold:
+                reasons.append(f"verbose_uncondensed(P={p_vb:.2f}: drop English filler/noise per subtitle laws)")
+            if p_da >= threshold:
+                reasons.append(f"speaker_dash_error(P={p_da:.2f}: fix 2-speaker '- ' dash formatting)")
+            if reasons:
+                chunk_flags.append(
+                    ReadFlag(
+                        cue_id=cid,
+                        problem="[6-Axis Diagnosis] " + "; ".join(reasons),
                     )
-            batch = _FlagBatch(flags=chunk_flags)
-            cp.put(key, h, batch)
-            flags.extend(chunk_flags)
+                )
+        cp.put(key, h, _FlagBatch(flags=chunk_flags))
+        return chunk_flags
+
+    if len(tasks) <= 1:
+        for item in tasks:
+            flags.extend(_run_diag(item))
+    else:
+        with ThreadPoolExecutor(max_workers=min(16, len(tasks))) as ex:
+            for chunk_flags in ex.map(_run_diag, tasks):
+                flags.extend(chunk_flags)
     return flags
 
 
@@ -691,7 +703,14 @@ def regenerate_flagged(
     edits: list[CueEdit] = []
     narrative = narrative_context(gc.settings)
     system = _system(narrative)
-    for sid, scene_flags in sorted(by_scene.items()):
+    obs_json = json.dumps(
+        [[o.cue_id, o.lyric_plot_relevant] for o in _obs_by_id(observations).values()],
+        ensure_ascii=False,
+    )
+    sorted_scenes = sorted(by_scene.items())
+
+    def _run_regen(item: tuple[str, list[ReadFlag]]) -> list[CueEdit]:
+        sid, scene_flags = item
         scene_cues = sorted(
             (c for cid, c in cues_by_id.items() if scene_of.get(cid) == sid),
             key=lambda c: c.start_ms,
@@ -712,10 +731,7 @@ def regenerate_flagged(
             json.dumps([[f.cue_id, f.problem] for f in scene_flags], ensure_ascii=False),
             json.dumps([[c.id, ko.get(c.id, "")] for c in scene_cues], ensure_ascii=False),
             snapshots[sid].model_dump_json() if sid in snapshots else "",
-            json.dumps(
-                [[o.cue_id, o.lyric_plot_relevant] for o in _obs_by_id(observations).values()],
-                ensure_ascii=False,
-            ),
+            obs_json,
             prompt,
             system,
             gc.settings.model_main,
@@ -733,7 +749,15 @@ def regenerate_flagged(
                     "regeneration for scene %s blocked (%s); keeping flagged lines",
                     sid, exc.reason,
                 )
-                continue
+                return []
             cp.put(key, h, batch)
-        edits.extend(batch.edits)
+        return batch.edits
+
+    if len(sorted_scenes) <= 1:
+        for item in sorted_scenes:
+            edits.extend(_run_regen(item))
+    else:
+        with ThreadPoolExecutor(max_workers=min(12, len(sorted_scenes))) as ex:
+            for sc_edits in ex.map(_run_regen, sorted_scenes):
+                edits.extend(sc_edits)
     return edits
