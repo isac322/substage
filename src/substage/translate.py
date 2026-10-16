@@ -2122,29 +2122,39 @@ def _decode_mmss_ms(ms: int) -> int:
 
 def _normalize_chunk_ost_mmss(items: list[OnScreenText], start_ms: int, end_ms: int) -> list[OnScreenText]:
     """Fix v01/chunk on-screen-text times where the model wrote MM:SS as MMSS*1000."""
+    def _is_mmss_cand(it: OnScreenText) -> bool:
+        return (
+            it.covered_by_cue is None
+            and 100_000 <= it.start_ms < 600_000
+            and it.start_ms != end_ms
+            and it.start_ms % 100 == 0
+            and it.end_ms % 100 == 0
+            and (it.start_ms // 1000) % 100 < 60
+            and (it.end_ms // 1000) % 100 < 60
+        )
+
     high = [
         it for it in items
         if it.covered_by_cue is None and 100_000 <= it.start_ms < 600_000 and it.start_ms != end_ms
     ]
-    batch_mmss = (
-        start_ms == 0
-        and len(high) >= 2
-        and all(
-            it.start_ms % 500 == 0
-            and it.end_ms % 500 == 0
-            and (it.start_ms // 1000) % 100 < 60
-            and (it.end_ms // 1000) % 100 < 60
-            for it in high
-        )
+    has_clamped_or_over = end_ms > 0 and any(
+        (it.start_ms == end_ms and it.end_ms == end_ms) or it.start_ms > end_ms for it in items
+    )
+    mmss_cands = [it for it in high if _is_mmss_cand(it)]
+    batch_mmss = start_ms == 0 and (
+        (has_clamped_or_over and len(mmss_cands) >= 1)
+        or (len(high) >= 2 and len(mmss_cands) == len(high))
     )
     out: list[OnScreenText] = []
     for it in items:
         s, e = it.start_ms, it.end_ms
+        if end_ms > 0 and s == end_ms and e == end_ms:
+            continue
         if end_ms > 0 and s > end_ms:
             ds, de = _decode_mmss_ms(s), _decode_mmss_ms(e)
             if start_ms <= ds <= end_ms:
                 s, e = ds, max(ds, min(de, end_ms))
-        elif batch_mmss and it.covered_by_cue is None and 100_000 <= s < 600_000 and s != end_ms:
+        elif batch_mmss and _is_mmss_cand(it):
             s, e = _decode_mmss_ms(s), _decode_mmss_ms(e)
         if (s, e) != (it.start_ms, it.end_ms):
             it = it.model_copy(update={"start_ms": s, "end_ms": max(e, s)})

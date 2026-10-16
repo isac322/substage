@@ -149,30 +149,40 @@ def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
     window. Empty texts are dropped."""
     span = end_ms - start_ms
     non_empty = [t for t in obs.on_screen_text if t.text.strip()]
+    def _is_mmss_cand(it: OnScreenText) -> bool:
+        return (
+            it.covered_by_cue is None
+            and 100_000 <= it.start_ms < 600_000
+            and it.start_ms != end_ms
+            and it.start_ms % 100 == 0
+            and it.end_ms % 100 == 0
+            and (it.start_ms // 1000) % 100 < 60
+            and (it.end_ms // 1000) % 100 < 60
+        )
+
     high = [
         t for t in non_empty
-        if t.covered_by_cue is None and 100_000 <= t.start_ms < 600_000
+        if t.covered_by_cue is None and 100_000 <= t.start_ms < 600_000 and t.start_ms != end_ms
     ]
-    batch_mmss = (
-        start_ms == 0
-        and len(high) >= 2
-        and all(
-            t.start_ms % 500 == 0
-            and t.end_ms % 500 == 0
-            and (t.start_ms // 1000) % 100 < 60
-            and (t.end_ms // 1000) % 100 < 60
-            for t in high
-        )
+    has_clamped_or_over = end_ms > 0 and any(
+        (t.start_ms == end_ms and t.end_ms == end_ms) or t.start_ms > end_ms for t in non_empty
+    )
+    mmss_cands = [t for t in high if _is_mmss_cand(t)]
+    batch_mmss = start_ms == 0 and (
+        (has_clamped_or_over and len(mmss_cands) >= 1)
+        or (len(high) >= 2 and len(mmss_cands) == len(high))
     )
     kept = []
     for t in non_empty:
+        if end_ms > 0 and t.start_ms == end_ms and t.end_ms == end_ms:
+            continue
         if end_ms > 0 and t.start_ms > end_ms:
             ds, de = _decode_mmss_ms(t.start_ms), _decode_mmss_ms(t.end_ms)
             if 0 <= ds <= span and start_ms > 0 and ds < start_ms - _OST_REL_SLACK_MS:
                 t.start_ms, t.end_ms = ds + start_ms, de + start_ms
             elif start_ms <= ds <= end_ms:
                 t.start_ms, t.end_ms = ds, max(ds, de)
-        elif batch_mmss and t.covered_by_cue is None and 100_000 <= t.start_ms < 600_000:
+        elif batch_mmss and _is_mmss_cand(t):
             t.start_ms = _decode_mmss_ms(t.start_ms)
             t.end_ms = _decode_mmss_ms(t.end_ms)
         if t.start_ms < start_ms - _OST_REL_SLACK_MS and 0 <= t.start_ms <= span:

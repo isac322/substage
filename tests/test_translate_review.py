@@ -571,6 +571,23 @@ def test_ost_cues_normalizes_v01_mmss_timestamps():
         (465_000, 468_000, "HI, I'M FRANCIS!"),
     ]
 
+
+def test_ost_cues_normalizes_100ms_and_mixed_mmss_and_drops_clamped_boundary():
+    obs = [
+        ChunkObservations(chunk_id="v01", start_ms=0, end_ms=565_106, on_screen_text=[
+            OnScreenText(start_ms=100_400, end_ms=103_000, text="[caption] A MAXIMUM EFFORT PRODUCTION", plot_critical=True),
+            OnScreenText(start_ms=199_000, end_ms=204_000, text="[title] LOGAN", plot_critical=True),
+            OnScreenText(start_ms=404_000, end_ms=406_000, text="[credit] A FILM BY SHAWN LEVY", plot_critical=True),
+            OnScreenText(start_ms=565_106, end_ms=565_106, text="[sign] CLAMPED BOUNDARY ARTIFACT", plot_critical=True),
+        ])
+    ]
+    new = translate.ost_cues(obs, [], [])
+    assert [(c.start_ms, c.end_ms, c.text) for c in new] == [
+        (60_400, 63_000, "A MAXIMUM EFFORT PRODUCTION"),
+        (199_000, 204_000, "LOGAN"),
+        (244_000, 246_000, "A FILM BY SHAWN LEVY"),
+    ]
+
 # --------------------------------------------------------------- sound/lyric
 
 
