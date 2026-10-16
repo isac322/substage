@@ -319,11 +319,14 @@ def _render_prev_tail(prev_ko_tail: list[tuple[str, str]]) -> str:
 _SPAN_TRAIL_RE = re.compile(r"(?:\.\.\.|…|--|—|,)\s*[\"'’”)\]]*\s*$")
 _SPAN_TERM_RE = re.compile(r"[.?!][\"'’”)\]]*\s*$")
 _SPAN_PP_MOD_RE = re.compile(
-    r"^(?:with|without|for|from|in|into|between|of|by|through|on|at|to|"
-    r"who|whom|whose|which|because|before|until|than|as|while)\b",
+    r"^(?:(?:but\s+|and\s+|not\s+)?(?:with|without|for|from|in|into|between|of|by|through|on|at|to|as)|"
+    r"who|whom|whose|which|because|before|until|than|while)\b",
     re.IGNORECASE,
 )
-_SPAN_COORD_RE = re.compile(r"^(?:and|but|or|so|then|yet)\b", re.IGNORECASE)
+_SPAN_COORD_RE = re.compile(
+    r"^(?:(?:and|but)(?!\s+(?:with|without|for|from|in|into|between|of|by|through|on|at|to|as)\b)|or|so|then|yet)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)

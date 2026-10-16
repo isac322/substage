@@ -896,16 +896,17 @@ def regenerate_flagged(
 _FINITE_CLOSE_RE = re.compile(
     r"(?:잖아|잖아요|다|란다|단다|네|네요|군|군요|구나|구먼|래|래요|대|대요|답니다|"
     r"어요|아요|해요|지요|죠|습니다|ㅂ니다|소|오|까|까요|니|냐|거든|거든요|거야|거예요|"
-    r"건가|건가요|테야|텐데|텐데요|말이야|말이죠|일걸|일걸요|할걸|할걸요|했지|했죠|됐지|됐죠|"
+    r"건가|건가요|테야|텐데|텐데요|말이야|말이죠|말이다|일걸|일걸요|할걸|할걸요|했지|했죠|됐지|됐죠|"
     r"있지|있죠|없지|없죠|맞지|맞죠|알지|알죠|보지|보죠|주지|주죠|야지|야죠|겠지|겠죠|"
     r"했어|봤어|왔어|갔어|줬어|났어|졌어|렸어|겼어|켰어|쳤어|었어|았어|였어|겠어|싶어|없어|있어|"
-    r"몰라|알아|맞아|같아|싶네요|던데요)[.?!…\"'’”)]*$"
+    r"몰라|알아|맞아|같아|싶네요|던데요|불공평해|무리야|위험해|불가능해)[.?!…\"'’”)]*$"
 )
 _DANGLING_PP_RE = re.compile(
     r"(?:랑|이랑|랑도|이랑도|랑요|이랑요|와|과|와도|과도|에서|에서요|에선|에선요|"
     r"으로|로|으로도|로도|으로부터|으로부터요|로부터|로부터요|까지|까지요|부터|"
     r"한테|한테요|한테서|에게|에게요|에게서|사이에서|통해서|통해서요|위해서|위해서요|"
-    r"소리를요|혐의로|죄목으로|유골로|시체로|파내서|말이야|말이지)[.?!…\"'’”)]*$"
+    r"소리를요|혐의로|죄목으로|유골로|시체로|파내서|말이야|말이지|말이다|일에|일에요|"
+    r"을요|를요|은요|는요|이요|가요|도요|함께|함께요)[.?!…\"'’”)]*$"
 )
 
 
@@ -927,11 +928,17 @@ def _last_turn_text(ko_txt: str) -> str:
     return turns[-1].strip() if turns else ko_txt.strip()
 
 
-def _has_cross_cue_duplicate(ko1: str, ko2: str) -> bool:
-    w1 = {w.strip(".,?!…\"'’”)-") for w in ko1.split() if len(w.strip(".,?!…\"'’”)-")) >= 3}
-    w2 = {w.strip(".,?!…\"'’”)-") for w in ko2.split() if len(w.strip(".,?!…\"'’”)-")) >= 3}
-    return bool(w1 & w2)
+_STOP_STEMS = {"그리고", "하지만", "그래서", "그런데", "어쩌면", "그렇게", "이렇게", "우리도", "우리가"}
 
+
+def _has_cross_cue_duplicate(ko1: str, ko2: str) -> bool:
+    t1 = [w.strip(".,?!…\"'’”)-") for w in ko1.split() if len(w.strip(".,?!…\"'’”)-")) >= 3]
+    t2 = [w.strip(".,?!…\"'’”)-") for w in ko2.split() if len(w.strip(".,?!…\"'’”)-")) >= 3]
+    if set(t1) & set(t2):
+        return True
+    s1 = {w[:3] for w in t1 if len(w) >= 4 and w[:3] not in _STOP_STEMS}
+    s2 = {w[:3] for w in t2 if len(w) >= 4 and w[:3] not in _STOP_STEMS}
+    return bool(s1 & s2)
 
 def _is_svo_premature_verb_close(ko1: str, ko2: str) -> bool:
     """True when Cue 1 closes with a finite verb or Cue 2 ends with a dangling PP/duplicate."""
@@ -1000,19 +1007,18 @@ def repair_span_calques(
         idx_c = 0
         while idx_c < len(sc_cues) - 1:
             c1, c2 = sc_cues[idx_c], sc_cues[idx_c + 1]
-            if c1.id in seen_cues or c2.id in seen_cues:
+            k1, k2 = ko.get(c1.id, "").strip(), ko.get(c2.id, "").strip()
+            if c1.id in seen_cues or c2.id in seen_cues or not k1 or not k2 or k2.lstrip().startswith("-"):
                 idx_c += 1
                 continue
             sp_pair = detect_syntactic_spans([c1, c2], obs_map)
             sp = sp_pair.get(c1.id)
-            if sp is not None and sp.policy == "REVERSE_SOV_PERMITTED":
-                k1, k2 = ko.get(c1.id, "").strip(), ko.get(c2.id, "").strip()
-                if k1 and k2 and _is_svo_premature_verb_close(k1, k2):
-                    seen_cues.add(c1.id)
-                    seen_cues.add(c2.id)
-                    candidate_spans.append(sp)
-                    idx_c += 2
-                    continue
+            if sp is not None and sp.policy == "REVERSE_SOV_PERMITTED" and _is_svo_premature_verb_close(k1, k2):
+                seen_cues.add(c1.id)
+                seen_cues.add(c2.id)
+                candidate_spans.append(sp)
+                idx_c += 2
+                continue
             idx_c += 1
     if not candidate_spans:
         return []
@@ -1095,8 +1101,10 @@ def repair_span_calques(
                 return None
             if res.strategy == "preserve_reveal_order":
                 return None
-            n1 = rewrap(res.c1_ko.strip(), 14, 12)
-            n2 = rewrap(res.c2_ko.strip(), 14, 12)
+            raw1 = res.c1_ko.strip() if curr1.lstrip().startswith("-") else " ".join(res.c1_ko.splitlines())
+            raw2 = res.c2_ko.strip() if curr2.lstrip().startswith("-") else " ".join(res.c2_ko.splitlines())
+            n1 = rewrap(raw1, 14, 12)
+            n2 = rewrap(raw2, 14, 12)
             if _is_valid_sov_rewrite(curr1, curr2, n1, n2, tl1, tl2, require_open_c1=True):
                 return (sp, n1, n2)
         return None
