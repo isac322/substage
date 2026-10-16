@@ -248,12 +248,21 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
     if not ko_txt or not target_spec or target_spec == "-":
         return False
     turns = list(addressed_levels(ko_txt))
+    t_strs = speaker_turns(ko_txt)
     if target_spec.startswith("T1:") and "/T2:" in target_spec:
         t1_part, t2_part = target_spec.split("/T2:", 1)
         w1, w2 = t1_part.removeprefix("T1:"), t2_part
-        if len(turns) == 2:
-            v1 = turns[0] is not None and binary(w1) is not None and not same_level(turns[0], w1)
-            v2 = turns[1] is not None and binary(w2) is not None and not same_level(turns[1], w2)
+        if len(t_strs) == 2 and len(turns) == 2:
+            bins = []
+            for idx in (0, 1):
+                b = binary(turns[idx])
+                if b is None and re.search(_BANMAL_MARKER_RE, t_strs[idx].strip()):
+                    b = "B"
+                bins.append(b)
+            if bins[0] is not None and bins[1] is not None:
+                return set(bins) != {binary(w1), binary(w2)}
+            v1 = bins[0] is not None and binary(w1) is not None and bins[0] != binary(w1)
+            v2 = bins[1] is not None and binary(w2) is not None and bins[1] != binary(w2)
             return v1 or v2
         if len(turns) == 1 and turns[0] is not None:
             return not (same_level(turns[0], w1) or same_level(turns[0], w2))

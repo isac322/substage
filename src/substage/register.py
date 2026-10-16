@@ -896,7 +896,7 @@ class RegisterGate:
                 allowed = [old[i]] if len(old) == len(new) else list(old)
                 if table_level is not None and rev_level is not None:
                     if len(new) == 2:
-                        allowed.append(table_level if i == 0 else rev_level)
+                        allowed.extend([table_level, rev_level])
                     elif same_level(table_level, rev_level):
                         allowed.append(table_level)
                 if lvl is not None and not any(same_level(lvl, a) for a in allowed):
