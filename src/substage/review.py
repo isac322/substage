@@ -1332,24 +1332,29 @@ def repair_pragmatic_literal_traps(
         if not notes_by_cid:
             return []
 
-        if is_av_writer:
-            cand_map = {item_t.cue_id: item_t.ko for item_t in av_batch.translations}
-        else:
+        cand_map = {item_t.cue_id: item_t.ko for item_t in av_batch.translations}
+        need_stage2 = (not is_av_writer) or any(
+            not cand_map.get(cid) or rewrap(cand_map[cid].strip(), 14, 12) == ko.get(cid, "").strip()
+            for cid in notes_by_cid
+        )
+        if need_stage2:
             card_json = av_batch.situation.model_dump_json(indent=2)
             op_prompt = (
                 f"Scene {sc.id} Situational Card (from Visual Perception Helper):\n{card_json}\n\n"
                 f"## Window Cues:\n{cues_block}\n\n"
-                f"Rewrite ONLY the cues in `situation.cues` where `category != 'literal'` so the Korean subtitle avoids `surface_literal_trap` and naturally conveys `situational_intent` using `korean_explicitation_anchor`.\n"
+                f"Rewrite ONLY the cues in `situation.cues` where `category != 'literal'` so the Korean subtitle DIFFERS from Current KO, avoids `surface_literal_trap`, and naturally conveys `situational_intent` using `korean_explicitation_anchor`.\n"
                 f"Keep exact `target_level` (반말/존댓말), '- ' speaker dashes, and <=14 chars/line."
             )
             try:
+                kw_img = {"images": scene_frames} if is_av_writer and scene_frames else {}
                 op_batch = txt_client.generate(
-                    stage=_STAGE_REGEN, prompt=op_prompt, schema=_PragmaKoOnlyBatch, system=sys_prompt
+                    stage=_STAGE_REGEN, prompt=op_prompt, schema=_PragmaKoOnlyBatch, system=sys_prompt, **kw_img
                 )
-                cand_map = {item_t.cue_id: item_t.ko for item_t in op_batch.translations}
+                for item_t in op_batch.translations:
+                    if item_t.ko.strip():
+                        cand_map[item_t.cue_id] = item_t.ko
             except GeminiBlocked:
-                cand_map = {item_t.cue_id: item_t.ko for item_t in av_batch.translations}
-
+                pass
         # Stage 3: Situation-Grounded Clef Role-2/Role-3 Verification Gate
         questions: dict[str, dict[str, Any]] = {}
         cases_state = []
