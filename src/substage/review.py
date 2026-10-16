@@ -261,12 +261,11 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
     want_bin = binary(target_spec)
     if want_bin is None:
         return False
-    if len(speaker_turns(ko_txt)) == 1:
-        known = [t for t in turns if t is not None]
-        if known:
-            return not same_level(known[-1], target_spec)
-        if want_bin == "J" and re.search(_BANMAL_MARKER_RE, ko_txt.strip()):
-            return True
+    known = [t for t in turns if t is not None]
+    if known:
+        return any(not same_level(t, target_spec) for t in known)
+    if len(speaker_turns(ko_txt)) == 1 and want_bin == "J" and re.search(_BANMAL_MARKER_RE, ko_txt.strip()):
+        return True
     return False
 
 def _cue_lines(
