@@ -1287,12 +1287,12 @@ def repair_pragmatic_literal_traps(
             f"1. SPEAKER & PROP CONTINUITY CHECK: `obs_hint` is an automated first-pass guess and is frequently WRONG when a masked speaker speaks during a reaction shot of the listener, creating a false `A -> B -> A` speaker flip inside one continuous speech. Verify who is actually speaking each cue from discourse continuity and visual props/actions across the window (e.g., blades embedded in the listener's body being pulled out in the next cue), then fill `situation.physical_blocking`.\n"
             f"2. For each cue with `risk != 'context_only'`, analyze whether Current KO fell into a `surface_literal_trap` or a speaker-misattributed generic insult ('꼴값 떨고 있네', '꼴값 떠네'):\n"
             f"   - Example 1 (`body_or_partitive_metonymy`): 'Not all of you was asleep.' after waking up pressed chest-to-chest -> Trap: '다 잔 건 아니던데' (sleep depth) -> Anchor: '깨어 있는 데도 있더군 / 딴 데는 깨어 있던데' (a body part was awake).\n"
-            f"   - Example 2 (`visual_action_deixis`): 'You look ridiculous.' right before a fight while blades are sticking out of the listener's body -> Trap: '꼴값 떨고 있네 / 꼴값 떠네' -> Anchor: '이 꼴로 싸우게? / 이 꼴로 하게? / 그 꼴로 싸우게?'.\n"
+            f"   - Example 2 (`visual_action_deixis`): 'You look ridiculous.' right before a fight while blades are sticking out of the listener's body -> Trap: '꼴값 떨고 있네 / 꼴값 떠네' -> Anchor: '이 꼴로 싸우게? / 그 꼴로 싸우게? / 이 꼴로 하게?' (preserve deictic '이 꼴로 / 그 꼴로'; NEVER insert unmentioned prop nouns like '칼').\n"
             f"   - Example 3 (`visual_action_deixis`): 'Put her down over here.' when strapping a captive to a chair -> Trap: '여기 내려놔' -> Anchor: '이쪽에 묶어놔'.\n"
             f"   - Example 4 (`visual_action_deixis`): 'Stay down there, Will!' from upstairs -> Trap: '거기 있어' -> Anchor: '올라오지 마, 윌!'.\n"
             f"   - Example 5 (`idiom_or_slang`): \"Oh, I smell what you're steppin' in.\" -> Trap: '똥 밟은 기분' -> Anchor: '뭔 소린지 딱 감 오네 / 뭔지 감이 왔어'.\n"
             f"   - Example 6 (`conversational_implicature`): 'Where else do you put one out?' (about putting cigarettes out on skin) -> Trap: '딴 데도 꺼요?' -> Anchor: '내 몸 말고 딴 데도 꺼? / 난 온몸이 재떨이야'.\n"
-            f"3. If a cue is genuinely literal in context, set `category='literal'` and keep Current KO unchanged. For non-literal cues, provide the natural spoken Korean subtitle in `translations` (<=14 chars/line, <=2 lines, preserving exact `target_level` and '- ' dashes)."
+            f"3. Keep off-record deictic tone: if English uses a pronoun/deictic ('all of you', 'look ridiculous'), use a Korean deictic ('딴 데는', '그 꼴로 / 이 꼴로') rather than naming the literal body part or prop ('칼'). For non-literal cues, provide the natural spoken Korean subtitle in `translations` (<=14 chars/line, <=2 lines, preserving exact `target_level` and '- ' dashes)."
         )
         scene_frames: list[Path] = []
         if proxy_video is not None and proxy_video.is_file():
