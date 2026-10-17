@@ -14,9 +14,11 @@ For every cue you can verify, report:
   shouting, deadpan, teary, mocking…). Omit when neutral.
 - nonverbal: gesture / expression / action that changes or sharpens the line's meaning
   (points at X, shows photo, avoids eye contact…). Omit when irrelevant.
-- lyric_plot_relevant: for ♪ cues (song lyrics) only — true when the sung line carries
-  story information, is dialogue addressed to a character, or calls back to an earlier
-  line/motif; false for incidental/background songs. Omit on non-♪ cues.
+- lyric_plot_relevant: for ♪ cues (song lyrics) only — true when an on-screen or named
+  character sings/chants the line (including rhyme games, parodies, children's songs, hymns,
+  or birthday songs), when the line carries story information, is dialogue addressed to a
+  character, or calls back to an earlier line/motif; false for unattributed background BGM,
+  credit songs, songs playing under foreground speech/signs, or pure vocable noise. Omit on non-♪ cues.
 
 Also report:
 - present_characters: every named character visible or heard in this chunk (consistent names).

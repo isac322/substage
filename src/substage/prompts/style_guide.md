@@ -345,11 +345,11 @@ Not when: the image is transparent in Korean or world-famous (fight dirty, lab r
 - How you do anything is how you do everything. | 하나를 하는 방식이 모든 걸 하는 방식이다 | '한 가지를 대하는 태도가 / 만 가지를 대하는 태도다'
 
 ### 6.5 Comic sung jokes, chants and gag signs: subtitle them, rebuilding the rhyme.
-Why: the laugh is in the lyric or the sign; a blank loses it entirely.
-Not when: background soundtrack that doesn't affect the scene; a lyric under dialogue or under on-screen text that matters.
-- We live in Arizon-ia ♪ … stony-a ♪ | (no subtitle) | ♪ 우리집은 애리조니아 / 텅텅 빈 황무지야
-- Brother, wanna thank your mother for a butt like that | (no subtitle) | ♪ 엄마 덕에 / 엉덩이는 타고났지
-
+Why: when a character sings a parody, rhyme game or demonstration hook on screen, the laugh is in the sound-play; a blank or a flat medical/dictionary gloss loses it entirely. Rebuild the shared phonetic ending across the chain ('-이카 / -니까', '-카', '-야', '밥바루 루밥'), keep spoken replies ('정답!') in spoken register, and drop pure vocable cues ('Oy, oy, oy', 'Bom, bom, tsk', 'Shoop shooop ba-doop').
+Not when: background soundtrack, credit songs, off-screen transition humming tails, or any lyric sitting under foreground dialogue or under on-screen text.
+- Kleenex-ica, Windex-ica ♪ / She's sexy-ca, oh, boy ♪ | (no subtitle) | 크리넥사이카, 윈덱사이카 / 그녀는 섹시하니까
+- Pneumonia, dyslexia, leukemia ♪ | 폐렴, 난독증, 백혈병 | 알파카, 알라스카, 남아프리카!
+- We live in Arizon-ia ♪ … stony-a ♪ | (no subtitle) | 우리집은 애리조니아 / 텅텅 빈 황무지야
 ### 6.6 Performed songs: subtitle every lyric with a leading ♪, for meaning, in a lyric voice.
 When a song is performed on screen as story (concert, audition, rehearsal, recording, a character singing to someone, a song quoted for a joke), subtitle each lyric cue. Translate the meaning, not the rhyme, in a short sung register independent of the singer's speech level: lyrical 반말 by default (즐기며 살아), soft 해요 or -나요 for ballads, pleas and songs to a parent or a beloved (모르시나요?). Lyrics are the one place 그대 and 그녀 are natural. Drop ooh/yeah fills, transliterate nonsense hooks, collapse repeated hooks, and render a repeated chorus identically every time. Song titles stay transliterated; video titles use the Korean release title.
 Format: one "♪ " at the start of the cue, never at the end or on line 2, no ellipsis. The pipeline adds the mark to subtitled lyric cues, so write the lyric text itself without ♪.

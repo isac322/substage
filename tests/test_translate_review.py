@@ -891,6 +891,41 @@ def test_review_rows_carry_cue_kind(tmp_path):
     assert " c4 | - | - | kind=lyric-incidental" in gc2.calls[0]["prompt"]
 
 
+
+def test_hwang_lyric_classification_and_bgm_guard():
+    from substage.validate import classify_lyric_cue, is_translated_lyric
+
+    c_spoken1 = cue("c1", 0, 2000, "Because I'm Tutti, and you're Frutti.")
+    c_hook = cue("c2", 2100, 4000, "A wop bop b-luma, b-lop bam bom.", lyric=True)
+    c_spoken2 = cue("c3", 4100, 6000, "So who else are you gonna listen to?")
+    c_parody = cue("c4", 7000, 10000, "Kleenex-ica, Windex-ica\nShe's sexy-ca, oh, boy", lyric=True)
+    c_vocable = cue("c5", 10100, 12000, "Oy, oy, oy, oy", lyric=True)
+    c_tail = cue("c6", 14000, 17000, "Hyen-ica, hyen-ica, hyen-ica, hiya", lyric=True)
+    c_bgm_under_speech = cue("c7", 18000, 21000, "A pretty woman makes her husband look small", lyric=True)
+    sc_cues = [c_spoken1, c_hook, c_spoken2, c_parody, c_vocable, c_tail, c_bgm_under_speech]
+    obs_map = {
+        "c1": CueObservation(cue_id="c1", speaker="Bennie Loewy"),
+        "c2": CueObservation(cue_id="c2", speaker="Bennie Loewy", lyric_plot_relevant=False),
+        "c3": CueObservation(cue_id="c3", speaker="Bennie Loewy"),
+        "c4": CueObservation(cue_id="c4", speaker="Bennie Loewy", lyric_plot_relevant=False),
+        "c5": CueObservation(cue_id="c5", speaker="Bennie Loewy", lyric_plot_relevant=False),
+        "c6": CueObservation(cue_id="c6", speaker="Bennie Loewy", lyric_plot_relevant=False),
+        "c7": CueObservation(cue_id="c7", speaker=None, lyric_plot_relevant=True),
+    }
+    assert classify_lyric_cue(c_hook, obs_map, sc_cues) == "parody_or_rhyme_game"
+    assert is_translated_lyric(c_hook, obs_map, sc_cues) is True
+    assert classify_lyric_cue(c_parody, obs_map, sc_cues) == "parody_or_rhyme_game"
+    assert is_translated_lyric(c_parody, obs_map, sc_cues) is True
+    assert classify_lyric_cue(c_vocable, obs_map, sc_cues) == "omitted_vocable"
+    assert is_translated_lyric(c_vocable, obs_map, sc_cues) is False
+    assert classify_lyric_cue(c_tail, obs_map, [c_tail]) == "omitted_background_or_credit"
+    assert is_translated_lyric(c_tail, obs_map, [c_tail]) is False
+    assert classify_lyric_cue(c_bgm_under_speech, obs_map, [c_spoken1, c_bgm_under_speech]) == "omitted_background_or_credit"
+    assert is_translated_lyric(c_bgm_under_speech, obs_map, [c_spoken1, c_bgm_under_speech]) is False
+
+    qs = review.build_clef_lyric_questions([{"id": "c4", "en": c_parody.text, "ko": "크리넥사이카, 윈덱사이카", "lyric_mode": "parody_or_rhyme_game"}])
+    assert set(qs.keys()) == {"c4_no_bgm_leak", "c4_rhyme_or_sense_ok", "c4_no_note_and_clean_format"}
+
 # ------------------------------------------------------------ character names
 
 

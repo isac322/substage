@@ -46,7 +46,7 @@ from .translate import (
     detect_pragmatic_risk_cues,
     detect_syntactic_spans,
 )
-from .validate import ost_kind, rewrap
+from .validate import is_translated_lyric, ost_kind, rewrap
 
 WINDOW_SCENES = 3
 
@@ -305,8 +305,11 @@ def _cue_lines(
         if _NON_TRANSLATED.match(c.text):
             kind = "sound"
         elif c.lyric:
-            o = obs_by_id.get(c.id)
-            kind = "lyric-relevant" if (o and o.lyric_plot_relevant) else "lyric-incidental"
+            kind = (
+                "lyric-relevant"
+                if is_translated_lyric(c, obs_by_id, cues)
+                else "lyric-incidental"
+            )
         elif ost_kind(c) == "credit":
             kind = "credit"
         elif c.source == "ost" or c.forced:
@@ -1567,6 +1570,38 @@ def build_clef_ost_quality_questions(cases: Sequence[dict[str, Any]]) -> dict[st
                 f"Cue {cid}: If ({en_t!r}) is a close-up prop, gag credit, or location/time caption, is ({ko_t!r}) "
                 f"translated into natural idiomatic Korean (e.g. country-first location order, punchy gag credit) "
                 f"rather than dropped empty or left in raw English?"
+            ),
+        }
+    return questions
+
+
+def build_clef_lyric_questions(cases: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Divide-and-Conquer Clef atomic sub-questions for Hwang Seok-hee lyric & BGM verification."""
+    questions: dict[str, dict[str, Any]] = {}
+    for c in cases:
+        cid = str(c["id"])
+        en_t = str(c.get("en", ""))
+        ko_t = str(c.get("ko", ""))
+        mode = str(c.get("lyric_mode", "performed_song"))
+        questions[f"{cid}_no_bgm_leak"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid} (mode={mode!r}, EN={en_t!r}, KO={ko_t!r}): "
+                f"Does KO strictly avoid translating background music, end-credit songs, or pure vocable noise?"
+            ),
+        }
+        questions[f"{cid}_rhyme_or_sense_ok"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid} (mode={mode!r}, EN={en_t!r}, KO={ko_t!r}): "
+                f"If mode is parody_or_rhyme_game, does KO rebuild the phonetic rhyme/sound-play in Korean "
+                f"rather than dictionary-glossing nouns; if performed_song, does it convey the lyric meaning naturally?"
+            ),
+        }
+        questions[f"{cid}_no_note_and_clean_format"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid} (KO={ko_t!r}): Is KO free of '♪'/'♫' symbols, <=2 lines, and <=14 chars/line?"
             ),
         }
     return questions

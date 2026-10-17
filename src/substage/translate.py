@@ -41,8 +41,7 @@ from . import layout, media, memory, perception
 from .capability import Architecture, CapabilityError, RoutePlan, resolve_route
 from .config import Settings, Workspace, narrative_context, narrative_text
 from .gemini import Clip, GeminiBlocked, GeminiClient, UploadedFile
-from .validate import OST_KIND, _may_stay_empty, en_speaker_turns, is_gag_credit, ost_kind
-from .llm import LLMClient, make_client
+from .llm import LLMClient, make_client, text_client
 from .models import (
     Cue,
     CueObservation,
@@ -69,7 +68,15 @@ from .models import (
 from .register import render_scene_register
 from .store import Checkpoints, input_hash
 from .style import with_guide
-from .validate import OST_KIND, en_speaker_turns, ost_kind
+from .validate import (
+    OST_KIND,
+    _may_stay_empty,
+    classify_lyric_cue,
+    en_speaker_turns,
+    is_gag_credit,
+    is_translated_lyric,
+    ost_kind,
+)
 
 KO_TAIL = 6          # previous-scene KO lines passed for continuity
 ACT_WORKERS = 4      # max parallel act threads
@@ -495,8 +502,15 @@ def _render_cues(
         tags: list[str] = []
         o = obs_by_id.get(c.id)
         if c.lyric:
-            rel = o.lyric_plot_relevant if o else None
-            tags.append("LYRIC PLOT-RELEVANT" if rel else "LYRIC INCIDENTAL")
+            lmode = classify_lyric_cue(c, obs_by_id, cues)
+            if lmode == "parody_or_rhyme_game":
+                tags.append("LYRIC PLOT-RELEVANT | PARODY/RHYME CHAIN")
+            elif lmode == "spoken_with_stray_note":
+                tags.append("LYRIC PLOT-RELEVANT | SPEECH WITH STRAY ♪")
+            elif lmode == "performed_song":
+                tags.append("LYRIC PLOT-RELEVANT")
+            else:
+                tags.append("LYRIC INCIDENTAL")
         if ost_kind(c) == "credit" and not is_gag_credit(c.text):
             tags.append("ON-SCREEN CREDIT")
         elif c.source == "ost" or c.forced:
@@ -568,8 +582,12 @@ def _untranslated_ids(
     obs_by_id = {o.cue_id: o for o in observations}
     skip = {c.id for c in scene_cues if _NON_TRANSLATED.match(c.text)}
     for c in scene_cues:
-        o = obs_by_id.get(c.id)
-        if c.lyric and not (o and o.lyric_plot_relevant):
+        if c.lyric and not is_translated_lyric(c, obs_by_id, scene_cues):
+            skip.add(c.id)
+        elif not c.lyric and classify_lyric_cue(c, obs_by_id, scene_cues) in (
+            "omitted_vocable",
+            "omitted_background_or_credit",
+        ):
             skip.add(c.id)
     return skip
 

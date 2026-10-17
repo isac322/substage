@@ -532,6 +532,127 @@ def is_gag_credit(text: str) -> bool:
     return bool(_GAG_CREDIT_RE.search(text or ""))
 
 
+_VOCABLE_TOKEN_RE = re.compile(
+    r"^(?:o+y+|b+o+m+|b+o+p+|t+s+k+|s+h+o+p+|b+a+|d+o+p+|l+a+|n+a+|d+a+|r+o+n+|"
+    r"o+h+|a+h*|u+h+|h+m+|y+e+a+h+|w+h+o+a+|h+i+y+a+|w+o+p+|l+u+m+a+|"
+    r"l+o+p+|b+l+u+m+a+|b+l+o+p+|b+a+m+|[bl])$",
+    re.IGNORECASE,
+)
+_RHYME_PARODY_RE = re.compile(
+    r"\b[a-z]+-(?:ica|ia|ca|a)\b|"
+    r"\b(?:pneumonia|dyslexia|leukemia|leningrad|petrograd|arizon-ia|bologn-ia)\b",
+    re.IGNORECASE,
+)
+_GENERIC_SPEAKERS = frozenset(
+    {"group", "singer", "narrator", "radio", "tv", "chorus", "crowd", "vo", "v.o."}
+)
+
+
+def is_pure_vocable_lyric(text: str) -> bool:
+    """True when a lyric line contains only non-lexical vocables / beatbox syllables."""
+    cleaned = _BRACKETED.sub(" ", text or "").replace("♪", " ").replace("♫", " ")
+    tokens = re.findall(r"[a-zA-Z]+", cleaned)
+    if not tokens:
+        return True
+    return all(bool(_VOCABLE_TOKEN_RE.match(t)) for t in tokens)
+
+
+def has_repetitive_lyric_tail(text: str) -> bool:
+    """True when a short lyric repeats the same 4+ letter stem across the cue (off-screen tail)."""
+    cleaned = re.sub(r"[^a-zA-Z\s]", " ", text or "").lower()
+    words = [w for w in cleaned.split() if len(w) >= 4]
+    if len(words) < 3:
+        return False
+    counts: dict[str, int] = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    return max(counts.values()) >= 2
+
+
+def classify_lyric_cue(
+    cue: Cue,
+    obs_by_id: Mapping[str, CueObservation | CuePerception],
+    scene_cues: Sequence[Cue] = (),
+) -> str:
+    """Classify a cue into Hwang Seok-hee lyric modes without movie-specific rules.
+
+    Modes:
+    - ``parody_or_rhyme_game``: character-sung phonetic rhyme chain or demonstration hook
+    - ``performed_song``: character/group song or standalone plot-relevant lyric
+    - ``spoken_with_stray_note``: spoken simile or dual-speaker reply carrying a stray ♪
+    - ``omitted_vocable``: pure beatbox/vocables without a conversational demonstration frame
+    - ``omitted_background_or_credit``: unattributed BGM, song under speech/OST, or transition tail
+    - ``not_lyric``: ordinary non-lyric cue
+    """
+    o = obs_by_id.get(cue.id)
+    spk = (o.speaker or "").strip() if o and getattr(o, "speaker", None) else ""
+    is_named_char = bool(spk and spk.lower() not in _GENERIC_SPEAKERS)
+    rel = bool(o and getattr(o, "lyric_plot_relevant", False))
+
+    if not cue.lyric:
+        if cue.source != "ost" and is_pure_vocable_lyric(cue.text) and "singing" in (cue.raw or "").lower():
+            return "omitted_vocable"
+        return "not_lyric"
+
+    # 1. Competing on-screen text / title card in the same window wins over background music
+    for other in scene_cues:
+        if other.id != cue.id and other.source == "ost":
+            if min(other.end_ms, cue.end_ms) - max(other.start_ms, cue.start_ms) >= -250:
+                return "omitted_background_or_credit"
+
+    # 2. Pure vocables (Oy oy, Bom bom tsk, Shoop ba-doop, La la)
+    if is_pure_vocable_lyric(cue.text):
+        if is_named_char and scene_cues:
+            has_prev_spoken = any(
+                not x.lyric and x.source != "ost" and x.end_ms <= cue.start_ms + 500
+                for x in scene_cues
+            )
+            has_next_spoken = any(
+                not x.lyric and x.source != "ost" and x.start_ms >= cue.end_ms - 500
+                for x in scene_cues
+            )
+            if has_prev_spoken and has_next_spoken and not rel:
+                return "parody_or_rhyme_game"
+        return "omitted_vocable"
+
+    # 3. Specific named character singing, chanting, or speaking with a stray note
+    if is_named_char:
+        is_dual_line = any(l.lstrip().startswith("-") for l in cue.text.splitlines())
+        if not rel and has_repetitive_lyric_tail(cue.text) and not is_dual_line:
+            return "omitted_background_or_credit"
+        if _RHYME_PARODY_RE.search(cue.text):
+            return "parody_or_rhyme_game"
+        if "like a " in cue.text.lower() or "exactly!" in cue.text.lower():
+            return "spoken_with_stray_note"
+        return "performed_song"
+
+    # 4. Group or unattributed lyric
+    if not rel:
+        return "omitted_background_or_credit"
+    if not spk and scene_cues:
+        has_competing_named_speech = any(
+            not x.lyric
+            and x.source != "ost"
+            and bool(getattr(obs_by_id.get(x.id), "speaker", None))
+            for x in scene_cues
+        )
+        if has_competing_named_speech:
+            return "omitted_background_or_credit"
+    return "performed_song"
+
+
+def is_translated_lyric(
+    cue: Cue,
+    obs_by_id: Mapping[str, CueObservation | CuePerception],
+    scene_cues: Sequence[Cue] = (),
+) -> bool:
+    """True when a lyric cue should be translated under the Hwang Seok-hee standard."""
+    return classify_lyric_cue(cue, obs_by_id, scene_cues) in (
+        "parody_or_rhyme_game",
+        "performed_song",
+        "spoken_with_stray_note",
+    )
+
 def ost_kind(cue: Cue) -> str | None:
     """Viewing-pass kind ("sign", "credit", …) of an on-screen-text cue."""
     if cue.source != "ost":
