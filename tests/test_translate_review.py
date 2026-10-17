@@ -648,8 +648,43 @@ def test_clef_ost_atomic_divide_and_conquer_questions():
         "ost-0001_accurate",
         "ost-0001_register_ok",
         "ost-0001_layout_ok",
+        "ost-0001_prop_gag_caption_ok",
     }
 
+
+def test_gag_credit_cannot_stay_empty_and_merge_ost_cues_promotes_missing_captions():
+    from substage import validate
+    real_credit = Cue(
+        id="ost-0001", start_ms=1000, end_ms=3000,
+        text="Directed by Jane Roe", raw="[credit] Directed by Jane Roe",
+        forced=True, source="ost", ost_kind="credit",
+    )
+    gag_credit = Cue(
+        id="ost-0002", start_ms=61_000, end_ms=65_000,
+        text="STARRING GOD'S PERFECT IDIOT", raw="[credit] STARRING GOD'S PERFECT IDIOT",
+        forced=True, source="ost", ost_kind="credit",
+    )
+    assert validate.check(real_credit, "", Settings()) == []
+    assert [i.rule for i in validate.check(gag_credit, "", Settings())] == ["empty"]
+    rows = translate._render_cues([real_credit, gag_credit], {}, 0.85)
+    assert "Directed by Jane Roe [ON-SCREEN CREDIT]" in rows
+    assert "STARRING GOD'S PERFECT IDIOT [ON-SCREEN TEXT]" in rows
+
+    obs = [
+        ChunkObservations(
+            chunk_id="v01", start_ms=0, end_ms=600_000,
+            on_screen_text=[
+                OnScreenText(start_ms=48_000, end_ms=51_500, text="[caption] IXTENCO, MEXICO.", plot_critical=True),
+                OnScreenText(start_ms=61_000, end_ms=65_000, text="[credit] STARRING GOD'S PERFECT IDIOT", plot_critical=True),
+            ],
+        )
+    ]
+    merged = translate.merge_ost_cues_into_spine([real_credit], obs, [])
+    assert [c.text for c in merged] == [
+        "Directed by Jane Roe",
+        "IXTENCO, MEXICO.",
+        "STARRING GOD'S PERFECT IDIOT",
+    ]
 # --------------------------------------------------------------- sound/lyric
 
 

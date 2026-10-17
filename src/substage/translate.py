@@ -41,7 +41,7 @@ from . import layout, media, memory, perception
 from .capability import Architecture, CapabilityError, RoutePlan, resolve_route
 from .config import Settings, Workspace, narrative_context, narrative_text
 from .gemini import Clip, GeminiBlocked, GeminiClient, UploadedFile
-from .validate import OST_KIND, _may_stay_empty, en_speaker_turns, ost_kind
+from .validate import OST_KIND, _may_stay_empty, en_speaker_turns, is_gag_credit, ost_kind
 from .llm import LLMClient, make_client
 from .models import (
     Cue,
@@ -497,7 +497,7 @@ def _render_cues(
         if c.lyric:
             rel = o.lyric_plot_relevant if o else None
             tags.append("LYRIC PLOT-RELEVANT" if rel else "LYRIC INCIDENTAL")
-        if ost_kind(c) == "credit":
+        if ost_kind(c) == "credit" and not is_gag_credit(c.text):
             tags.append("ON-SCREEN CREDIT")
         elif c.source == "ost" or c.forced:
             tags.append("ON-SCREEN TEXT")
@@ -2073,8 +2073,8 @@ def _words(t: str) -> list[str]:
 #: kinds never subtitled: logos/watermarks and scrolling end-credit name lists
 _OST_SKIP_KINDS = frozenset({"logo", "scroll"})
 #: kinds a Korean release subtitles even when the viewing pass left plot_critical unset
-_OST_ALWAYS_KINDS = frozenset({"title", "credit", "caption", "dedication", "spoken", "message", "ui", "note", "headline"})
-_OST_SIGNAL_KINDS = frozenset({"sign", "message", "ui", "note", "headline"})
+_OST_ALWAYS_KINDS = frozenset({"title", "credit", "gag_credit", "caption", "dedication", "spoken", "message", "ui", "note", "headline"})
+_OST_SIGNAL_KINDS = frozenset({"sign", "message", "ui", "note", "headline", "gag_credit", "caption", "title", "dedication"})
 _AMBIENT_SINGLE_WORDS = frozenset({
     "exit", "stop", "open", "closed", "push", "pull", "men", "women", "restroom", "wc", "in", "out",
 })
@@ -2316,3 +2316,29 @@ def ost_cues(
                 )
             )
     return new
+
+
+def merge_ost_cues_into_spine(
+    existing_cues: list[Cue], observations: Any, scenes: list[Scene]
+) -> list[Cue]:
+    """Ensure all promotable observations (captions, gag credits, signs, messages)
+    are present in the cue spine without duplicating existing ``ost-`` cues."""
+    spoken = [c for c in existing_cues if not c.id.startswith("ost-") and c.source != "ost"]
+    existing_ost = [c for c in existing_cues if c.id.startswith("ost-") or c.source == "ost"]
+    promoted = ost_cues(observations, spoken, scenes)
+    merged_ost = list(existing_ost)
+    max_num = max(
+        [int(c.id.split("-")[1]) for c in merged_ost if c.id.startswith("ost-") and c.id.split("-")[1].isdigit()]
+        or [0]
+    )
+    for cand in promoted:
+        already = any(
+            min(e.end_ms, cand.end_ms) - max(e.start_ms, cand.start_ms) >= 150
+            and (_same_text(e.text, cand.text) or _carried_by(cand.text, [e.text]))
+            for e in merged_ost
+        )
+        if not already:
+            max_num += 1
+            merged_ost.append(cand.model_copy(update={"id": f"ost-{max_num:04d}"}))
+    out = sorted([*spoken, *merged_ost], key=lambda c: (c.start_ms, c.end_ms, c.id))
+    return out

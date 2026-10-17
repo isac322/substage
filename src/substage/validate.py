@@ -517,6 +517,19 @@ _INTERJECTION = re.compile(
 #: "[kind] text" tag the viewing pass puts in front of on-screen text;
 #: on-screen-text cues keep it in ``Cue.raw``
 OST_KIND = re.compile(r"^\s*\[([a-z][a-z _-]*)\]\s*", re.IGNORECASE)
+_GAG_CREDIT_RE = re.compile(
+    r"\b(?:some\s+\w+'s\s+(?:film|video|movie)|"
+    r"god's\s+perfect\s+idiot|"
+    r"a\s+(?:hot\s+chick|british\s+villain|moody\s+teen|cgi\s+character|gratuitous\s+cameo)|"
+    r"the\s+(?:comic\s+relief|real\s+heroes)|"
+    r"asshats|overpaid\s+tool|douchebag|idiot|moron|jerk|nobody|loser)\b",
+    re.IGNORECASE,
+)
+
+
+def is_gag_credit(text: str) -> bool:
+    """True when a credit card is a satirical/joke role descriptor rather than real billing."""
+    return bool(_GAG_CREDIT_RE.search(text or ""))
 
 
 def ost_kind(cue: Cue) -> str | None:
@@ -528,15 +541,17 @@ def ost_kind(cue: Cue) -> str | None:
 
 
 def _may_stay_empty(cue: Cue) -> bool:
-    """Lyric, credit card, sound-description-only, or 1-2 token interjection-only cue."""
-    if cue.lyric or ost_kind(cue) == "credit":
+    """Lyric, real billing credit card, sound-description-only, or 1-2 token interjection-only cue."""
+    kind = ost_kind(cue)
+    if kind == "gag_credit":
+        return False
+    if cue.lyric or (kind == "credit" and not is_gag_credit(cue.text)):
         return True
     rest = _BRACKETED.sub(" ", cue.text)
     tokens = re.sub(r"[^\w\s]|_", " ", rest).lower().split()
     if not tokens:
         return True  # only bracketed descriptions / punctuation
     return len(tokens) <= 2 and all(_INTERJECTION.fullmatch(t) for t in tokens)
-
 
 def check(
     cue: Cue,

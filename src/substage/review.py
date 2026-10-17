@@ -1474,8 +1474,9 @@ def build_clef_ost_intent_questions(items: Sequence[dict[str, Any]]) -> dict[str
         questions[f"{cid}_not_logo_noise"] = {
             "type": "noul",
             "instructions": (
-                f"Item {cid} ({txt!r}): Is this a message, note, sign, HUD, title, or gag caption "
-                f"(TRUE) rather than a studio logo, watermark, background brand clutter, or crew scroll (FALSE)?"
+                f"Item {cid} ({txt!r}): Is this a message, note, close-up prop label (cup, cover, box, tank), "
+                f"street sign, HUD, title, location/time caption, dedication, or satirical gag credit (TRUE) "
+                f"rather than a studio logo, watermark, out-of-focus background clutter, or crew scroll (FALSE)?"
             ),
         }
         questions[f"{cid}_distinct_from_speech"] = {
@@ -1558,6 +1559,14 @@ def build_clef_ost_quality_questions(cases: Sequence[dict[str, Any]]) -> dict[st
             "type": "noul",
             "instructions": (
                 f"Cue {cid}: Is Korean ({ko_t!r}) natural, concise, and formatted within <=2 lines and <=14 chars/line?"
+            ),
+        }
+        questions[f"{cid}_prop_gag_caption_ok"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid}: If ({en_t!r}) is a close-up prop, gag credit, or location/time caption, is ({ko_t!r}) "
+                f"translated into natural idiomatic Korean (e.g. country-first location order, punchy gag credit) "
+                f"rather than dropped empty or left in raw English?"
             ),
         }
     return questions
