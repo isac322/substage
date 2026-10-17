@@ -44,7 +44,9 @@ class Cue(BaseModel):
     lyric: bool = False  # ♪ line
     forced: bool = False  # came from a forced (on-screen text / foreign dialogue) track
     source: str = "main"  # main | forced | ost
-
+    ost_kind: str | None = None
+    ost_addressee: str | None = None
+    speech_level: str | None = None
 
 class VideoInfo(BaseModel):
     video_id: str  # slug, e.g. "sample-2016"
@@ -149,13 +151,24 @@ class StoryEvent(BaseModel):
     knowledge_change: str | None = None  # "Peter learns Liz's father is the Falcon"
 
 
+class OstBeat(BaseModel):
+    beat_id: str = "b1"
+    start_ms: int
+    end_ms: int
+    text: str
+    ost_kind: str = "sign_banner"
+    sender: str | None = None
+    addressee: str | None = None
+    speech_level: str | None = None
+
+
 class OnScreenText(BaseModel):
     start_ms: int
     end_ms: int
     text: str  # English text as shown
     plot_critical: bool = False
     covered_by_cue: str | None = None  # existing cue id if already subtitled
-
+    beats: list[OstBeat] = Field(default_factory=list)
 
 class ChunkObservations(BaseModel):
     chunk_id: str  # "v01"

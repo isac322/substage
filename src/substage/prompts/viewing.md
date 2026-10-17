@@ -25,7 +25,10 @@ Also report:
   Give t_ms, description, characters involved, and knowledge_change ("who learns what") if any.
 - on_screen_text: everything a viewer who cannot read English needs subtitled, plus audible
   words the cue list omits. Begin each text with one kind tag, then the exact words:
-  [sign] signs, labels, screens, letters, notes, headlines, phone messages
+  [message] one phone text/chat bubble or SMS (report EACH bubble as its own item with its own start_ms/end_ms; never concatenate sequential bubbles into one string)
+  [ui] caller ID, phone status ("Do Not Disturb", "No Service"), HUD, or computer/device prompt
+  [note] handwritten note, letter, pamphlet, newspaper headline, or book cover
+  [sign] physical signs, banners, placards, labels, license plates, or nametags held in the shot
   [caption] location/time cards and other on-screen captions
   [title] the video's title card or a chapter card
   [credit] one opening/closing credit card (director, writer, a joke credit…)
@@ -33,10 +36,9 @@ Also report:
   [spoken] an audible word or short call that has NO cue in the list (a shouted name, "Hey!")
   [logo] studio/brand logo or watermark   [scroll] a scrolling list of credit names
   start_ms/end_ms: absolute video ms ({start_ms} + time into the clip), the span the text is
-  readable or the words are heard. Report each appearance once.
+  readable or the words are heard. Report each bubble, card, or insert appearance separately.
   plot_critical: true for every kind except [logo], [scroll] and incidental background text.
-  covered_by_cue: only when that cue already carries the same words. Skip decorative text.
-- summary: ≤60 words — what this chunk covers, for downstream context.
+  covered_by_cue: only when that cue already speaks the exact same words aloud verbatim. Skip decorative text.
 
 Rules:
 - Describe, do not interpret style or translate. Korean is never used in your output.

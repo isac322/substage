@@ -50,6 +50,7 @@ from .models import (
     MediaNeed,
     OnScreenText,
     OmittedAct,
+    OstBeat,
     PerceptionLedger,
     Register,
     RetainedFragment,
@@ -2072,8 +2073,11 @@ def _words(t: str) -> list[str]:
 #: kinds never subtitled: logos/watermarks and scrolling end-credit name lists
 _OST_SKIP_KINDS = frozenset({"logo", "scroll"})
 #: kinds a Korean release subtitles even when the viewing pass left plot_critical unset
-_OST_ALWAYS_KINDS = frozenset({"title", "credit", "caption", "dedication", "spoken"})
-
+_OST_ALWAYS_KINDS = frozenset({"title", "credit", "caption", "dedication", "spoken", "message", "ui", "note", "headline"})
+_OST_SIGNAL_KINDS = frozenset({"sign", "message", "ui", "note", "headline"})
+_AMBIENT_SINGLE_WORDS = frozenset({
+    "exit", "stop", "open", "closed", "push", "pull", "men", "women", "restroom", "wc", "in", "out",
+})
 
 def _split_kind(text: str) -> tuple[str | None, str]:
     m = OST_KIND.match(text)
@@ -2096,11 +2100,11 @@ def _carried_by(text: str, cue_texts: list[str]) -> bool:
     if not words or not cue_texts:
         return False
     have = {w for t in cue_texts for w in _words(t)}
-    if len(words & have) / len(words) >= OST_COVER_RATIO:
+    req_ratio = 0.85 if len(words) >= 4 else OST_COVER_RATIO
+    if len(words & have) / len(words) >= req_ratio:
         return True
     nt = _norm_text(text)
     return any(SequenceMatcher(None, nt, _norm_text(t)).ratio() >= 0.8 for t in cue_texts)
-
 
 def _is_credit_scroll(kind: str | None, text: str) -> bool:
     """A 'credit' that is really a list of names (crawl/roll), not a card."""
@@ -2175,6 +2179,7 @@ def _dedupe_ost(items: list[OnScreenText]) -> list[tuple[str | None, OnScreenTex
             text=text,
             plot_critical=it.plot_critical,
             covered_by_cue=it.covered_by_cue,
+            beats=list(it.beats),
         )
         for i, (k, m) in enumerate(merged):
             if cur.start_ms <= m.end_ms + OST_MERGE_GAP_MS and _same_text(m.text, cur.text):
@@ -2186,6 +2191,7 @@ def _dedupe_ost(items: list[OnScreenText]) -> list[tuple[str | None, OnScreenTex
                         text=m.text,
                         plot_critical=m.plot_critical or cur.plot_critical,
                         covered_by_cue=m.covered_by_cue or cur.covered_by_cue,
+                        beats=m.beats or cur.beats,
                     ),
                 )
                 break
@@ -2194,23 +2200,78 @@ def _dedupe_ost(items: list[OnScreenText]) -> list[tuple[str | None, OnScreenTex
     return merged
 
 
+_BUBBLE_SPLIT_RE = re.compile(
+    r"(?<=[.!?])\s+(?=[A-Z])|(?<=\b(?:AM|PM))\s+(?=[A-Z])|(?<=\b(?:a\.m\.|p\.m\.))\s+(?=[A-Z])"
+)
+_GREETING_OPEN_RE = re.compile(
+    r"^(?:hey|hi|hello)\b.*\b(?:checking in|it's me|just texting)\.?$",
+    re.IGNORECASE,
+)
+
+
+def split_ost_beats(
+    kind: str | None, ost: OnScreenText
+) -> list[tuple[int, int, str, str | None]]:
+    """Decompose a multi-bubble / multi-beat OnScreenText into timed visual beats.
+
+    Returns list of ``(start_ms, end_ms, text, ost_kind)``. Single static signs,
+    short notes (<= 4000 ms), and single-sentence captions stay a single beat
+    clamped to ``[OST_MIN_MS, OST_MAX_MS]``. Multi-bubble threads spanning > 4000 ms
+    are decomposed into sequential non-overlapping beats across ``[start_ms, end_ms]``.
+    """
+    if ost.beats:
+        out_b: list[tuple[int, int, str, str | None]] = []
+        for b in ost.beats:
+            if not b.text.strip():
+                continue
+            bs = b.start_ms
+            be = min(max(b.end_ms, bs + OST_MIN_MS), bs + OST_MAX_MS)
+            out_b.append((bs, be, b.text.strip(), b.ost_kind or kind))
+        if out_b:
+            return out_b
+
+    start = ost.start_ms
+    span = ost.end_ms - start
+    text = ost.text.strip()
+    if span > 4000 and kind in {"sign", "message", "note", None}:
+        raw_parts = [p.strip() for line in text.splitlines() for p in _BUBBLE_SPLIT_RE.split(line) if p.strip()]
+        parts: list[str] = []
+        idx = 0
+        while idx < len(raw_parts):
+            cur = raw_parts[idx]
+            if idx + 1 < len(raw_parts) and _GREETING_OPEN_RE.match(cur) and len(cur) + len(raw_parts[idx + 1]) <= 68:
+                parts.append(f"{cur} {raw_parts[idx + 1]}")
+                idx += 2
+            else:
+                parts.append(cur)
+                idx += 1
+        n = len(parts)
+        if n >= 2 and span >= n * OST_MIN_MS + (n - 1) * 80:
+            weights = [max(len(p), 6) for p in parts]
+            total_w = sum(weights)
+            usable = span - (n - 1) * 80
+            durs = [max(OST_MIN_MS, min(OST_MAX_MS, int(round(usable * w / total_w)))) for w in weights]
+            scale = usable / max(sum(durs), 1)
+            if scale < 1.0:
+                durs = [max(OST_MIN_MS, int(d * scale)) for d in durs]
+            beats_out: list[tuple[int, int, str, str | None]] = []
+            cur_t = start
+            for i, (p, d) in enumerate(zip(parts, durs)):
+                b_end = ost.end_ms if i == n - 1 else min(ost.end_ms, cur_t + d)
+                b_end = min(max(b_end, cur_t + OST_MIN_MS), cur_t + OST_MAX_MS)
+                beats_out.append((cur_t, b_end, p, "message" if kind == "sign" else kind))
+                cur_t = b_end + 80
+            return beats_out
+
+    end = min(max(ost.end_ms, start + OST_MIN_MS), start + OST_MAX_MS)
+    return [(start, end, text, kind)]
+
+
 def ost_cues(
     observations: Any, cues: list[Cue], scenes: list[Scene]
 ) -> list[Cue]:
     """New cues for on-screen text (and unsubtitled audible words) that no
-    existing English cue carries.
-
-    Accepts a flat list of OnScreenText or ChunkObservations. Text may start
-    with a viewing-pass kind tag ("[sign] ...", "[credit] ...", "[spoken] ...");
-    the tag is stripped from ``text`` and kept in ``raw`` (``validate.ost_kind``).
-    Repeated reports of one appearance are merged first.
-    Kept: plot-critical text and every title/credit/caption/dedication/spoken
-    item; skipped: logos, watermarks and scrolling credit name lists. A text is
-    covered when its linked cue (covered_by_cue) or the cues overlapping it in
-    time (+/-OST_OVERLAP_MS) carry its words. New cues last OST_MIN_MS to
-    OST_MAX_MS, get ids ost-0001..., source "ost", and forced True except for
-    audible words.
-    """
+    existing English cue carries."""
     items: list[OnScreenText] = []
     for o in observations or []:
         if isinstance(o, OnScreenText):
@@ -2222,11 +2283,13 @@ def ost_cues(
     by_id = {c.id: c for c in cues}
     new: list[Cue] = []
     for kind, ost in _dedupe_ost(items):
-        if not _norm_text(ost.text):
+        norm_t = _norm_text(ost.text)
+        if not norm_t:
             continue
         if kind in _OST_SKIP_KINDS or _is_credit_scroll(kind, ost.text):
             continue
-        if not (ost.plot_critical or kind in _OST_ALWAYS_KINDS):
+        is_signal_sign = kind in _OST_SIGNAL_KINDS and norm_t not in _AMBIENT_SINGLE_WORDS
+        if not (ost.plot_critical or kind in _OST_ALWAYS_KINDS or is_signal_sign):
             continue
         linked = by_id.get(ost.covered_by_cue or "")
         if linked is not None and _carried_by(ost.text, [linked.text]):
@@ -2238,17 +2301,18 @@ def ost_cues(
         ]
         if _carried_by(ost.text, near):
             continue
-        start = ost.start_ms
-        end = min(max(ost.end_ms, start + OST_MIN_MS), start + OST_MAX_MS)
-        new.append(
-            Cue(
-                id=f"ost-{len(new) + 1:04d}",
-                start_ms=start,
-                end_ms=end,
-                text=ost.text,
-                raw=f"[{kind}] {ost.text}" if kind else ost.text,
-                forced=kind != "spoken",
-                source="ost",
+        for b_start, b_end, b_text, b_kind in split_ost_beats(kind, ost):
+            raw_tag = kind or b_kind
+            new.append(
+                Cue(
+                    id=f"ost-{len(new) + 1:04d}",
+                    start_ms=b_start,
+                    end_ms=b_end,
+                    text=b_text,
+                    raw=f"[{raw_tag}] {b_text}" if raw_tag else b_text,
+                    forced=(raw_tag != "spoken"),
+                    source="ost",
+                    ost_kind=b_kind or kind,
+                )
             )
-        )
     return new

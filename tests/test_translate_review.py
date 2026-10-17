@@ -588,6 +588,68 @@ def test_ost_cues_normalizes_100ms_and_mixed_mmss_and_drops_clamped_boundary():
         (244_000, 246_000, "A FILM BY SHAWN LEVY"),
     ]
 
+
+def test_ost_cues_splits_multi_bubble_sms_thread_and_keeps_unflagged_signs():
+    obs = [
+        ChunkObservations(
+            chunk_id="v02",
+            start_ms=600_000,
+            end_ms=1_200_000,
+            on_screen_text=[
+                OnScreenText(
+                    start_ms=606_000,
+                    end_ms=615_200,
+                    text="[sign] Hey Happy just checking in. I'm out of school at 2:45 PM Ready for my next mission! It's Peter BTW. Parker",
+                    plot_critical=True,
+                ),
+                OnScreenText(
+                    start_ms=1_017_000,
+                    end_ms=1_019_000,
+                    text="[sign] IS THIS YOUR BIKE? IF NOT, DON'T STEAL IT! SPIDER-MAN",
+                    plot_critical=True,
+                ),
+                OnScreenText(
+                    start_ms=1_100_000,
+                    end_ms=1_103_000,
+                    text="[sign] United States Academic Decathlon",
+                    plot_critical=False,
+                ),
+            ],
+        )
+    ]
+    new = translate.ost_cues(obs, [], [])
+    assert [c.text for c in new] == [
+        "Hey Happy just checking in. I'm out of school at 2:45 PM",
+        "Ready for my next mission!",
+        "It's Peter BTW.",
+        "Parker",
+        "IS THIS YOUR BIKE? IF NOT, DON'T STEAL IT! SPIDER-MAN",
+        "United States Academic Decathlon",
+    ]
+    assert new[0].start_ms == 606_000
+    assert new[3].end_ms >= 614_500
+    assert all(c.end_ms - c.start_ms >= translate.OST_MIN_MS for c in new[:4])
+
+
+def test_clef_ost_atomic_divide_and_conquer_questions():
+    items = [{"id": "ost-0001", "text": "United States Academic Decathlon", "nearby_en": ""}]
+    qs = review.build_clef_ost_intent_questions(items)
+    assert set(qs.keys()) == {
+        "ost-0001_viewer_intent",
+        "ost-0001_not_logo_noise",
+        "ost-0001_distinct_from_speech",
+        "ost-0001_needs_quotes",
+    }
+    q_qual = review.build_clef_ost_quality_questions(
+        [{"id": "ost-0001", "en": "Ready for my next mission!", "ko": "'다음 임무 준비됐어요!'", "target_level": "haeyo"}]
+    )
+    assert set(q_qual.keys()) == {
+        "ost-0001_complete",
+        "ost-0001_accurate",
+        "ost-0001_register_ok",
+        "ost-0001_layout_ok",
+    }
+
 # --------------------------------------------------------------- sound/lyric
 
 

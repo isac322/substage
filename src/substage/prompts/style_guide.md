@@ -438,14 +438,15 @@ Not when: scare quotes for mere emphasis.
 - He said it was a superhero video. (quoting a text) | 남친은 히어로물이라더니 | '남친이 슈퍼히어로 / 드라마랬는데'
 - "I am the way into the city of woe." (read from a gate) | 나는 슬픔의 도시로 가는 길이다 | '나는 슬픔의 나라로 / 들어가는 문'
 
-### 8.4 Subtitle readable plot text as its own short cue, plain, without quotes.
-Time and place cards, signs, screens, documents, chat messages and gag captions, placed between dialogue cues; shorten the overlapping dialogue to make room. Formats: place/date cards in Korean order, one line if 12 characters or fewer (런던, 1982년), else two lines (인터폴 지휘실 / 이탈리아, 로마); ID captions as name / role; news tickers as telegraphic nouns (대통령 탄핵 통과); UI and system messages as formal -ㅂ니다 or a noun (잘못된 비밀번호입니다, 녹음 중); chat messages in chat register with the writer's own punctuation and typos.
-Why: a Korean viewer can't read the English sign, and the plot or joke often depends on it.
-Not when: decoration, brand clutter, opening or closing credits, a repeat with nothing new.
+### 8.4 Subtitle readable plot text as its own beat-aligned cue, with kind-appropriate register and quotes.
+Time and place cards, signs, screens, documents, chat messages and gag captions, placed on their visual beat; shorten overlapping dialogue when needed so both remain readable.
+- **Screen messages (`[message]`) & personal notes (`[note]`)**: Translate each bubble/note as its own cue using the sender→addressee speech level from the REGISTERS table (e.g. teen/subordinate texting mentor/adult = 해요체 `'해피, 그냥 보내봐요 / 학교는 2시 45분에 끝나요'`, `'다음 임무 준비됐어요!'`, `'저 피터예요'`, `'피터 파커'`; close aunt/friend note = 해체). Wrap single-party messages, notes, signs, and headlines in straight single quotes `'...'`; for two-party SMS on one screen, tag the replying sender (`제발 서두르세요 / 제임스: 지금 갑니다`). Never drop clock times, numbers, or trailing signatures (`스파이더맨`, `피터 파커`).
+- **Signs, banners, headlines & HUD/UI (`[sign]`, `[ui]`, `[caption]`)**: Place/date cards in Korean order, one line if 12 characters or fewer (런던, 1982년), else two lines (인터폴 지휘실 / 이탈리아, 로마); ID captions as name / role; UI/HUD prompts and caller IDs as concise nouns (`'발신자 표시 제한'`, `'방해 금지'`, `'데이터 접속 중...'`, `'무기 제한 중 / 나노 슈트 오프라인'`); physical signs and banners as idiomatic Korean signs (`'전미 학력경시대회 / 워싱턴 D.C.'`, `'뉴욕 택시 타고도 / 살아남았다'`, `'주인 찾아가세요 / 스파이더맨'`).
+Why: a Korean viewer can't read the English text on screen, and the plot, character action, or joke depends on it.
+Not when: decoration, brand clutter, studio logos, opening or closing credit crawls, or a repeat with nothing new.
 - JANUARY 10, 1952 NEW JERSEY | 1952년 1월 10일 뉴저지 | 1952년 1월 10일 / 뉴저지
 - ROME, ITALY (caption) | 로마, 이탈리아 | 이탈리아, 로마
-- 8 YEARS LATER (time card) | (no subtitle) | 8년 후
-
+- 8 YEARS LATER (time card) | (no subtitle) | '8년 후'
 ### 8.5 Numbers: digits, thousand separators, 만/억 for round large amounts.
 Write 1,000–9,999 as 3,000 (never 3천). Round amounts of 10,000 and up: digits plus 만/억 (10만 명, 1,400만 달러, 1억 5천만 달러). Full digits only for exact figures read off something (168,571달러). English number words become digits.
 Why: digits read fastest; a unit right after the number saves a conversion.

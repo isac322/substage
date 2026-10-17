@@ -1443,3 +1443,121 @@ def repair_pragmatic_literal_traps(
         for sc_ed in ex.map(_process_scene, routed_scenes):
             all_edits.extend(sc_ed)
     return all_edits
+
+
+def build_clef_ost_intent_questions(items: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Divide-and-Conquer Clef atomic sub-questions for visual on-screen text triage.
+
+    Instead of one overloaded keep/drop question, asks 4 orthogonal atomic
+    questions per candidate item over a shared context state:
+    - ``{id}_viewer_intent``: Is this text intentionally shown to convey plot,
+      situation, character state, or humor to the viewer?
+    - ``{id}_not_logo_noise``: Is this meaningful visual text rather than a
+      studio logo, watermark, background store brand, or crew credit crawl?
+    - ``{id}_distinct_from_speech``: Does it carry information not already
+      spoken verbatim in overlapping dialogue?
+    - ``{id}_needs_quotes``: Is it a message, note, sign, or headline that
+      should be formatted with single quotes ``'...'`` in Korean?
+    """
+    questions: dict[str, dict[str, Any]] = {}
+    for it in items:
+        cid = str(it["id"])
+        txt = str(it.get("text", ""))
+        near_en = str(it.get("nearby_en", ""))
+        questions[f"{cid}_viewer_intent"] = {
+            "type": "noul",
+            "instructions": (
+                f"Item {cid} ({txt!r}): Does the video intentionally show this text so the viewer "
+                f"learns story, situational, character, or comedic information?"
+            ),
+        }
+        questions[f"{cid}_not_logo_noise"] = {
+            "type": "noul",
+            "instructions": (
+                f"Item {cid} ({txt!r}): Is this a message, note, sign, HUD, title, or gag caption "
+                f"(TRUE) rather than a studio logo, watermark, background brand clutter, or crew scroll (FALSE)?"
+            ),
+        }
+        questions[f"{cid}_distinct_from_speech"] = {
+            "type": "noul",
+            "instructions": (
+                f"Item {cid} ({txt!r}) vs overlapping speech ({near_en!r}): Does this on-screen text "
+                f"convey information not already spoken aloud verbatim in the overlapping speech?"
+            ),
+        }
+        questions[f"{cid}_needs_quotes"] = {
+            "type": "noul",
+            "instructions": (
+                f"Item {cid} ({txt!r}): Is this a screen message, personal note, sign, or headline that "
+                f"Korean subtitles wrap in single quotes '...' (TRUE), rather than an unquoted two-party chat label (FALSE)?"
+            ),
+        }
+    return questions
+
+
+def evaluate_clef_ost_intent(
+    gate_client: ClefDecisionsClient,
+    items: Sequence[dict[str, Any]],
+    *,
+    stage: str = "ost_intent_gate",
+) -> dict[str, dict[str, Any]]:
+    """Run the 4-question divide-and-conquer Clef intent gate and combine verdicts."""
+    if not items:
+        return {}
+    questions = build_clef_ost_intent_questions(items)
+    ans = gate_client.decide(stage=stage, state={"items": list(items)}, questions=questions)
+    verdicts: dict[str, dict[str, Any]] = {}
+    for it in items:
+        cid = str(it["id"])
+        p_intent = float((ans.get(f"{cid}_viewer_intent") or {}).get("noul", 1.0))
+        p_not_logo = float((ans.get(f"{cid}_not_logo_noise") or {}).get("noul", 1.0))
+        p_distinct = float((ans.get(f"{cid}_distinct_from_speech") or {}).get("noul", 1.0))
+        p_quotes = float((ans.get(f"{cid}_needs_quotes") or {}).get("noul", 0.5))
+        keep = p_intent >= 0.45 and p_not_logo >= 0.45 and p_distinct >= 0.40
+        verdicts[cid] = {
+            "keep": keep,
+            "needs_quotes": p_quotes >= 0.50,
+            "p_viewer_intent": round(p_intent, 3),
+            "p_not_logo_noise": round(p_not_logo, 3),
+            "p_distinct_from_speech": round(p_distinct, 3),
+            "p_needs_quotes": round(p_quotes, 3),
+        }
+    return verdicts
+
+
+def build_clef_ost_quality_questions(cases: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Divide-and-Conquer Clef atomic sub-questions for verifying translated OST cues."""
+    questions: dict[str, dict[str, Any]] = {}
+    for c in cases:
+        cid = str(c["id"])
+        en_t = str(c.get("en", ""))
+        ko_t = str(c.get("ko", ""))
+        lvl = str(c.get("target_level", "none"))
+        questions[f"{cid}_complete"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid}: Does Korean ({ko_t!r}) preserve all key information, numbers, clock times, "
+                f"and signatures/names from English on-screen text ({en_t!r}) without omission?"
+            ),
+        }
+        questions[f"{cid}_accurate"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid}: Does Korean ({ko_t!r}) accurately convey the meaning and situational function "
+                f"of English on-screen text ({en_t!r})?"
+            ),
+        }
+        questions[f"{cid}_register_ok"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid}: Does Korean ({ko_t!r}) match target register={lvl!r} (haeyo=해요체, hae=해체, "
+                f"none=concise sign/HUD noun or institutional phrase)?"
+            ),
+        }
+        questions[f"{cid}_layout_ok"] = {
+            "type": "noul",
+            "instructions": (
+                f"Cue {cid}: Is Korean ({ko_t!r}) natural, concise, and formatted within <=2 lines and <=14 chars/line?"
+            ),
+        }
+    return questions
