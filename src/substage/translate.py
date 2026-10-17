@@ -395,6 +395,118 @@ def detect_syntactic_spans(
         i += 2
     return by_cid
 
+_DISCOURSE_SUSPEND_END_RE = re.compile(
+    r"(?:(?:\.\.\.|…|--|—|[,:])\s*[\"'’”)\]]*|"
+    r"\b(?:a|an|the|of|to|for|with|from|in|on|at|by|as|and|but|or|so|because|if|unless|until|when|where|which|that|who)\s*[\"'’”)\]]*)\s*$",
+    re.IGNORECASE,
+)
+_DISCOURSE_META_START_RE = re.compile(
+    r"^(?:let's\s+(?:just\s+)?(?:call\s+it|say|pretend|assume|put\s+it|think\s+of\s+it)|"
+    r"think\s+of\s+it\s+as|call\s+it\b|or\s+as\s+i\s+like\s+to\s+call|i\s+mean\b|if\s+you\s+will\b)",
+    re.IGNORECASE,
+)
+_DISCOURSE_CONT_START_RE = re.compile(
+    r"^(?:which|that|who|whom|whose|where|when|while|because|since|unless|until|although|though|"
+    r"even\s+if|even\s+though|so\s+that|in\s+order\s+to|at\s+how|with\s+this|like\s+i'm|after\s+all)\b",
+    re.IGNORECASE,
+)
+_HOLD_ELLIPSIS_END_RE = re.compile(r"(?:\.\.\.|…|--|—)\s*[\"'’”)\]]*\s*$")
+
+
+@dataclass(frozen=True)
+class DiscourseUnit:
+    unit_id: str
+    cue_ids: tuple[str, ...]
+    start_ms: int
+    end_ms: int
+    speech_act_type: str  # "hesitation_completion" | "extended_clause" | "ellipsis_referent" | "setup_punchline"
+    hold_ellipsis_cue_ids: tuple[str, ...] = ()
+
+
+def build_discourse_units(
+    cues: Sequence[Cue],
+    obs_by_id: dict[str, CueObservation],
+    *,
+    max_gap_ms: int = 2500,
+    max_unit_len: int = 5,
+) -> list[DiscourseUnit]:
+    """Group 2..5 contiguous spoken cues into unified DiscourseUnits across hesitation, metalinguistic completion, and clause chains."""
+    spoken = [
+        c for c in cues
+        if not c.lyric and not c.id.startswith("ost-") and c.source != "ost" and c.text.strip()
+    ]
+    units: list[DiscourseUnit] = []
+
+    def _can_link(c1: Cue, c2: Cue) -> bool:
+        gap_ms = c2.start_ms - c1.end_ms
+        if gap_ms < 0 or gap_ms > max_gap_ms:
+            return False
+        o1, o2 = obs_by_id.get(c1.id), obs_by_id.get(c2.id)
+        if en_speaker_turns(c1, observation=o1) >= 2 or en_speaker_turns(c2, observation=o2) >= 2:
+            return False
+        spk1 = (o1.speaker if o1 and o1.speaker else c1.speaker_hint) or ""
+        spk2 = (o2.speaker if o2 and o2.speaker else c2.speaker_hint) or ""
+        if spk1 and spk2 and spk1.strip().lower() != spk2.strip().lower():
+            return False
+        t1 = c1.text.replace("\n", " ").strip()
+        t2 = c2.text.replace("\n", " ").strip()
+        t2_clean = t2.lstrip(" -\"'‘“(.[")
+        if _DISCOURSE_SUSPEND_END_RE.search(t1):
+            return True
+        if _DISCOURSE_META_START_RE.match(t2_clean) or _DISCOURSE_CONT_START_RE.match(t2_clean):
+            return True
+        if not _SPAN_TERM_RE.search(t1) and (t2_clean[:1].islower() or t2.lstrip().startswith(("...", "…"))):
+            return True
+        return False
+
+    i = 0
+    while i < len(spoken) - 1:
+        if not _can_link(spoken[i], spoken[i + 1]):
+            i += 1
+            continue
+        chain = [spoken[i], spoken[i + 1]]
+        j = i + 2
+        while j < len(spoken) and len(chain) < max_unit_len and _can_link(chain[-1], spoken[j]):
+            chain.append(spoken[j])
+            j += 1
+        # If the cue immediately after a hesitation/metalinguistic completion is a short same-speaker follow-up (< 400ms), include it up to max_unit_len
+        if j < len(spoken) and len(chain) < max_unit_len:
+            last_t = chain[-1].text.replace("\n", " ").strip().lstrip(" -\"'‘“(.[")
+            if _DISCOURSE_META_START_RE.match(last_t) and 0 <= spoken[j].start_ms - chain[-1].end_ms <= 400:
+                o_last, o_nxt = obs_by_id.get(chain[-1].id), obs_by_id.get(spoken[j].id)
+                s_last = (o_last.speaker if o_last and o_last.speaker else chain[-1].speaker_hint) or ""
+                s_nxt = (o_nxt.speaker if o_nxt and o_nxt.speaker else spoken[j].speaker_hint) or ""
+                if (not s_last or not s_nxt or s_last.strip().lower() == s_nxt.strip().lower()) and en_speaker_turns(spoken[j], observation=o_nxt) == 1:
+                    chain.append(spoken[j])
+                    j += 1
+        hold_ids = tuple(
+            c.id for c in chain[:-1] if _HOLD_ELLIPSIS_END_RE.search(c.text.replace("\n", " ").strip())
+        )
+        has_meta = any(
+            _DISCOURSE_META_START_RE.match(c.text.replace("\n", " ").strip().lstrip(" -\"'‘“(.["))
+            for c in chain[1:]
+        )
+        if hold_ids and has_meta:
+            act_type = "hesitation_completion"
+        elif hold_ids and any(len(c.text.split()) <= 3 for c in chain[1:]):
+            act_type = "setup_punchline"
+        elif any(len(c.text.split()) <= 4 or c.text.strip().endswith("?") for c in chain):
+            act_type = "ellipsis_referent"
+        else:
+            act_type = "extended_clause"
+        units.append(
+            DiscourseUnit(
+                unit_id=f"{chain[0].id}..{chain[-1].id}",
+                cue_ids=tuple(c.id for c in chain),
+                start_ms=chain[0].start_ms,
+                end_ms=chain[-1].end_ms,
+                speech_act_type=act_type,
+                hold_ellipsis_cue_ids=hold_ids,
+            )
+        )
+        i = j
+    return units
+
 
 _PRAGMA_PARTITIVE_RE = re.compile(
     r"\b(?:(?:not\s+)?(?:all|part|most|half|none|rest|every\s+inch|every\s+part)\s+of\s+(?:you|me|him|her|us|it)\b"
@@ -495,6 +607,7 @@ def _render_cues(
 ) -> str:
     lines = ["## CUES (id | start-end | speaker | sound | dur s | aim/max chars | turns | text)"]
     spans = detect_syntactic_spans(cues, obs_by_id)
+    d_units = {cid: du for du in build_discourse_units(cues, obs_by_id) for cid in du.cue_ids}
     for n, c in enumerate(cues):
         dur = (c.end_ms - c.start_ms) / 1000.0
         speaker = c.speaker_hint or "-"
@@ -519,8 +632,12 @@ def _render_cues(
             tags.append("SOUND-ONLY")
         if o and o.delivery:
             tags.append(o.delivery)
+        du = d_units.get(c.id)
         sp = spans.get(c.id)
-        if sp is not None:
+        if du is not None and len(du.cue_ids) >= 3:
+            hold_tag = " | HOLD-ELLIPSIS" if c.id in du.hold_ellipsis_cue_ids else ""
+            tags.append(f"DISCOURSE UNIT {du.unit_id}: {du.speech_act_type}{hold_tag}")
+        elif sp is not None:
             tags.append(f"SPAN {sp.span_id}: {sp.policy}")
         tag = f" [{' | '.join(tags)}]" if tags else ""
         text = c.text.replace("\n", " / ")

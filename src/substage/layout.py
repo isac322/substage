@@ -450,8 +450,12 @@ def _try_merge(a: _Ev, b: _Ev, next_start: int | None, settings) -> _Ev | None:
     if turns is None:
         return None
     same_speaker = len(turns) < len(a.turns) + len(b.turns)
+    a_last_en = a.en_text.splitlines()[-1].strip() if a.en_text else ""
+    b_last_en = b.en_text.splitlines()[-1].strip() if b.en_text else ""
+    if b_last_en.endswith(("...", "…")) and cps_chars(a.ko) >= 6 and not _weak(a, _fit(a, b.start, s), s):
+        return None
     weak = _weak(a, _fit(a, b.start, s), s) or _weak(b, _fit(b, next_start, s), s)
-    if not (weak or (same_speaker and _continues(a.en_text.splitlines()[-1] if a.en_text else ""))):
+    if not (weak or (same_speaker and _continues(a_last_en))):
         return None
     ko = _render(turns, s.cpl_limit, s.cpl_one_line)
     if ko is None:

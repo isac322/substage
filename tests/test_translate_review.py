@@ -926,6 +926,57 @@ def test_hwang_lyric_classification_and_bgm_guard():
     qs = review.build_clef_lyric_questions([{"id": "c4", "en": c_parody.text, "ko": "크리넥사이카, 윈덱사이카", "lyric_mode": "parody_or_rhyme_game"}])
     assert set(qs.keys()) == {"c4_no_bgm_leak", "c4_rhyme_or_sense_ok", "c4_no_note_and_clean_format"}
 
+
+
+def test_build_discourse_units_and_hesitation_merge_guard():
+    from substage.translate import build_discourse_units
+    from substage import layout
+    from substage.config import Settings
+
+    c36 = cue("c0036", 201162, 203408, "And as a more concrete gesture of our\ngratitude,")
+    c37 = cue("c0037", 203491, 205408, "we'd like to offer you a...")
+    c38 = cue("c0038", 206836, 208636, "Let's call it a favor.")
+    c39 = cue("c0039", 208667, 210239, "The nature of it is your choice.")
+    obs_map = {
+        cid: CueObservation(cue_id=cid, speaker="harry", addressee="michelle")
+        for cid in ("c0036", "c0037", "c0038", "c0039")
+    }
+    units = build_discourse_units([c36, c37, c38, c39], obs_map)
+    assert len(units) == 1
+    du = units[0]
+    assert du.cue_ids == ("c0036", "c0037", "c0038", "c0039")
+    assert du.speech_act_type == "hesitation_completion"
+    assert du.hold_ellipsis_cue_ids == ("c0037",)
+
+    qs = review.build_clef_discourse_questions([
+        {
+            "unit_id": du.unit_id,
+            "speech_act_type": du.speech_act_type,
+            "en": [c36.text, c37.text, c38.text, c39.text],
+            "ko": ["그리고 감사의 표시로", "저희가 부인께...", "도움을 하나 드린다고 생각하시죠", "무슨 일이든 괜찮으니"],
+        }
+    ])
+    assert set(qs.keys()) == {
+        "c0036..c0039__q1_disconnected_or_broken_flow",
+        "c0036..c0039__q2_premature_object_or_idiom_calque",
+        "c0036..c0039__q3_referent_or_subject_mismatch",
+        "c0036..c0039__q4_unnatural_speech_act",
+    }
+
+    # Ensure layout._try_merge preserves intentional '...' hesitation beat on c0037 when c0036 is already a readable phrase
+    evs = layout.layout(
+        [c36, c37, c38, c39],
+        {
+            "c0036": "감사의 표시로\n저희가",
+            "c0037": "부인께...",
+            "c0038": "도움을 하나\n드린다고 생각하시죠",
+            "c0039": "무슨 일이든\n괜찮으니",
+        },
+        {cid: "s002" for cid in ("c0036", "c0037", "c0038", "c0039")},
+        {cid: "harry" for cid in ("c0036", "c0037", "c0038", "c0039")},
+        Settings(),
+    )
+    assert [e.cue_ids for e in evs] == [["c0036"], ["c0037"], ["c0038"], ["c0039"]]
 # ------------------------------------------------------------ character names
 
 

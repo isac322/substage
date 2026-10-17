@@ -41,8 +41,10 @@ from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
 from .translate import (
     CueSpan,
+    DiscourseUnit,
     _NON_TRANSLATED,
     _fmt_ms,
+    build_discourse_units,
     detect_pragmatic_risk_cues,
     detect_syntactic_spans,
 )
@@ -1605,3 +1607,208 @@ def build_clef_lyric_questions(cases: Sequence[dict[str, Any]]) -> dict[str, dic
             ),
         }
     return questions
+
+
+class _DiscourseCueSlice(BaseModel):
+    cue_id: str
+    ko: str
+
+
+class _DiscourseUnitRewrite(BaseModel):
+    idiom_and_referent_resolution: str = Field(
+        description="Resolve English idioms ('let\\'s call it a favor' -> '~라고 생각하시죠 / 도움을 드리죠', 'more concrete gesture' -> '감사의 표시로'), omitted subjects/addressees, and cross-cue referents."
+    )
+    unified_korean_discourse: str = Field(
+        description="Complete, natural Korean utterance for the entire multi-cue discourse unit read as one coherent thought."
+    )
+    cues: list[_DiscourseCueSlice] = Field(
+        description="Slice allocation of unified_korean_discourse onto each cue_id in order (<=2 lines, <=14 chars/line)."
+    )
+
+
+def build_clef_discourse_questions(units: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Divide-and-Conquer Clef 4-axis questions for multi-cue DiscourseUnit diagnosis."""
+    questions: dict[str, dict[str, Any]] = {}
+    for u in units:
+        uid = str(u["unit_id"])
+        act = str(u.get("speech_act_type", "extended_clause"))
+        en_seq = u.get("en", [])
+        ko_seq = u.get("ko", [])
+        questions[f"{uid}__q1_disconnected_or_broken_flow"] = {
+            "type": "noul",
+            "instructions": (
+                f"Unit {uid} (type={act!r}, EN={en_seq!r}, KO={ko_seq!r}): "
+                f"Do the Korean cues read as disconnected or abruptly broken fragments where the English is one connected thought?"
+            ),
+        }
+        questions[f"{uid}__q2_premature_object_or_idiom_calque"] = {
+            "type": "noul",
+            "instructions": (
+                f"Unit {uid} (type={act!r}, EN={en_seq!r}, KO={ko_seq!r}): "
+                f"Does an earlier '...' cue invent a fake placeholder noun (like '선물을...') before the completion cue, or calque English framing ('실질적인', '호의라고 해두죠') instead of the natural Korean speech act ('~라고 생각하시죠 / 도움을 드리죠')?"
+            ),
+        }
+        questions[f"{uid}__q3_referent_or_subject_mismatch"] = {
+            "type": "noul",
+            "instructions": (
+                f"Unit {uid} (type={act!r}, EN={en_seq!r}, KO={ko_seq!r}): "
+                f"Is the grammatical subject, object, or addressee misunderstood across the cues?"
+            ),
+        }
+        questions[f"{uid}__q4_unnatural_speech_act"] = {
+            "type": "noul",
+            "instructions": (
+                f"Unit {uid} (type={act!r}, EN={en_seq!r}, KO={ko_seq!r}): "
+                f"Does the combined Korean fail to convey the speaker's unified speech act or joke in natural spoken Korean?"
+            ),
+        }
+    return questions
+
+
+def repair_discourse_units(
+    ws: Workspace,
+    txt_client: Any,
+    gate_client: ClefDecisionsClient,
+    scenes: list[Scene],
+    cues_by_id: dict[str, Cue],
+    ko: dict[str, str],
+    observations,
+    *,
+    levels: dict[str, tuple[str, str]] | None = None,
+    flag_threshold: float = 0.50,
+) -> list[CueEdit]:
+    """Pipe-D3: Clef 4-axis multi-cue discourse diagnosis + Utterance-First CoT rewrite + Clef acceptance gate."""
+    levels = levels or {}
+    rev_map = _reverse_level_map(levels, ws)
+    obs_map = _obs_by_id(observations)
+
+    all_units: list[tuple[Scene, DiscourseUnit]] = []
+    for sc in scenes:
+        sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+        for du in build_discourse_units(sc_cues, obs_map):
+            if len(du.cue_ids) >= 3 or du.speech_act_type == "hesitation_completion":
+                all_units.append((sc, du))
+    if not all_units:
+        return []
+
+    flagged_units: list[tuple[Scene, DiscourseUnit]] = []
+    for b_start in range(0, len(all_units), 12):
+        sub = all_units[b_start : b_start + 12]
+        unit_dicts = [
+            {
+                "unit_id": du.unit_id,
+                "speech_act_type": du.speech_act_type,
+                "en": [cues_by_id[cid].text.replace("\n", " ") for cid in du.cue_ids],
+                "ko": [ko.get(cid, "").replace("\n", " ") for cid in du.cue_ids],
+            }
+            for _sc, du in sub
+        ]
+        qs = build_clef_discourse_questions(unit_dicts)
+        ans = gate_client.decide(stage=_STAGE_BLIND, state={"units": unit_dicts}, questions=qs)
+        for sc, du in sub:
+            uid = du.unit_id
+            scores = [
+                float((ans.get(f"{uid}__{axis}") or {}).get("noul", 0.0))
+                for axis in (
+                    "q1_disconnected_or_broken_flow",
+                    "q2_premature_object_or_idiom_calque",
+                    "q3_referent_or_subject_mismatch",
+                    "q4_unnatural_speech_act",
+                )
+            ]
+            if max(scores, default=0.0) >= flag_threshold:
+                flagged_units.append((sc, du))
+    if not flagged_units:
+        return []
+
+    sys_prompt = (
+        "You are a master Korean motion-picture subtitle translator. "
+        "Translate multi-cue English discourse units as one unified Korean thought first, then slice across cues."
+    )
+
+    def _rewrite_unit(item: tuple[Scene, DiscourseUnit]) -> tuple[DiscourseUnit, dict[str, str]] | None:
+        sc, du = item
+        sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id]
+        idx_map = {c.id: idx for idx, c in enumerate(sc_cues)}
+        first_idx = idx_map.get(du.cue_ids[0], 0)
+        last_idx = idx_map.get(du.cue_ids[-1], len(sc_cues) - 1)
+        prev_c = sc_cues[first_idx - 1] if first_idx > 0 else None
+        next_c = sc_cues[last_idx + 1] if last_idx + 1 < len(sc_cues) else None
+        cues_lines = []
+        target_lvls: dict[str, str] = {}
+        for cid in du.cue_ids:
+            c_obj = cues_by_id[cid]
+            curr_k = ko.get(cid, "").strip()
+            _, tl = _effective_cue_level(c_obj, curr_k, *levels.get(cid, ("-", "-")), rev_map)
+            target_lvls[cid] = tl
+            hold_note = " [HOLD-ELLIPSIS: keep open with '...' or particle; NEVER invent a placeholder noun]" if cid in du.hold_ellipsis_cue_ids else ""
+            cues_lines.append(
+                f"- {cid} (target_level={tl}{hold_note}): EN={c_obj.text.replace(chr(10), ' ')!r} | Current_KO={curr_k!r}"
+            )
+        prompt = (
+            f"## Multi-Cue Discourse Unit Rewrite ({du.unit_id}, type={du.speech_act_type})\n"
+            f"Prev Cue: {prev_c.text.replace(chr(10), ' ') if prev_c else 'None'!r} (KO: {ko.get(prev_c.id, '') if prev_c else ''!r})\n"
+            + "\n".join(cues_lines)
+            + f"\nNext Cue: {next_c.text.replace(chr(10), ' ') if next_c else 'None'!r} (KO: {ko.get(next_c.id, '') if next_c else ''!r})\n\n"
+            f"1. Resolve idioms ('Let\\'s call it a favor' -> '도움을 하나 드린다고 생각하시죠 / 도움을 드리죠', 'more concrete gesture' -> '감사의 표시로'), omitted subjects/addressees, and referents in `idiom_and_referent_resolution`.\n"
+            f"2. Write `unified_korean_discourse` as one connected Korean utterance for the entire unit.\n"
+            f"3. Slice `unified_korean_discourse` across `cues` for exact cue_ids {list(du.cue_ids)} (<=2 lines, <=14 chars/line, exact target_level)."
+        )
+        try:
+            res = txt_client.generate(stage=_STAGE_REGEN, prompt=prompt, schema=_DiscourseUnitRewrite, system=sys_prompt)
+        except GeminiBlocked:
+            return None
+        by_id = {s.cue_id: s.ko.replace("\\n", "\n").strip() for s in res.cues if s.ko.strip()}
+        if set(by_id.keys()) != set(du.cue_ids):
+            return None
+        cleaned: dict[str, str] = {}
+        for cid in du.cue_ids:
+            curr_k = ko.get(cid, "").strip()
+            raw_k = by_id[cid]
+            norm_k = raw_k if curr_k.lstrip().startswith("-") else " ".join(raw_k.splitlines())
+            new_k = rewrap(norm_k, 14, 12)
+            lines_n = [l for l in new_k.splitlines() if l.strip()]
+            if not lines_n or len(lines_n) > 2 or any(len(l) > 16 for l in lines_n):
+                return None
+            if _violates_target_level(new_k, target_lvls[cid]):
+                return None
+            if cid in du.hold_ellipsis_cue_ids and "선물" in new_k and "gift" not in cues_by_id[cid].text.lower() and "present" not in cues_by_id[cid].text.lower():
+                return None
+            cleaned[cid] = new_k
+        if all(cleaned[cid] == ko.get(cid, "").strip() for cid in du.cue_ids):
+            return None
+        return du, cleaned
+
+    rewritten: list[tuple[DiscourseUnit, dict[str, str]]] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(flagged_units))) as ex:
+        for r_item in ex.map(_rewrite_unit, flagged_units):
+            if r_item is not None:
+                rewritten.append(r_item)
+    if not rewritten:
+        return []
+
+    accepted: list[CueEdit] = []
+    for b_start in range(0, len(rewritten), 10):
+        sub_r = rewritten[b_start : b_start + 10]
+        state_obj = {}
+        questions = {}
+        for idx, (du, cand_map) in enumerate(sub_r):
+            pid = f"du{idx}"
+            en_j = " / ".join(cues_by_id[cid].text.replace("\n", " ") for cid in du.cue_ids)
+            curr_j = " / ".join(ko.get(cid, "").replace("\n", " ") for cid in du.cue_ids)
+            cand_j = " / ".join(cand_map[cid].replace("\n", " ") for cid in du.cue_ids)
+            state_obj[pid] = {"en": en_j, "curr_ko": curr_j, "cand_ko": cand_j}
+            questions[f"{pid}_discourse_improved"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Unit {du.unit_id} (EN={en_j!r}): Does Candidate KO ({cand_j!r}) connect more naturally as a unified Korean thought/speech act than Current KO ({curr_j!r}) without omitting core meaning?"
+                ),
+            }
+        ans = gate_client.decide(stage="s4b_gate", state=state_obj, questions=questions)
+        for idx, (du, cand_map) in enumerate(sub_r):
+            p_imp = float((ans.get(f"du{idx}_discourse_improved") or {}).get("noul", 0.0))
+            if p_imp >= 0.50:
+                for cid in du.cue_ids:
+                    if cand_map[cid] != ko.get(cid, "").strip():
+                        accepted.append(CueEdit(cue_id=cid, new_ko=cand_map[cid], reason=f"discourse_unit:{du.speech_act_type}", kind="polish"))
+    return accepted
