@@ -541,15 +541,18 @@ def snap_ost_shot(
     w_start_s = max(0.0, (obs_start_ms - pad_before) / 1000.0)
     w_end_s = (obs_end_ms + pad_after) / 1000.0
     ff = ffmpeg_bin()
-    res = subprocess.run(
-        [
-            ff, "-nostdin", "-hide_banner", "-ss", f"{w_start_s:.3f}", "-to", f"{w_end_s:.3f}",
-            "-i", str(video),
-            "-vf", "scdet=threshold=8:sc_pass=1,metadata=print:file=-",
-            "-an", "-f", "null", "-",
-        ],
-        capture_output=True, text=True, timeout=30, check=False,
-    )
+    try:
+        res = subprocess.run(
+            [
+                ff, "-nostdin", "-hide_banner", "-ss", f"{w_start_s:.3f}", "-to", f"{w_end_s:.3f}",
+                "-i", str(video),
+                "-vf", "scale=320:180,scdet=threshold=8:sc_pass=1,metadata=print:file=-",
+                "-an", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=45, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return obs_start_ms, obs_end_ms
     cuts: list[tuple[int, float]] = []
     for m in re.finditer(
         r"lavfi\.scd\.score:\s*([0-9.]+),\s*lavfi\.scd\.time:\s*([0-9.]+)",
@@ -570,15 +573,18 @@ def snap_ost_shot(
     s_in = c_in / 1000.0
     s_out = c_out / 1000.0
     W, H = 160, 90
-    raw_res = subprocess.run(
-        [
-            ff, "-nostdin", "-hide_banner", "-ss", f"{s_in:.3f}", "-to", f"{s_out:.3f}",
-            "-i", str(video),
-            "-vf", f"fps=10,scale={W}:{H},format=gray",
-            "-an", "-f", "rawvideo", "-",
-        ],
-        capture_output=True, timeout=30, check=False,
-    )
+    try:
+        raw_res = subprocess.run(
+            [
+                ff, "-nostdin", "-hide_banner", "-ss", f"{s_in:.3f}", "-to", f"{s_out:.3f}",
+                "-i", str(video),
+                "-vf", f"fps=10,scale={W}:{H},format=gray",
+                "-an", "-f", "rawvideo", "-",
+            ],
+            capture_output=True, timeout=45, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return c_in, c_out
     buf = np.frombuffer(raw_res.stdout, dtype=np.uint8)
     n_frames = len(buf) // (W * H)
     if n_frames < 4:
