@@ -539,17 +539,17 @@ def snap_ost_shot(
     pad_before = 1500
     pad_after = 2000
     w_start_s = max(0.0, (obs_start_ms - pad_before) / 1000.0)
-    w_end_s = (obs_end_ms + pad_after) / 1000.0
+    w_dur_s = max(0.5, (obs_end_ms + pad_after) / 1000.0 - w_start_s)
     ff = ffmpeg_bin()
     try:
         res = subprocess.run(
             [
-                ff, "-nostdin", "-hide_banner", "-ss", f"{w_start_s:.3f}", "-to", f"{w_end_s:.3f}",
+                ff, "-nostdin", "-hide_banner", "-ss", f"{w_start_s:.3f}", "-t", f"{w_dur_s:.3f}",
                 "-i", str(video),
                 "-vf", "scale=320:180,scdet=threshold=8:sc_pass=1,metadata=print:file=-",
                 "-an", "-f", "null", "-",
             ],
-            capture_output=True, text=True, timeout=45, check=False,
+            capture_output=True, text=True, timeout=15, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
         return obs_start_ms, obs_end_ms
@@ -571,17 +571,17 @@ def snap_ost_shot(
         return obs_start_ms, obs_end_ms
 
     s_in = c_in / 1000.0
-    s_out = c_out / 1000.0
+    s_dur = max(0.5, (c_out - c_in) / 1000.0)
     W, H = 160, 90
     try:
         raw_res = subprocess.run(
             [
-                ff, "-nostdin", "-hide_banner", "-ss", f"{s_in:.3f}", "-to", f"{s_out:.3f}",
+                ff, "-nostdin", "-hide_banner", "-ss", f"{s_in:.3f}", "-t", f"{s_dur:.3f}",
                 "-i", str(video),
                 "-vf", f"fps=10,scale={W}:{H},format=gray",
                 "-an", "-f", "rawvideo", "-",
             ],
-            capture_output=True, timeout=45, check=False,
+            capture_output=True, timeout=15, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
         return c_in, c_out
