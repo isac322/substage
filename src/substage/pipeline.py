@@ -1156,6 +1156,17 @@ def run(
         lambda: _Cues(items=translate.ost_cues(observations, cues, scenes)),
     ).items
     if ost:
+        if video.video_path and Path(video.video_path).is_file():
+            vpath = Path(video.video_path)
+            snapped_ost: list[Cue] = []
+            for o in ost:
+                ns, ne = media.snap_ost_shot(
+                    vpath, o.start_ms, o.end_ms, frame_exact=translate._is_frame_exact_cue(o)
+                )
+                if (ns, ne) != (o.start_ms, o.end_ms):
+                    o = o.model_copy(update={"start_ms": ns, "end_ms": max(ne, ns + 800)})
+                snapped_ost.append(o)
+            ost = snapped_ost
         cues, scenes = _merge_ost(cues, scenes, ost)
         save_model(ws.path("cues.json"), cues)
         save_model(ws.path("scenes.json"), scenes)

@@ -177,6 +177,10 @@ def _retime(events: list[_Ev], settings) -> None:
             for d in dlg
         )
         ev.position = "an8" if overlaps_dlg else "an2"
+        if overlaps_dlg:
+            s_ko = ev.ko.strip()
+            if s_ko and not (len(s_ko) >= 2 and s_ko[0] in "'\"“”‘’[" and s_ko[-1] in "'\"“”‘’]"):
+                ev.ko = f"'{s_ko}'"
 # ---------------------------------------------------------------- text
 
 
