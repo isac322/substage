@@ -79,15 +79,26 @@ def _load_subs(path: Path) -> pysubs2.SSAFile:
 
 
 def _normalize_to_srt(src: Path, dest: Path) -> int:
-    """Load any pysubs2 format, drop blank events, write UTF-8 SRT; returns cue count."""
+    """Load any pysubs2 format, drop blank events, write UTF-8 SRT (preserving ``{\\an8}``); returns cue count."""
     subs = _load_subs(src)
-    subs.events = sorted(
+    kept = sorted(
         (e for e in subs.events if not e.is_comment and e.plaintext.replace("\u00a0", " ").strip()),
         key=lambda e: (e.start, e.end),
     )
+    has_an8 = False
+    for e in kept:
+        raw = e.text or ""
+        if raw.startswith("{\\an8}"):
+            has_an8 = True
+            e.text = "__SUBSTAGE_AN8__" + raw[len("{\\an8}"):]
+    subs.events = kept
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
-    subs.save(str(tmp), encoding="utf-8", format_="srt")
+    if has_an8:
+        srt_str = subs.to_string("srt").replace("__SUBSTAGE_AN8__", "{\\an8}")
+        tmp.write_text(srt_str, encoding="utf-8")
+    else:
+        subs.save(str(tmp), encoding="utf-8", format_="srt")
     os.replace(tmp, dest)
     return len(subs.events)
 

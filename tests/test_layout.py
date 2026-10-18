@@ -483,3 +483,28 @@ def test_dual_channel_ost_and_dialogue_snap_and_an8_positioning(tmp_path):
     loaded = load_cue_list(srt_p)
     top_cues = [x for x in loaded if x.get("pos") == "top"]
     assert len(top_cues) == 1 and top_cues[0]["t"] == "'공존'"
+
+    # Case 3: Logan chauffeur permit (ost-0051 [295101..296838]) overlapping radio dialogue
+    # c0055 [292450..294290] and c0056 [294370..296750] is NEVER truncated to c0056.start - 83,
+    # gets position='an8', and _normalize_to_srt preserves {\an8}.
+    c0055 = cue("c0055", 292450, 294290, "Sleepwalking.\nBetween the ice caps,")
+    ost51 = cue("ost-0051", 295101, 296838, "CHRYSLER EL PASO, TEXAS CHAUFFEUR PERMIT HOWLETT, JAMES", source="ost")
+    c0056 = cue("c0056", 294370, 296750, "the pornographers,\npoisoned water, mutants...")
+    evs3 = run(
+        [c0055, ost51, c0056],
+        {
+            "c0055": "녹는 만년설\n포르노 업자",
+            "ost-0051": "'운전면허증\n제임스 하울렛'",
+            "c0056": "오염수, 뮤턴트 사이를\n몽유병자처럼 걷지",
+        },
+    )
+    ost_ev3 = next(e for e in evs3 if e.channel == "ost")
+    assert ost_ev3.start_ms == 295101 and ost_ev3.end_ms >= 296838
+    assert ost_ev3.position == "an8"
+
+    from substage.review_server import _normalize_to_srt
+    norm_dest = tmp_path / "norm.srt"
+    _normalize_to_srt(srt_p, norm_dest)
+    assert "{\\an8}'공존'" in norm_dest.read_text(encoding="utf-8")
+    loaded_norm = load_cue_list(norm_dest)
+    assert [x["t"] for x in loaded_norm if x.get("pos") == "top"] == ["'공존'"]

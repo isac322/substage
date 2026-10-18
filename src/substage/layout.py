@@ -150,26 +150,33 @@ def _retime(events: list[_Ev], settings) -> None:
         for i, ev in enumerate(events):
             ev.end = _fit(ev, events[i + 1].start if i + 1 < len(events) else None, settings)
         return
-    # Retime dialogue events independently on the bottom channel; only clamp to a non-overlapping
-    # following OST event when the dialogue event's original en_end preceded the OST start.
+    # Retime dialogue events strictly against the next dialogue event on the bottom channel.
     for i, ev in enumerate(dlg):
         nxt_dlg = dlg[i + 1].start if i + 1 < len(dlg) else None
-        nxt_ost = next((o.start for o in ost if o.start >= ev.en_end), None)
-        nxt = min(x for x in (nxt_dlg, nxt_ost) if x is not None) if (nxt_dlg is not None or nxt_ost is not None) else None
-        ev.end = _fit(ev, nxt, settings)
-    # Snap OST tail-bleed (<= 350 ms) before the next dialogue start, then retime OST on its own channel
+        ev.end = _fit(ev, nxt_dlg, settings)
+    # Retime OST events on the top channel; only snap a pure tail-bleed (<= 350 ms) into a
+    # dialogue event when the OST does not overlap any other dialogue event.
     for i, ev in enumerate(ost):
-        for d in dlg:
-            if ev.start < d.start - 200 and 0 < ev.en_end - d.start <= 350:
-                ev.en_end = max(ev.start + settings.short_min_ms, d.start - settings.min_gap_ms)
-                break
+        body_overlaps = [
+            d for d in dlg
+            if min(ev.en_end, d.end) - max(ev.start, d.start) > 350
+        ]
+        snap_limit: int | None = None
+        if not body_overlaps:
+            for d in dlg:
+                if ev.start < d.start - 200 and 0 < ev.en_end - d.start <= 350:
+                    ev.en_end = max(ev.start + settings.short_min_ms, d.start - settings.min_gap_ms)
+                    snap_limit = d.start
+                    break
         nxt_ost = ost[i + 1].start if i + 1 < len(ost) else None
-        nxt_dlg = next((d.start for d in dlg if d.start >= ev.en_end), None)
-        nxt = min(x for x in (nxt_ost, nxt_dlg) if x is not None) if (nxt_ost is not None or nxt_dlg is not None) else None
+        nxt = min(x for x in (nxt_ost, snap_limit) if x is not None) if (nxt_ost is not None or snap_limit is not None) else None
         ev.end = _fit(ev, nxt, settings)
-        overlaps_dlg = any(min(ev.end, d.end) - max(ev.start, d.start) > 0 for d in dlg)
+        overlaps_dlg = any(
+            min(ev.end, d.end) - max(ev.start, d.start) > 0
+            or (snap_limit is None and min(ev.en_end, d.en_end) - max(ev.start, d.start) > 0)
+            for d in dlg
+        )
         ev.position = "an8" if overlaps_dlg else "an2"
-
 # ---------------------------------------------------------------- text
 
 
@@ -256,6 +263,8 @@ def _absorbed_timing_cues(cues, ko, scene_of, lineage, source_cue) -> dict[str, 
                 if (
                     candidate.id not in references[owner.id] or ko.get(candidate.id, "").strip()
                     or _is_fixed(candidate) or scene_of.get(candidate.id) != scene_of.get(owner.id)
+                    or (candidate.source == "ost" or candidate.id.startswith("ost-"))
+                    != (owner.source == "ost" or owner.id.startswith("ost-"))
                 ):
                     break
                 claims.setdefault(candidate.id, set()).add(owner.id)

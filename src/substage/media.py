@@ -518,3 +518,97 @@ def slice_proxy_clip(ws: Workspace, video: Path, start_s: float, end_s: float) -
     )
     tmp.replace(out)
     return out
+
+
+def snap_ost_shot(
+    video: Path, obs_start_ms: int, obs_end_ms: int, *, frame_exact: bool = False
+) -> tuple[int, int]:
+    """Snap a coarse VLM on-screen-text interval ``[obs_start_ms, obs_end_ms]`` to
+    ``[t_settle, c_out]`` using ``ffmpeg scdet`` shot cuts and ``numpy`` 3x3
+    Laplacian sharpness / inter-frame motion settle detection."""
+    if frame_exact:
+        return obs_start_ms, obs_end_ms
+    video = Path(video).expanduser()
+    if not video.is_file():
+        return obs_start_ms, obs_end_ms
+    try:
+        import numpy as np
+    except ImportError:
+        return obs_start_ms, obs_end_ms
+
+    pad_before = 1500
+    pad_after = 2000
+    w_start_s = max(0.0, (obs_start_ms - pad_before) / 1000.0)
+    w_end_s = (obs_end_ms + pad_after) / 1000.0
+    ff = ffmpeg_bin()
+    res = subprocess.run(
+        [
+            ff, "-nostdin", "-hide_banner", "-ss", f"{w_start_s:.3f}", "-to", f"{w_end_s:.3f}",
+            "-i", str(video),
+            "-vf", "scdet=threshold=8:sc_pass=1,metadata=print:file=-",
+            "-an", "-f", "null", "-",
+        ],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    cuts: list[tuple[int, float]] = []
+    for m in re.finditer(
+        r"lavfi\.scd\.score:\s*([0-9.]+),\s*lavfi\.scd\.time:\s*([0-9.]+)",
+        (res.stdout or "") + "\n" + (res.stderr or ""),
+    ):
+        score = float(m.group(1))
+        t_ms = int(round((w_start_s + float(m.group(2))) * 1000))
+        cuts.append((t_ms, score))
+
+    mid_ms = (obs_start_ms + obs_end_ms) // 2
+    before_cuts = [t for t, _ in cuts if t <= mid_ms]
+    after_cuts = [t for t, _ in cuts if t > mid_ms]
+    c_in = max(before_cuts) if before_cuts else obs_start_ms
+    c_out = min(after_cuts) if after_cuts else obs_end_ms
+    if c_out - c_in < 700 or c_out - c_in > 9000:
+        return obs_start_ms, obs_end_ms
+
+    s_in = c_in / 1000.0
+    s_out = c_out / 1000.0
+    W, H = 160, 90
+    raw_res = subprocess.run(
+        [
+            ff, "-nostdin", "-hide_banner", "-ss", f"{s_in:.3f}", "-to", f"{s_out:.3f}",
+            "-i", str(video),
+            "-vf", f"fps=10,scale={W}:{H},format=gray",
+            "-an", "-f", "rawvideo", "-",
+        ],
+        capture_output=True, timeout=30, check=False,
+    )
+    buf = np.frombuffer(raw_res.stdout, dtype=np.uint8)
+    n_frames = len(buf) // (W * H)
+    if n_frames < 4:
+        return c_in, c_out
+
+    frames = buf[: n_frames * W * H].reshape((n_frames, H, W)).astype(np.float32)
+    x0, x1 = int(W * 0.2), int(W * 0.8)
+    y0, y1 = int(H * 0.25), int(H * 0.75)
+    crop = frames[:, y0:y1, x0:x1]
+    lap = (
+        crop[:, 1:-1, :-2] + crop[:, 1:-1, 2:] + crop[:, :-2, 1:-1] + crop[:, 2:, 1:-1]
+        - 4.0 * crop[:, 1:-1, 1:-1]
+    )
+    sharp = np.var(lap, axis=(1, 2))
+    motion = np.zeros(n_frames, dtype=np.float32)
+    motion[1:] = np.mean(np.abs(crop[1:] - crop[:-1]), axis=(1, 2))
+
+    half = max(2, n_frames // 2)
+    early_motion = float(np.max(motion[1 : min(18, n_frames)])) if n_frames > 2 else 0.0
+    late_motion = float(np.median(motion[half:]))
+    plateau_sharp = float(np.percentile(sharp[half:], 75))
+
+    t_settle = max(obs_start_ms, c_in) if abs(obs_start_ms - c_in) <= 600 else c_in
+    if early_motion > 7.5 and late_motion < early_motion * 0.65:
+        thresh_m = max(6.8, late_motion * 1.6)
+        thresh_s = 0.65 * plateau_sharp
+        for i in range(1, n_frames - 1):
+            if motion[i] <= thresh_m and motion[i + 1] <= thresh_m and sharp[i] >= thresh_s:
+                cand_settle = c_in + i * 100
+                if c_out - cand_settle >= 800:
+                    t_settle = cand_settle
+                break
+    return t_settle, c_out

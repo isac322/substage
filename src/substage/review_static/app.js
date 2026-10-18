@@ -60,7 +60,10 @@ function activeSplitText(cues, t) {
     if (c.pos === "top" || (hasMulti && isQuotedOstText(c.t))) top.push(c.t);
     else bottom.push(c.t);
   }
-  return { top: top.join("\n"), bottom: bottom.join("\n"), all: act.map((c) => c.t).join("\n") };
+  const allParts = (top.length && bottom.length)
+    ? [`[상단] ${top.join(" / ")}`, `[하단] ${bottom.join(" / ")}`]
+    : act.map((c) => c.t);
+  return { top: top.join("\n"), bottom: bottom.join("\n"), all: allParts.join("\n") };
 }
 
 function activeText(cues, t) {
@@ -255,7 +258,8 @@ function buildRows(en, off, ko) {
       const hasSimultaneousSpoken = isQuotedOstText(c.t) && cues.some(
         (other) => other !== c && !isQuotedOstText(other.t) && Math.min(other.e, c.e) - Math.max(other.s, c.s) > 100
       );
-      if (c.pos !== "top" && !hasSimultaneousSpoken) {
+      const isTopCue = c.pos === "top" || hasSimultaneousSpoken;
+      if (!isTopCue) {
         const i = lastStartingBefore(base, c.e - 1);
         for (let j = i; j >= 0 && base[j].s > c.s - 60000; j--) {
           const ov = Math.min(c.e, base[j].e) - Math.max(c.s, base[j].s);
@@ -268,13 +272,14 @@ function buildRows(en, off, ko) {
       }
       if (!best) {
         for (const r of extra) {
+          if (Boolean(r.isTop) !== isTopCue) continue;
           const ov = Math.min(c.e, r.e) - Math.max(c.s, r.s);
           if (ov >= 150 && ov > bestOv) { bestOv = ov; best = r; }
         }
       }
       if (best) best[key].push(c.t);
       else {
-        const r = { s: c.s, e: c.e, en: [], off: [], ko: [] };
+        const r = { s: c.s, e: c.e, en: [], off: [], ko: [], isTop: isTopCue };
         r[key].push(c.t);
         extra.push(r);
       }
