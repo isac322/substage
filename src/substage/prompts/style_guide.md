@@ -329,7 +329,7 @@ Why: a literal version keeps the content and loses the reason anyone laughed.
 - That extra "A" stands for "ass," yours, between mine and a bullet. | 추가된 A는 '엉덩이'의 A야 | 대신 총 맞으라고 / 비싼 돈 내는 거야
 
 ### 6.3 Translate descriptive labels and mocking nicknames into everyday Korean; transliterate established aliases.
-A label that *describes* (a mode, a ritual, a rank, an institution, a nickname built on a trait) gets the shortest everyday Korean word, often a -이 nickname for people. Hero and villain aliases, team, agency and codenames stay transliterated. Once chosen, keep the label every time.
+A label that *describes* (a mode, a ritual, a rank, an institution, a nickname built on a trait) gets the shortest everyday Korean word, often a -이 nickname for people. When a later cue questions or explains a nickname by its literal meaning (`"Blind Al" -> "Well, she's blind"`, `"Chastity" -> "Irony"`), you MUST gloss the trait in Korean (`장님 알`, `순결이`) so the explanation makes sense; phonetic transliteration (`블라인드 알`, `체스터티`) breaks the dialogue. Hero and villain aliases whose literal meaning is not unpacked in dialogue stay transliterated. Once chosen, keep the label every time.
 Why: labels return as running gags; a clunky first rendering flattens every repeat.
 - "Training wheels protocol"? Turn it off. | '초보자 프로토콜'? 꺼 | '왕초보 모드'? / 꺼버려
 - Say hello to "The Grump." (from grumpy) | '그럼프'한테 인사해 | 심술이한테 인사해야지

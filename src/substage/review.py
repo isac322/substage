@@ -36,15 +36,17 @@ from .models import (
     Snapshot,
 )
 from .levels import addressed_levels, speaker_turns
-from .register import RegisterTable, binary, render_scene_register, same_level
+from .register import THEATRICAL_VOCATIVE_RE, RegisterTable, binary, lock_scene_pairs, render_scene_register, same_level
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
 from .translate import (
     CueSpan,
     DiscourseUnit,
+    EchoLink,
     _NON_TRANSLATED,
     _fmt_ms,
     build_discourse_units,
+    detect_echo_and_moniker_chains,
     detect_pragmatic_risk_cues,
     detect_syntactic_spans,
 )
@@ -1811,4 +1813,104 @@ def repair_discourse_units(
                 for cid in du.cue_ids:
                     if cand_map[cid] != ko.get(cid, "").strip():
                         accepted.append(CueEdit(cue_id=cid, new_ko=cand_map[cid], reason=f"discourse_unit:{du.speech_act_type}", kind="polish"))
+    return accepted
+
+
+class _EchoRegisterWindowRewrite(BaseModel):
+    echo_and_register_resolution: str = Field(
+        description="Identify the exact shared Korean anchor stem for any echoed English word/condition ('만약' for quoted 'if', semantic trait gloss like '장님 알'/'순결이' for explained monikers) and the single locked interpersonal speech level (해체 vs 해요체) across the conversation."
+    )
+    cues: list[_DiscourseCueSlice] = Field(
+        description="Rewritten Korean subtitle for each cue_id in the window (<=2 lines, <=14 chars/line)."
+    )
+
+
+def build_clef_echo_register_questions(windows: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Consensus 4-axis atomic Clef questions for lexical echo, moniker payoff, and scene register stability."""
+    questions: dict[str, dict[str, Any]] = {}
+    for w in windows:
+        wid = str(w["window_id"])
+        en_seq = w.get("en", [])
+        ko_seq = w.get("ko", [])
+        questions[f"{wid}__q1_echo_and_moniker_anchor"] = {
+            "type": "noul",
+            "instructions": (
+                f"Window {wid} (EN={en_seq!r}, KO={ko_seq!r}): "
+                f"When a later cue echoes, quotes, or questions an earlier cue's word/condition ('If... / What do you mean, if?', repeated term), "
+                f"or explains a nickname's literal meaning ('Blind Al / blind', 'Chastity / Irony'), does KO keep one consistent Korean anchor stem across setup and payoff (and gloss descriptive monikers)?"
+            ),
+        }
+        questions[f"{wid}__q2_scene_register_consistency"] = {
+            "type": "noul",
+            "instructions": (
+                f"Window {wid} (EN={en_seq!r}, KO={ko_seq!r}): "
+                f"Does KO maintain a consistent interpersonal speech level (해체 vs 해요체/하십시오체) across the conversation without unmotivated flips (exempting theatrical vocatives like 'Your Honor')?"
+            ),
+        }
+        questions[f"{wid}__q3_contextual_meaning_and_pragmatics"] = {
+            "type": "noul",
+            "instructions": (
+                f"Window {wid} (EN={en_seq!r}, KO={ko_seq!r}): "
+                f"Does KO accurately convey who says what to whom, the conditional framing ('if... can' -> '만약 ~할 수 있다면'), and conversational logic?"
+            ),
+        }
+        questions[f"{wid}__q4_natural_korean_and_subtitle_limits"] = {
+            "type": "noul",
+            "instructions": (
+                f"Window {wid} (KO={ko_seq!r}): Is every cue natural spoken Korean dialogue within <=2 lines and <=16 chars/line?"
+            ),
+        }
+    return questions
+
+
+def repair_echo_and_register_windows(
+    ws: Workspace,
+    txt_client: Any,
+    gate_client: ClefDecisionsClient,
+    scenes: list[Scene],
+    cues_by_id: dict[str, Cue],
+    ko: dict[str, str],
+    observations,
+    *,
+    levels: dict[str, tuple[str, str]] | None = None,
+) -> list[CueEdit]:
+    """Repair cross-cue/cross-scene lexical echo links, moniker payoffs, and intra-scene register oscillations."""
+    levels = levels or {}
+    obs_map = _obs_by_id(observations)
+    ordered_cues = [cues_by_id[cid] for sc in scenes for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+    echo_links = detect_echo_and_moniker_chains(ordered_cues)
+    if not echo_links:
+        return []
+    accepted: list[CueEdit] = []
+    sys_prompt = (
+        "You are a master Korean subtitle translator. Lock echoed keywords/conditionals ('만약' for quoted 'if'), "
+        "translate descriptive nicknames by their literal trait when explained in dialogue ('장님 알', '순결이'), "
+        "and maintain consistent interpersonal speech level (해체 vs 해요체) across the conversation."
+    )
+    for el in echo_links:
+        cids = [cid for cid in el.cue_ids if cid in cues_by_id]
+        if len(cids) < 2:
+            continue
+        rows_txt = "\n".join(
+            f"- {cid}: EN={cues_by_id[cid].text.replace(chr(10), ' ')!r} | Current_KO={ko.get(cid, '').replace(chr(10), ' ')!r}"
+            for cid in cids
+        )
+        prompt = (
+            f"## Echo / Moniker Chain Repair ({el.unit_id}, kind={el.kind}, anchor={el.anchor_en!r})\n"
+            f"Setup cues: {list(el.setup_ids)} | Payoff cues: {list(el.payoff_ids)}\n"
+            f"{rows_txt}\n\n"
+            f"Rewrite `cues` for {cids} so every setup and payoff shares one consistent Korean anchor stem "
+            f"('만약' on all setups & payoffs when 'if' is echoed; semantic trait gloss like '장님 알'/'순결이' when moniker meaning is explained) "
+            f"and consistent interpersonal speech level."
+        )
+        try:
+            res = txt_client.generate(stage=_STAGE_REGEN, prompt=prompt, schema=_EchoRegisterWindowRewrite, system=sys_prompt)
+        except GeminiBlocked:
+            continue
+        by_id = {s.cue_id: rewrap(s.ko.replace("\\n", "\n").strip(), 14, 12) for s in res.cues if s.ko.strip()}
+        if set(by_id.keys()) != set(cids):
+            continue
+        for cid in cids:
+            if by_id[cid] != ko.get(cid, "").strip():
+                accepted.append(CueEdit(cue_id=cid, new_ko=by_id[cid], reason=f"echo_link:{el.kind}", kind="polish"))
     return accepted

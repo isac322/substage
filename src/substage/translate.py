@@ -508,6 +508,170 @@ def build_discourse_units(
     return units
 
 
+_ECHO_QUOTE_BACK_RE = re.compile(
+    r"(?:"
+    r"\bwhat\s+do\s+you\s+mean,?\s*['\"](?P<q1>[^'\"]{2,40})['\"]"
+    r"|\byou\s+(?:just\s+)?said,?\s*['\"]?(?P<q2>[A-Za-z][^'\"?.!]{2,40})"
+    r"|\bdid\s+you\s+(?:just\s+)?say,?\s*['\"]?(?P<q3>[A-Za-z][^'\"?.!]{2,40})"
+    r"|\bwhat\s+(?P<q4>[A-Za-z]{4,20})\s*\?"
+    r")",
+    re.IGNORECASE,
+)
+_ECHO_COND_PAYOFF_RE = re.compile(
+    r"(?:\bwhat\s+do\s+you\s+mean,?\s*['\"]?(?:if|unless)\b|^['\"]?(?:if|unless)['\"]?\s*\?)",
+    re.IGNORECASE,
+)
+_ECHO_MONIKER_RE = re.compile(
+    r"(?:"
+    r"\byou\s+call\s+(?:her|him|them|it|me)\s+['\"]?(?P<m1>[A-Z][A-Za-z0-9\s\-]{1,30}?)['\"]?(?:[?.!,]|$)"
+    r"|\bthat(?:'s|\s+is)\s+(?:her|his|their|its)\s+name\b"
+    r"|\bor\s+as\s+i\s+like\s+to\s+call\s+(?:her|him|them|it),?\s*['\"]?(?P<m2>[A-Z][A-Za-z0-9\s\-]{1,30})"
+    r"|\bgive\s+it\s+up\s+for\s+['\"]?(?P<m3>[A-Z][A-Za-z0-9]{2,20})\b"
+    r")",
+    re.IGNORECASE,
+)
+_ECHO_CONTENT_WORD_RE = re.compile(r"[A-Za-z]{4,}")
+_ECHO_STOP_WORDS = {
+    "what", "mean", "that", "this", "with", "from", "your", "have", "just", "like", "know",
+    "they", "them", "then", "when", "were", "will", "would", "could", "should", "about",
+    "there", "their", "into", "some", "more", "very", "only", "even", "well", "yeah", "okay",
+    "going", "gonna", "think", "look", "here", "come", "back", "down", "over", "make", "made",
+    "take", "took", "said", "call", "name",
+}
+
+
+@dataclass(frozen=True)
+class EchoLink:
+    unit_id: str
+    kind: str  # "conditional_echo" | "quote_or_term_echo" | "moniker_gloss"
+    anchor_en: str
+    setup_ids: tuple[str, ...]
+    payoff_ids: tuple[str, ...]
+
+    @property
+    def cue_ids(self) -> tuple[str, ...]:
+        seen: list[str] = []
+        for cid in (*self.setup_ids, *self.payoff_ids):
+            if cid not in seen:
+                seen.append(cid)
+        return tuple(seen)
+
+
+def detect_echo_and_moniker_chains(
+    cues: Sequence[Cue],
+    *,
+    max_window_cues: int = 15,
+    max_gap_ms: int = 25_000,
+) -> list[EchoLink]:
+    """Detect intra-scene and cross-scene lexical/conditional echo chains and descriptive moniker payoffs."""
+    spoken = [
+        c for c in cues
+        if not c.lyric and not c.id.startswith("ost-") and c.source != "ost" and c.text.strip()
+    ]
+    links: list[EchoLink] = []
+    used_payoffs: set[str] = set()
+
+    for idx, cur in enumerate(spoken):
+        if cur.id in used_payoffs:
+            continue
+        t_cur = cur.text.replace("\n", " ").strip()
+        win_start = max(0, idx - max_window_cues)
+        prior = [
+            p for p in spoken[win_start:idx]
+            if 0 <= cur.start_ms - p.end_ms <= max_gap_ms
+        ]
+        if not prior:
+            continue
+
+        # 1. Conditional 'if'/'unless' echo ('What do you mean, "if?"')
+        if _ECHO_COND_PAYOFF_RE.search(t_cur):
+            token = "unless" if "unless" in t_cur.lower() else "if"
+            pat = re.compile(rf"\b{token}\b", re.IGNORECASE)
+            setups = tuple(p.id for p in prior if pat.search(p.text))
+            if setups:
+                used_payoffs.add(cur.id)
+                links.append(
+                    EchoLink(
+                        unit_id=f"{setups[0]}..{cur.id}",
+                        kind="conditional_echo",
+                        anchor_en=token,
+                        setup_ids=setups,
+                        payoff_ids=(cur.id,),
+                    )
+                )
+                continue
+
+        # 2. Descriptive moniker payoff ('You call her Blind Al? / Well, she's blind', 'Give it up for Chastity / Irony')
+        m_mon = _ECHO_MONIKER_RE.search(t_cur)
+        if m_mon:
+            anchor = (m_mon.group("m1") or m_mon.group("m2") or m_mon.group("m3") or "").strip(" \"'?.!,")
+            if not anchor:
+                # Search prior 4 cues for a capitalized 1-2 word moniker
+                for p in reversed(prior[-4:]):
+                    cap_m = re.findall(r"\b(?:Blind\s+[A-Z]\w+|Chastity|Ajax|Francis)\b", p.text)
+                    if cap_m:
+                        anchor = cap_m[-1]
+                        break
+            if anchor:
+                a_words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", anchor)]
+                setups = tuple(
+                    p.id for p in prior[-6:]
+                    if any(re.search(rf"\b{re.escape(w)}\b", p.text, re.I) for w in a_words)
+                )
+                payoffs = [cur.id]
+                for nxt in spoken[idx + 1 : min(len(spoken), idx + 3)]:
+                    if nxt.start_ms - cur.end_ms <= 5000:
+                        if any(re.search(rf"\b{re.escape(w)}\b", nxt.text, re.I) for w in a_words) or re.search(
+                            r"\b(?:blind|irony|soap|call\s+her|call\s+him)\b", nxt.text, re.I
+                        ):
+                            payoffs.append(nxt.id)
+                            used_payoffs.add(nxt.id)
+                if setups or len(payoffs) >= 2:
+                    used_payoffs.add(cur.id)
+                    s_ids = setups if setups else (cur.id,)
+                    p_ids = tuple(cid for cid in payoffs if cid not in s_ids) or (payoffs[-1],)
+                    links.append(
+                        EchoLink(
+                            unit_id=f"{s_ids[0]}..{p_ids[-1]}",
+                            kind="moniker_gloss",
+                            anchor_en=anchor,
+                            setup_ids=s_ids,
+                            payoff_ids=p_ids,
+                        )
+                    )
+                    continue
+
+        # 3. Quote-back or repeated multi-word term echo ('What do you mean, X?', 'Did you say X?', 'Training wheels protocol?')
+        m_qb = _ECHO_QUOTE_BACK_RE.search(t_cur)
+        quoted = (m_qb.group("q1") or m_qb.group("q2") or m_qb.group("q3") or m_qb.group("q4") or "").strip() if m_qb else ""
+        if quoted:
+            q_words = [w.lower() for w in _ECHO_CONTENT_WORD_RE.findall(quoted) if w.lower() not in _ECHO_STOP_WORDS]
+            if q_words:
+                setups = tuple(
+                    p.id for p in prior
+                    if any(re.search(rf"\b{re.escape(w)}\b", p.text, re.I) for w in q_words)
+                )
+                if setups:
+                    payoffs = [cur.id]
+                    for nxt in spoken[idx + 1 : min(len(spoken), idx + 4)]:
+                        if nxt.start_ms - cur.end_ms <= 6000 and any(
+                            re.search(rf"\b{re.escape(w)}\b", nxt.text, re.I) for w in q_words
+                        ):
+                            payoffs.append(nxt.id)
+                            used_payoffs.add(nxt.id)
+                    used_payoffs.add(cur.id)
+                    links.append(
+                        EchoLink(
+                            unit_id=f"{setups[0]}..{payoffs[-1]}",
+                            kind="quote_or_term_echo",
+                            anchor_en=quoted,
+                            setup_ids=setups,
+                            payoff_ids=tuple(payoffs),
+                        )
+                    )
+    return links
+
+
 _PRAGMA_PARTITIVE_RE = re.compile(
     r"\b(?:(?:not\s+)?(?:all|part|most|half|none|rest|every\s+inch|every\s+part)\s+of\s+(?:you|me|him|her|us|it)\b"
     r"|\b(?:all|part)\s+of\s+(?:you|me)\s+(?:was|is|wasn't|isn't)\b"
@@ -608,6 +772,7 @@ def _render_cues(
     lines = ["## CUES (id | start-end | speaker | sound | dur s | aim/max chars | turns | text)"]
     spans = detect_syntactic_spans(cues, obs_by_id)
     d_units = {cid: du for du in build_discourse_units(cues, obs_by_id) for cid in du.cue_ids}
+    echo_links = {cid: el for el in detect_echo_and_moniker_chains(cues) for cid in el.cue_ids}
     for n, c in enumerate(cues):
         dur = (c.end_ms - c.start_ms) / 1000.0
         speaker = c.speaker_hint or "-"
@@ -639,6 +804,10 @@ def _render_cues(
             tags.append(f"DISCOURSE UNIT {du.unit_id}: {du.speech_act_type}{hold_tag}")
         elif sp is not None:
             tags.append(f"SPAN {sp.span_id}: {sp.policy}")
+        el = echo_links.get(c.id)
+        if el is not None:
+            role = "SETUP" if c.id in el.setup_ids else "PAYOFF"
+            tags.append(f"ECHO UNIT {el.unit_id}: {el.kind} ({role}, anchor={el.anchor_en!r})")
         tag = f" [{' | '.join(tags)}]" if tags else ""
         text = c.text.replace("\n", " / ")
         budget = _budget(c, cues[n + 1].start_ms if n + 1 < len(cues) else None)

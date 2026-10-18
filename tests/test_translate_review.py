@@ -977,6 +977,57 @@ def test_build_discourse_units_and_hesitation_merge_guard():
         Settings(),
     )
     assert [e.cue_ids for e in evs] == [["c0036"], ["c0037"], ["c0038"], ["c0039"]]
+
+
+def test_detect_echo_and_moniker_chains_and_scene_register_lock():
+    from substage.translate import detect_echo_and_moniker_chains
+    from substage.register import lock_scene_pairs
+
+    # 1. Cross-scene conditional 'if' echo (4.13s pause between c1134 and c1135)
+    c1128 = cue("c1128", 3670584, 3671418, "If they can fix your world...")
+    c1129 = cue("c1129", 3671585, 3673212, "what's the first thing you're gonna do?")
+    c1134 = cue("c1134", 3682136, 3683805, "If... they can fix your world?")
+    c1135 = cue("c1135", 3687934, 3689500, 'What do you mean, "if?"')
+    links = detect_echo_and_moniker_chains([c1128, c1129, c1134, c1135])
+    cond_links = [el for el in links if el.kind == "conditional_echo"]
+    assert len(cond_links) == 1
+    assert cond_links[0].setup_ids == ("c1128", "c1134")
+    assert cond_links[0].payoff_ids == ("c1135",)
+
+    # 2. Descriptive moniker gloss ('Blind Al' -> 'You call her "Blind Al?"' -> "Well, she's blind.")
+    c1032 = cue("c1032", 3380000, 3383000, "My blind, elderly roommate, Blind Al, always says")
+    c1036 = cue("c1036", 3390000, 3392000, 'That\'s her name? You call her "Blind Al?"')
+    c1037 = cue("c1037", 3392200, 3394000, "Well, she's blind.")
+    m_links = detect_echo_and_moniker_chains([c1032, c1036, c1037])
+    assert any(el.kind == "moniker_gloss" and "c1032" in el.setup_ids for el in m_links)
+
+    # 3. Scene register lock: spurious addressee="group" in a 2-person scene is locked to the dyad partner,
+    # while theatrical vocative ('Your Honor') is preserved as exempt.
+    c_a1 = cue("c1044", 3450000, 3451000, "Who are you?")
+    c_a2 = cue("c1045", 3451200, 3452500, "I'm Nicepool.")
+    c_grp = cue("c1050", 3455000, 3456500, "Can't even tell.")
+    c_vh = cue("c1067", 3470000, 3472000, "Guilty on all charges, Your Honor.")
+    cues_map = {c.id: c for c in (c_a1, c_a2, c_grp, c_vh)}
+    pairs_in = {
+        "c1044": ("wade", "nicepool"),
+        "c1045": ("nicepool", "wade"),
+        "c1050": ("wade", "group"),
+        "c1067": ("wade", "group"),
+    }
+    locked = lock_scene_pairs(["c1044", "c1045", "c1050", "c1067"], cues_map, pairs_in)
+    assert locked["c1050"] == ("wade", "nicepool")
+    assert locked["c1067"] == ("wade", "group")
+
+    # 4. Consensus 4-axis Clef questions
+    qs = review.build_clef_echo_register_questions([
+        {"window_id": "w1", "en": [c1128.text, c1134.text, c1135.text], "ko": ["만약 네 세계를 고친다면", "만약 고칠 수 있다면?", "만약이라니?"]}
+    ])
+    assert set(qs.keys()) == {
+        "w1__q1_echo_and_moniker_anchor",
+        "w1__q2_scene_register_consistency",
+        "w1__q3_contextual_meaning_and_pragmatics",
+        "w1__q4_natural_korean_and_subtitle_limits",
+    }
 # ------------------------------------------------------------ character names
 
 

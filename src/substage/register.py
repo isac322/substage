@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
@@ -417,6 +418,64 @@ def cue_pairs(
                 cid: (SYSTEM_AI if s in sparse_ai else s, SYSTEM_AI if a in sparse_ai else a)
                 for cid, (s, a) in out.items()
             }
+    return out
+
+THEATRICAL_VOCATIVE_RE = re.compile(
+    r"\b(?:your\s+honor|ladies\s+and\s+gentlemen|members\s+of\s+the\s+jury|"
+    r"mr\.?\s+speaker|madam\s+chair|your\s+majesty|attention\s+passengers)\b",
+    re.IGNORECASE,
+)
+
+
+def lock_scene_pairs(
+    scene_cue_ids: Sequence[str],
+    cues_by_id: Mapping[str, Cue],
+    pairs_by_cue: Mapping[str, Pair],
+    observations: Iterable[ChunkObservations | CueObservation] = (),
+) -> dict[str, Pair]:
+    """Lock interpersonal (speaker, addressee) pairs inside a 2-3 person scene.
+
+    Resolves spurious ``addressee='group'`` tags when the English text has no
+    crowd address token, and stabilizes short unattributed/swapped turns inside
+    a dominant two-hander while exempting theatrical/courtroom vocatives.
+    """
+    obs_map = _flat_observations(observations) if observations else {}
+    out: dict[str, Pair] = {cid: pairs_by_cue[cid] for cid in scene_cue_ids if cid in pairs_by_cue}
+    interpersonal = [
+        (cid, out[cid])
+        for cid in scene_cue_ids
+        if cid in out and out[cid][1] != GROUP and out[cid][0] != SYSTEM_AI and out[cid][1] != SYSTEM_AI
+    ]
+    if len(interpersonal) < 2:
+        return out
+    dyad_counts: Counter[frozenset[str]] = Counter(frozenset(p) for _, p in interpersonal if p[0] != p[1])
+    if not dyad_counts:
+        return out
+    top_dyad, top_cnt = dyad_counts.most_common(1)[0]
+    if len(top_dyad) != 2 or top_cnt < max(2, len(interpersonal) // 2):
+        return out
+    members = tuple(sorted(top_dyad))
+    other_of = {members[0]: members[1], members[1]: members[0]}
+    for cid in scene_cue_ids:
+        c = cues_by_id.get(cid)
+        if c is None or c.lyric or c.id.startswith("ost-") or c.source == "ost":
+            continue
+        if THEATRICAL_VOCATIVE_RE.search(c.text):
+            continue
+        pair = out.get(cid)
+        if pair is not None:
+            spk, adr = pair
+            if spk in other_of and adr == GROUP:
+                words = set(_words(c.text))
+                if not (words & GROUP_WORDS):
+                    out[cid] = (spk, other_of[spk])
+        elif cid in obs_map:
+            o = obs_map[cid]
+            raw_s = (o.speaker or c.speaker_hint or "").strip().lower()
+            for m in members:
+                if m in raw_s:
+                    out[cid] = (m, other_of[m])
+                    break
     return out
 
 def cue_turn_pairs(
