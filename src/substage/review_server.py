@@ -105,11 +105,15 @@ def load_cue_list(path: Path) -> list[dict]:
             return hit[1]
     out = []
     for e in _load_subs(path).events:
+        raw_text = e.text or ""
+        is_top = "\\an8" in raw_text or "\\a6" in raw_text
         text = "\n".join(line.strip() for line in e.plaintext.replace("\u00a0", " ").splitlines()).strip()
         if e.is_comment or not text:
             continue
-        out.append({"s": int(e.start), "e": int(max(e.end, e.start)), "t": text})
-    out.sort(key=lambda c: (c["s"], c["e"]))
+        item: dict[str, Any] = {"s": int(e.start), "e": int(max(e.end, e.start)), "t": text}
+        if is_top:
+            item["pos"] = "top"
+        out.append(item)
     with _cue_cache_lock:
         _cue_cache[path] = (mtime, out)
     return out

@@ -617,7 +617,8 @@ class OutEvent(BaseModel):
     fragments: list[RetainedFragment] = Field(default_factory=list)
     omissions: list[OmittedAct] = Field(default_factory=list)
     attribution_passes: list[SemanticAttributionProvenance] = Field(default_factory=list)
-
+    channel: Literal["dialogue", "ost"] = "dialogue"
+    position: Literal["an2", "an8"] = "an2"
 
 # ---------------------------------------------------------------- accounting
 

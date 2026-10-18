@@ -443,3 +443,43 @@ def test_guarded_sound_and_omitted_incidental_lyric_do_not_create_semantic_displ
     )
     events = lay.layout([sound, song], {"c1": "", "c2": ""}, {"c1": "s1", "c2": "s1"}, {}, S, lineage=lineage)
     assert events == [] and lineage_issues(lineage, events=events) == []
+
+
+def test_dual_channel_ost_and_dialogue_snap_and_an8_positioning(tmp_path):
+    # Case 1: Tail-bleed OST (EARTH-10005 [687000..688400]) before speech onset ([688271..689417])
+    # snaps cleanly before speech onset and stays at an2 without overlapping dialogue.
+    c_ost = cue("ost-0008", 687000, 688400, "EARTH-10005", source="ost")
+    c_dlg = cue("c0177", 688271, 689417, "your locker at work opens.")
+    evs = run([c_ost, c_dlg], {"ost-0008": "'지구-10005'", "c0177": "직장 사물함이 열린다고"})
+    assert len(evs) == 2
+    assert evs[0].channel == "ost" and evs[0].position == "an2"
+    assert evs[0].end_ms <= 688271 - S.min_gap_ms
+    assert evs[1].channel == "dialogue" and evs[1].position == "an2"
+    assert evs[1].start_ms == 688271
+
+    # Case 2: Truly simultaneous OST ('공존' [732690..735200]) overlapping dialogue ([730813..735568])
+    # keeps both events, sets OST position='an8' (top) and dialogue position='an2' (bottom), and emits {\an8}.
+    c_d1 = cue("c0188", 730813, 735568, "And look, you can always go back to superhero-ing.")
+    c_o1 = cue("ost-0011", 732690, 735200, "COEXIST", source="ost")
+    evs2 = run([c_d1, c_o1], {"c0188": "언제든 히어로로 돌아가도 되잖아", "ost-0011": "'공존'"})
+    assert len(evs2) == 2
+    dlg_ev = next(e for e in evs2 if e.channel == "dialogue")
+    ost_ev = next(e for e in evs2 if e.channel == "ost")
+    assert dlg_ev.position == "an2"
+    assert ost_ev.position == "an8"
+
+    ws = Workspace("demo", tmp_path, tmp_path / "cache", tmp_path / "logs")
+    srt_p, _ = emit_mod.emit(
+        ws,
+        SimpleNamespace(video_id="demo"),
+        [c_d1, c_o1],
+        {"c0188": "언제든 히어로로 돌아가도 되잖아", "ost-0011": "'공존'"},
+        {},
+        evs2,
+    )
+    srt_txt = srt_p.read_text(encoding="utf-8")
+    assert "{\\an8}'공존'" in srt_txt
+    from substage.review_server import load_cue_list
+    loaded = load_cue_list(srt_p)
+    top_cues = [x for x in loaded if x.get("pos") == "top"]
+    assert len(top_cues) == 1 and top_cues[0]["t"] == "'공존'"

@@ -54,6 +54,16 @@ def emit(
         elif cue.text.strip():
             rows.append(SidecarCue(cue_id=cue.id, ko=ko.get(cue.id, "")))
 
-    write_srt([(e.start_ms, e.end_ms, e.ko) for e in shown], srt_path)
+    write_srt(
+        [
+            (
+                e.start_ms,
+                e.end_ms,
+                f"{{\\an8}}{e.ko}" if e.position == "an8" and not e.ko.startswith("{\\an8}") else e.ko,
+            )
+            for e in shown
+        ],
+        srt_path,
+    )
     save_model(sidecar_path, Sidecar(events=shown, cues=rows))
     return srt_path, sidecar_path

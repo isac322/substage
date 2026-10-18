@@ -42,6 +42,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field, replace
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -105,7 +106,8 @@ class _Ev:
     omissions: list[OmittedAct] = field(default_factory=list)
     attribution_passes: list[SemanticAttributionProvenance] = field(default_factory=list)
     lyric: bool = False
-
+    channel: Literal["dialogue", "ost"] = "dialogue"
+    position: Literal["an2", "an8"] = "an2"
 
 # ---------------------------------------------------------------- timing
 
@@ -142,9 +144,31 @@ def _fit(ev: _Ev, next_start: int | None, settings) -> int:
 
 
 def _retime(events: list[_Ev], settings) -> None:
-    for i, ev in enumerate(events):
-        ev.end = _fit(ev, events[i + 1].start if i + 1 < len(events) else None, settings)
-
+    dlg = [e for e in events if e.channel != "ost"]
+    ost = [e for e in events if e.channel == "ost"]
+    if not ost:
+        for i, ev in enumerate(events):
+            ev.end = _fit(ev, events[i + 1].start if i + 1 < len(events) else None, settings)
+        return
+    # Retime dialogue events independently on the bottom channel; only clamp to a non-overlapping
+    # following OST event when the dialogue event's original en_end preceded the OST start.
+    for i, ev in enumerate(dlg):
+        nxt_dlg = dlg[i + 1].start if i + 1 < len(dlg) else None
+        nxt_ost = next((o.start for o in ost if o.start >= ev.en_end), None)
+        nxt = min(x for x in (nxt_dlg, nxt_ost) if x is not None) if (nxt_dlg is not None or nxt_ost is not None) else None
+        ev.end = _fit(ev, nxt, settings)
+    # Snap OST tail-bleed (<= 350 ms) before the next dialogue start, then retime OST on its own channel
+    for i, ev in enumerate(ost):
+        for d in dlg:
+            if ev.start < d.start - 200 and 0 < ev.en_end - d.start <= 350:
+                ev.en_end = max(ev.start + settings.short_min_ms, d.start - settings.min_gap_ms)
+                break
+        nxt_ost = ost[i + 1].start if i + 1 < len(ost) else None
+        nxt_dlg = next((d.start for d in dlg if d.start >= ev.en_end), None)
+        nxt = min(x for x in (nxt_ost, nxt_dlg) if x is not None) if (nxt_ost is not None or nxt_dlg is not None) else None
+        ev.end = _fit(ev, nxt, settings)
+        overlaps_dlg = any(min(ev.end, d.end) - max(ev.start, d.start) > 0 for d in dlg)
+        ev.position = "an8" if overlaps_dlg else "an2"
 
 # ---------------------------------------------------------------- text
 
@@ -303,6 +327,7 @@ def _initial(
                     omission for omission in lineage.omissions
                     if omission.ref.partition(":")[0] in covered_ids
                 ] if lineage is not None else [],
+                channel="ost" if any(item.source == "ost" or item.id.startswith("ost-") for item in covered) else "dialogue",
             )
         )
     return out
@@ -438,7 +463,7 @@ def _weak(ev: _Ev, end: int, settings) -> bool:
 
 def _try_merge(a: _Ev, b: _Ev, next_start: int | None, settings) -> _Ev | None:
     s = settings
-    if a.fixed or b.fixed or a.scene_last != b.scene_first:
+    if a.fixed or b.fixed or a.channel != b.channel or a.scene_last != b.scene_first:
         return None
     if a.semantic != b.semantic:
         return None
@@ -676,6 +701,8 @@ def layout(
             fragments=[fragment for turn in e.turns for fragment in turn.fragments],
             omissions=e.omissions,
             attribution_passes=e.attribution_passes,
+            channel=e.channel,
+            position=e.position,
         )
         for e in events
     ]

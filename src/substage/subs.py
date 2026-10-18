@@ -221,10 +221,19 @@ def merge_forced(main: list[Cue], forced: list[Cue]) -> list[Cue]:
 
 
 def write_srt(rows: list[tuple[int, int, str]], out: Path) -> None:
-    """Write (start_ms, end_ms, korean_text) rows as a UTF-8 SRT."""
+    """Write (start_ms, end_ms, korean_text) rows as a UTF-8 SRT (preserving ``{\\an8}``)."""
     subs = pysubs2.SSAFile()
+    has_an8 = False
     for start_ms, end_ms, ko in rows:
-        subs.append(pysubs2.SSAEvent(start=start_ms, end=end_ms, text=ko.replace("\n", "\\N")))
+        txt = ko
+        if txt.startswith("{\\an8}"):
+            has_an8 = True
+            txt = "__SUBSTAGE_AN8__" + txt[len("{\\an8}"):]
+        subs.append(pysubs2.SSAEvent(start=start_ms, end=end_ms, text=txt.replace("\n", "\\N")))
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    subs.save(str(out), encoding="utf-8", format_="srt")
+    if has_an8:
+        srt_str = subs.to_string("srt").replace("__SUBSTAGE_AN8__", "{\\an8}")
+        out.write_text(srt_str, encoding="utf-8")
+    else:
+        subs.save(str(out), encoding="utf-8", format_="srt")

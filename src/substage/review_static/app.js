@@ -37,15 +37,35 @@ function lastStartingBefore(items, t, key = "s") {
 }
 
 // Text of every cue active at t (overlapping cues joined).
-function activeText(cues, t) {
+function activeCues(cues, t) {
   const i = lastStartingBefore(cues, t);
   const out = [];
   for (let j = i; j >= 0 && j > i - 8; j--) {
-    if (cues[j].e > t) out.unshift(cues[j].t);
+    if (cues[j].e > t) out.unshift(cues[j]);
   }
-  return out.join("\n");
+  return out;
 }
 
+function isQuotedOstText(txt) {
+  const s = (txt || "").trim();
+  return s.length >= 2 && /^["'“”‘’\[].*["'“”‘’\]]$/s.test(s);
+}
+
+function activeSplitText(cues, t) {
+  const act = activeCues(cues, t);
+  if (!act.length) return { top: "", bottom: "", all: "" };
+  const hasMulti = act.length >= 2;
+  const top = [], bottom = [];
+  for (const c of act) {
+    if (c.pos === "top" || (hasMulti && isQuotedOstText(c.t))) top.push(c.t);
+    else bottom.push(c.t);
+  }
+  return { top: top.join("\n"), bottom: bottom.join("\n"), all: act.map((c) => c.t).join("\n") };
+}
+
+function activeText(cues, t) {
+  return activeCues(cues, t).map((c) => c.t).join("\n");
+}
 // Character-bigram Dice similarity (0..100) ignoring spaces/punctuation.
 function bigrams(s) {
   const t = s.replace(/[\s\p{P}\p{S}]/gu, "");
@@ -123,7 +143,7 @@ const S = {
   clock: null,
   raf: 0,
   last: { en: null, off: null, ko: null },
-  ov: { en: null, pair: null },  // last texts rendered into the video overlay
+  ov: { en: null, pair: null, topPair: null },  // last texts rendered into the video overlay
   prevT: 0,            // playback time at the previous tick (autopause boundary detect)
   pausedRow: -1,       // row index already auto-paused once
   hasVideo: false,
@@ -218,7 +238,7 @@ function rebuild() {
   renderScenes();
   renderNotesList();
   S.last = { en: null, off: null, ko: null };
-  S.ov = { en: null, pair: null };
+  S.ov = { en: null, pair: null, topPair: null };
   S.curRow = -1;
   S.pausedRow = -1;
   tick(true);
@@ -232,15 +252,21 @@ function buildRows(en, off, ko) {
   const place = (cues, key) => {
     for (const c of cues) {
       let best = null, bestOv = 0;
-      const i = lastStartingBefore(base, c.e - 1);
-      for (let j = i; j >= 0 && base[j].s > c.s - 60000; j--) {
-        const ov = Math.min(c.e, base[j].e) - Math.max(c.s, base[j].s);
-        if (ov > bestOv) { bestOv = ov; best = base[j]; }
+      if (c.pos !== "top") {
+        const i = lastStartingBefore(base, c.e - 1);
+        for (let j = i; j >= 0 && base[j].s > c.s - 60000; j--) {
+          const ov = Math.min(c.e, base[j].e) - Math.max(c.s, base[j].s);
+          const minDur = Math.min(c.e - c.s, base[j].e - base[j].s);
+          if (ov >= Math.min(200, minDur * 0.3) && ov > bestOv) {
+            bestOv = ov;
+            best = base[j];
+          }
+        }
       }
       if (!best) {
         for (const r of extra) {
           const ov = Math.min(c.e, r.e) - Math.max(c.s, r.s);
-          if (ov > bestOv) { bestOv = ov; best = r; }
+          if (ov >= 150 && ov > bestOv) { bestOv = ov; best = r; }
         }
       }
       if (best) best[key].push(c.t);
@@ -544,28 +570,42 @@ function tick(force) {
   if (!S.video || !S.clock) return;
   const t = S.clock.now();
   const en = activeText(S.video.en, t);
-  const off = activeText(S.video.official, t);
-  const ko = activeText(S.video.candidates[S.arm] || [], t);
+  const offSplit = activeSplitText(S.video.official, t);
+  const koSplit = activeSplitText(S.video.candidates[S.arm] || [], t);
   setText("sub-en", "en", en);
-  setText("sub-official", "off", off);
-  setText("sub-substage", "ko", ko);
+  setText("sub-official", "off", offSplit.all);
+  setText("sub-substage", "ko", koSplit.all);
 
-  // video overlay (공식 | substage side by side, diff-marked; EN optional)
+  // top overlay for {\an8} / simultaneous on-screen text cards
+  const topOff = offSplit.top, topKo = koSplit.top;
+  const topPair = topOff + "\0" + topKo;
+  if (S.ov.topPair !== topPair) {
+    S.ov.topPair = topPair;
+    const [tOffFlags, tKoFlags] = diffFlags(topOff, topKo);
+    const tOffEl = $("ov-top-off"), tKoEl = $("ov-top-ko");
+    tOffEl.replaceChildren();
+    tKoEl.replaceChildren();
+    markTokens(tOffEl, topOff, tOffFlags);
+    markTokens(tKoEl, topKo, tKoFlags);
+  }
+  $("ov-top").hidden = !(S.hasVideo && S.opts.overlay && (topOff || topKo));
+
+  // bottom video overlay (spoken dialogue: 공식 | substage side by side, diff-marked; EN optional)
+  const botOff = offSplit.bottom, botKo = koSplit.bottom;
   const showEn = S.opts.ovEn && !!en;
   $("ov-en").hidden = !showEn;
   if (showEn && S.ov.en !== en) { S.ov.en = en; $("ov-en").textContent = en; }
-  const pair = off + "" + ko;
+  const pair = botOff + "\0" + botKo;
   if (S.ov.pair !== pair) {
     S.ov.pair = pair;
-    const [offFlags, koFlags] = diffFlags(off, ko);
+    const [offFlags, koFlags] = diffFlags(botOff, botKo);
     const offEl = $("ov-off"), koEl = $("ov-ko");
     offEl.replaceChildren();
     koEl.replaceChildren();
-    markTokens(offEl, off, offFlags);
-    markTokens(koEl, ko, koFlags);
+    markTokens(offEl, botOff, offFlags);
+    markTokens(koEl, botKo, koFlags);
   }
-  $("ov").hidden = !(S.hasVideo && S.opts.overlay && (off || ko || showEn));
-
+  $("ov").hidden = !(S.hasVideo && S.opts.overlay && (botOff || botKo || showEn));
   $("free-note-time").textContent = mmss(t);
   if (!$("textonly-bar").hidden) $("clock-time").textContent = mmss(t);
   const i = lastStartingBefore(S.rows, t);

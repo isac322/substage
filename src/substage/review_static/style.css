@@ -53,6 +53,7 @@ textarea { width: 100%; resize: vertical; }
 /* ---- video subtitle overlay */
 .ov { position: absolute; left: 3%; right: 3%; bottom: 9%; pointer-events: none;
       display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+.ov.ov-top { top: 5%; bottom: auto; }
 .ov-en { align-self: center; max-width: 90%; padding: 1px 10px; border-radius: 5px;
          background: rgba(0, 0, 0, .62); color: #dfe3ec; font-size: 15px;
          text-align: center; white-space: pre-line; }
