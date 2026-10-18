@@ -252,7 +252,10 @@ function buildRows(en, off, ko) {
   const place = (cues, key) => {
     for (const c of cues) {
       let best = null, bestOv = 0;
-      if (c.pos !== "top") {
+      const hasSimultaneousSpoken = isQuotedOstText(c.t) && cues.some(
+        (other) => other !== c && !isQuotedOstText(other.t) && Math.min(other.e, c.e) - Math.max(other.s, c.s) > 100
+      );
+      if (c.pos !== "top" && !hasSimultaneousSpoken) {
         const i = lastStartingBefore(base, c.e - 1);
         for (let j = i; j >= 0 && base[j].s > c.s - 60000; j--) {
           const ov = Math.min(c.e, base[j].e) - Math.max(c.s, base[j].s);
