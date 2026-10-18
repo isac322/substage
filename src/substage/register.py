@@ -35,7 +35,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .levels import addressed_levels, speaker_turns
+from .levels import addressed_levels, has_internal_register_clash, speaker_turns
 from .models import (
     ChunkObservations,
     Cue,
@@ -193,12 +193,31 @@ def canonicalize_edge(edge: RegisterEdge, *, reverse: RegisterEdge | None = None
     return edge.model_copy(update=updates) if updates else edge
 
 
-def canonicalize_register_map(rmap: RegisterMap) -> RegisterMap:
-    """Canonicalize all directed edges in *rmap* using paired reverse context."""
-    by_pair = {(e.speaker, e.addressee): e for e in rmap.edges}
-    edges = [canonicalize_edge(e, reverse=by_pair.get((e.addressee, e.speaker))) for e in rmap.edges]
-    return rmap.model_copy(update={"edges": edges})
+def _voice_forces_banmal_to_peer(voice_idiolect: str) -> bool:
+    low = voice_idiolect.lower()
+    return "반말" in low and ("same man" in low or "enemies" in low or "everyone" in low or "strangers" in low or "nicepool" in low or "wade" in low)
 
+
+def canonicalize_register_map(rmap: RegisterMap, context_map: ContextMap | None = None) -> RegisterMap:
+    """Canonicalize all directed edges in *rmap* using paired reverse context and optional character voice cards."""
+    by_pair = {(e.speaker, e.addressee): e for e in rmap.edges}
+    voice_by_id = {
+        ch.id: (ch.voice.idiolect if ch.voice else "")
+        for ch in (context_map.characters if context_map is not None else ())
+    }
+    edges: list[RegisterEdge] = []
+    for raw_e in rmap.edges:
+        e = canonicalize_edge(raw_e, reverse=by_pair.get((raw_e.addressee, raw_e.speaker)))
+        spk_voice = voice_by_id.get(e.speaker, "")
+        if (
+            e.step in (8, 9)
+            and e.apparent_generation == "same"
+            and e.relation in ("stranger_civil", "peer")
+            and _voice_forces_banmal_to_peer(spk_voice)
+        ):
+            e = e.model_copy(update={"step": 10, "level": "hae"})
+        edges.append(e)
+    return rmap.model_copy(update={"edges": edges})
 def edge_firm(edge: RegisterEdge, cue_ids: Iterable[str]) -> bool:
     """The edge's level is beyond dispute: its ladder step fixes a level and
     the edge carries that level, no feature points to an earlier step, and it
@@ -478,6 +497,74 @@ def lock_scene_pairs(
                     break
     return out
 
+
+def scene_dash_turn_pairs(
+    scene_cue_ids: Sequence[str],
+    cues_by_id: Mapping[str, Cue],
+    locked_pairs: Mapping[str, Pair],
+) -> dict[str, tuple[Pair, Pair]]:
+    """Map 2-speaker English dash cues in a scene to ``((spk, adr), (adr, spk))``."""
+    out: dict[str, tuple[Pair, Pair]] = {}
+    for cid in scene_cue_ids:
+        c = cues_by_id.get(cid)
+        pair = locked_pairs.get(cid)
+        if c is None or pair is None:
+            continue
+        spk, adr = pair
+        if adr == GROUP or spk == adr:
+            continue
+        if len(speaker_turns(c.text)) == 2:
+            out[cid] = ((spk, adr), (adr, spk))
+    return out
+
+
+def lock_scene_dyad_levels(
+    table: RegisterTable | None,
+    scene_cue_ids: Sequence[str],
+    cues_by_id: Mapping[str, Cue],
+    locked_pairs: Mapping[str, Pair],
+    ko: Mapping[str, str] | None = None,
+    context_map: ContextMap | None = None,
+) -> dict[Pair, str]:
+    """Compute one locked target speech level per directed ``(speaker, addressee)`` pair in a scene."""
+    voice_by_id = {
+        ch.id: (ch.voice.idiolect if ch.voice else "")
+        for ch in (context_map.characters if context_map is not None else ())
+    }
+    pair_cids: dict[Pair, list[str]] = {}
+    for cid in scene_cue_ids:
+        c = cues_by_id.get(cid)
+        if c is not None and THEATRICAL_VOCATIVE_RE.search(c.text):
+            continue
+        pair = locked_pairs.get(cid)
+        if pair is not None:
+            pair_cids.setdefault(pair, []).append(cid)
+
+    locked: dict[Pair, str] = {}
+    for pair, cids in pair_cids.items():
+        spk, adr = pair
+        spk_voice = voice_by_id.get(spk, "")
+        if _voice_forces_banmal_to_peer(spk_voice) and adr != GROUP:
+            locked[pair] = "hae"
+            continue
+        if table is not None:
+            tb_lvls = [table.level_at(spk, adr, cid) for cid in cids]
+            tb_known = [lv for lv in tb_lvls if lv is not None]
+            if tb_known:
+                locked[pair] = tb_known[0]
+                continue
+        if ko is not None:
+            votes: Counter[str] = Counter()
+            for cid in cids:
+                txt = ko.get(cid, "")
+                if not txt or has_internal_register_clash(txt):
+                    continue
+                for lv in addressed_levels(txt):
+                    if lv is not None:
+                        votes["hae" if binary(lv) == "B" else "haeyo"] += 1
+            if votes:
+                locked[pair] = "hae" if votes["hae"] >= votes["haeyo"] else "haeyo"
+    return locked
 def cue_turn_pairs(
     context_map: ContextMap,
     observations: Iterable[ChunkObservations | CueObservation | CuePerception],
@@ -752,7 +839,8 @@ def build_register(
         RegisterMap(
             edges=[got[p] for p in required if p in got],
             required_pairs=[f"{s}>{a}" for s, a in required],
-        )
+        ),
+        context_map=context_map,
     )
 
 
@@ -760,18 +848,36 @@ def build_register(
 
 
 def cue_levels(
-    table: RegisterTable | None, pairs_by_cue: dict[str, tuple[str, str]]
+    table: RegisterTable | None,
+    pairs_by_cue: dict[str, tuple[str, str]],
+    *,
+    scenes: Sequence[Any] | None = None,
+    cues_by_id: Mapping[str, Cue] | None = None,
+    ko: Mapping[str, str] | None = None,
+    context_map: ContextMap | None = None,
 ) -> dict[str, tuple[str, str]]:
-    """cue id -> ("spk>adr", table level at the cue) for review/finale rows."""
-    if table is None:
-        return {}
+    """cue id -> ("spk>adr", table or scene-locked level at the cue) for review/finale rows."""
     out: dict[str, tuple[str, str]] = {}
-    for cid, (spk, adr) in pairs_by_cue.items():
-        level = table.level_at(spk, adr, cid)
-        if level is not None:
-            out[cid] = (f"{spk}>{adr}", level)
+    if table is not None:
+        for cid, (spk, adr) in pairs_by_cue.items():
+            level = table.level_at(spk, adr, cid)
+            if level is not None:
+                out[cid] = (f"{spk}>{adr}", level)
+    if scenes and cues_by_id is not None:
+        for sc in scenes:
+            dyad_lvls = lock_scene_dyad_levels(
+                table, sc.cue_ids, cues_by_id, pairs_by_cue, ko=ko, context_map=context_map
+            )
+            for cid in sc.cue_ids:
+                if cid in out or cid not in pairs_by_cue:
+                    continue
+                c = cues_by_id.get(cid)
+                if c is not None and THEATRICAL_VOCATIVE_RE.search(c.text):
+                    continue
+                pair = pairs_by_cue[cid]
+                if pair in dyad_lvls:
+                    out[cid] = (f"{pair[0]}>{pair[1]}", dyad_lvls[pair])
     return out
-
 
 def render_scene_register(pair: str, reg: SceneRegister) -> list[str]:
     """``spk>adr: 해요 · 아저씨 · 당신`` plus one row per shift."""
@@ -964,6 +1070,8 @@ class RegisterGate:
         if reason is None and allowed_pronouns is not None:
             if _pronouns(new_ko) - _pronouns(old_ko) - allowed_pronouns:
                 reason = "pronoun"
+        if reason is None and has_internal_register_clash(new_ko) and not has_internal_register_clash(old_ko):
+            reason = "level"
         if reason is None:
             return True
         self.rejections.append(

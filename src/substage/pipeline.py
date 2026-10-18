@@ -1120,7 +1120,13 @@ def run(
     if perception_ledger is not None:
         register_observations.extend(perception_ledger.cues.values())
     pairs_by_cue = register_mod.cue_pairs(context_map, cues, observations)
+    cues_by_id_init = {c.id: c for c in cues}
+    for sc in scenes:
+        pairs_by_cue.update(register_mod.lock_scene_pairs(sc.cue_ids, cues_by_id_init, pairs_by_cue, observations))
     turn_pairs_by_cue = register_mod.cue_turn_pairs(context_map, register_observations)
+    for sc in scenes:
+        for cid, dp in register_mod.scene_dash_turn_pairs(sc.cue_ids, cues_by_id_init, pairs_by_cue).items():
+            turn_pairs_by_cue.setdefault(cid, dp)
     if _stopped(stop_after, "register", ws):
         return ws.data_dir
 
@@ -1354,7 +1360,9 @@ def run(
 
     semantic_stage("s3-consumer-input")
 
-    levels = register_mod.cue_levels(table, pairs_by_cue)
+    levels = register_mod.cue_levels(
+        table, pairs_by_cue, scenes=scenes, cues_by_id=cues_by_id, ko=ko, context_map=context_map
+    )
     if lean_decisions_pipeline:
         review_edits = []
         edits = []

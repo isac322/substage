@@ -35,8 +35,8 @@ from .models import (
     SceneTranslation,
     Snapshot,
 )
-from .levels import addressed_levels, speaker_turns
-from .register import THEATRICAL_VOCATIVE_RE, RegisterTable, binary, lock_scene_pairs, render_scene_register, same_level
+from .levels import addressed_levels, has_internal_register_clash, speaker_turns
+from .register import THEATRICAL_VOCATIVE_RE, RegisterTable, binary, lock_scene_dyad_levels, lock_scene_pairs, render_scene_register, same_level, scene_dash_turn_pairs
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
 from .translate import (
@@ -247,18 +247,13 @@ def _effective_cue_level(
     return (pair, lvl)
 
 
-_BANMAL_MARKER_RE = (
-    r"(?:(?:텐데|건데|는데|던데)[.?!…\"'’”)]*$)"
-    r"|(?<![가-힣])안녕(?![가-힣])"
-    r"|(?:^|[\s,\-—])(?:난|내가)(?=[\s,.?!]|$)"
-)
-
-
 def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
-    """True when *ko_txt* has a clear morphological ending that violates *target_spec*."""
-    import re
-
-    if not ko_txt or not target_spec or target_spec == "-":
+    """True when *ko_txt* has a Sejong POS morphological ending or internal clash that violates *target_spec*."""
+    if not ko_txt:
+        return False
+    if has_internal_register_clash(ko_txt):
+        return True
+    if not target_spec or target_spec == "-":
         return False
     turns = list(addressed_levels(ko_txt))
     t_strs = speaker_turns(ko_txt)
@@ -266,12 +261,7 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
         p1, p2 = target_spec.split("/", 1)
         w1, w2 = p1.split(":", 1)[1], p2.split(":", 1)[1]
         if len(t_strs) == 2 and len(turns) == 2:
-            bins = []
-            for idx in (0, 1):
-                b = binary(turns[idx])
-                if b is None and re.search(_BANMAL_MARKER_RE, t_strs[idx].strip()):
-                    b = "B"
-                bins.append(b)
+            bins = [binary(turns[0]), binary(turns[1])]
             allowed_bins = {b for b in (binary(w1), binary(w2)) if b is not None}
             if bins[0] is not None and bins[1] is not None:
                 return set(bins) != allowed_bins
@@ -285,8 +275,6 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
     known = [t for t in turns if t is not None]
     if known:
         return any(not same_level(t, target_spec) for t in known)
-    if len(speaker_turns(ko_txt)) == 1 and want_bin == "J" and re.search(_BANMAL_MARKER_RE, ko_txt.strip()):
-        return True
     return False
 
 def _cue_lines(
@@ -1913,4 +1901,101 @@ def repair_echo_and_register_windows(
         for cid in cids:
             if by_id[cid] != ko.get(cid, "").strip():
                 accepted.append(CueEdit(cue_id=cid, new_ko=by_id[cid], reason=f"echo_link:{el.kind}", kind="polish"))
+    return accepted
+
+
+def repair_scene_register_oscillations(
+    ws: Workspace,
+    txt_client: Any,
+    gate_client: ClefDecisionsClient | None,
+    scenes: list[Scene],
+    cues_by_id: dict[str, Cue],
+    ko: dict[str, str],
+    observations,
+    *,
+    table: RegisterTable | None = None,
+    pairs_by_cue: dict[str, tuple[str, str]] | None = None,
+    context_map: ContextMap | None = None,
+) -> list[CueEdit]:
+    """Pipe-M2 scene-dyad register coherence pass across all scenes of a film.
+
+    Detects any cue with an internal 3-axis honorific clash (``has_internal_register_clash``)
+    or whose Sejong POS ``EF`` level oscillates against the scene's locked directed
+    ``(speaker -> addressee)`` dyad register, and rewrites only the oscillating cues.
+    """
+    raw_pairs = dict(pairs_by_cue or {})
+    accepted: list[CueEdit] = []
+    sys_prompt = (
+        "You are a Korean subtitle register coherence specialist using Sejong POS morphology "
+        "(EF vs EC, EP -시-, NP pronouns) and Goffman Footing. Rewrite only the oscillating/clashing "
+        "cues so their addressed sentence-final ending (EF ± 요) matches the locked Speaker->Addressee register."
+    )
+    for sc in scenes:
+        cids = [cid for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+        if len(cids) < 2:
+            continue
+        locked_pairs = lock_scene_pairs(cids, cues_by_id, raw_pairs, observations)
+        dyad_lvls = lock_scene_dyad_levels(
+            table, cids, cues_by_id, locked_pairs, ko=ko, context_map=context_map
+        )
+        if not dyad_lvls:
+            continue
+        dash_pairs = scene_dash_turn_pairs(cids, cues_by_id, locked_pairs)
+        bad_cids: list[str] = []
+        for cid in cids:
+            c = cues_by_id[cid]
+            if c.lyric or c.id.startswith("ost-") or c.source == "ost":
+                continue
+            if THEATRICAL_VOCATIVE_RE.search(c.text):
+                continue
+            cur_ko = ko.get(cid, "").strip()
+            if has_internal_register_clash(cur_ko):
+                bad_cids.append(cid)
+                continue
+            if cid in dash_pairs:
+                p1, p2 = dash_pairs[cid]
+                w1, w2 = dyad_lvls.get(p1), dyad_lvls.get(p2)
+                if w1 and w2:
+                    spec = f"{p1[0]}:{w1}/{p2[0]}:{w2}" if not same_level(w1, w2) else w1
+                    if _violates_target_level(cur_ko, spec):
+                        bad_cids.append(cid)
+                continue
+            pair = locked_pairs.get(cid)
+            if pair and pair in dyad_lvls:
+                if table is not None and table.in_shift(pair[0], pair[1], cid):
+                    continue
+                if _violates_target_level(cur_ko, dyad_lvls[pair]):
+                    bad_cids.append(cid)
+        if not bad_cids:
+            continue
+        rows_txt = []
+        for cid in cids:
+            pair = locked_pairs.get(cid)
+            target = dyad_lvls.get(pair, "-") if pair else "-"
+            flag = " [FIX REGISTER]" if cid in bad_cids else ""
+            rows_txt.append(
+                f"- {cid}{flag} ({pair[0]}>{pair[1]}={target if pair else '-'}): "
+                f"EN={cues_by_id[cid].text.replace(chr(10), ' / ')!r} | KO={ko.get(cid, '').replace(chr(10), ' / ')!r}"
+            )
+        prompt = (
+            f"## Scene Register Coherence Repair ({sc.id})\n"
+            f"Locked Dyad Targets: {', '.join(f'{s}>{a}={lv}' for (s, a), lv in dyad_lvls.items())}\n"
+            f"Cues to fix: {bad_cids}\n"
+            + "\n".join(rows_txt)
+        )
+        try:
+            res = txt_client.generate(stage=_STAGE_REGEN, prompt=prompt, schema=_EchoRegisterWindowRewrite, system=sys_prompt)
+        except GeminiBlocked:
+            continue
+        by_id = {s.cue_id: rewrap(s.ko.replace("\\n", "\n").strip(), 14, 12) for s in res.cues if s.ko.strip()}
+        for cid in bad_cids:
+            cand_ko = by_id.get(cid)
+            if not cand_ko or cand_ko == ko.get(cid, "").strip():
+                continue
+            if has_internal_register_clash(cand_ko):
+                continue
+            pair = locked_pairs.get(cid)
+            if pair and pair in dyad_lvls and _violates_target_level(cand_ko, dyad_lvls[pair]):
+                continue
+            accepted.append(CueEdit(cue_id=cid, new_ko=cand_ko, reason="scene_register_coherence", kind="register"))
     return accepted

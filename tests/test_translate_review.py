@@ -981,7 +981,7 @@ def test_build_discourse_units_and_hesitation_merge_guard():
 
 def test_detect_echo_and_moniker_chains_and_scene_register_lock():
     from substage.translate import detect_echo_and_moniker_chains
-    from substage.register import lock_scene_pairs
+    from substage.register import lock_scene_dyad_levels, lock_scene_pairs, scene_dash_turn_pairs
 
     # 1. Cross-scene conditional 'if' echo (4.13s pause between c1134 and c1135)
     c1128 = cue("c1128", 3670584, 3671418, "If they can fix your world...")
@@ -1018,6 +1018,20 @@ def test_detect_echo_and_moniker_chains_and_scene_register_lock():
     assert locked["c1050"] == ("wade", "nicepool")
     assert locked["c1067"] == ("wade", "group")
 
+    c_dash = cue("c1051", 3457000, 3459000, "- Sorry!\n- Fuck!")
+    cues_map["c1051"] = c_dash
+    locked["c1051"] = ("nicepool", "wade")
+    dp = scene_dash_turn_pairs(["c1044", "c1045", "c1050", "c1051", "c1067"], cues_map, locked)
+    assert dp["c1051"] == (("nicepool", "wade"), ("wade", "nicepool"))
+    dyad_lvls = lock_scene_dyad_levels(
+        None,
+        ["c1044", "c1045", "c1050", "c1067"],
+        cues_map,
+        locked,
+        ko={"c1044": "넌 누구야?", "c1045": "난 데드풀이야", "c1050": "티도 안 나", "c1067": "할 말이 없사옵니다 폐하"},
+    )
+    assert dyad_lvls[("wade", "nicepool")] == "hae"
+    assert dyad_lvls[("nicepool", "wade")] == "hae"
     # 4. Consensus 4-axis Clef questions
     qs = review.build_clef_echo_register_questions([
         {"window_id": "w1", "en": [c1128.text, c1134.text, c1135.text], "ko": ["만약 네 세계를 고친다면", "만약 고칠 수 있다면?", "만약이라니?"]}

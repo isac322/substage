@@ -64,7 +64,7 @@ _HOMOGRAPHIC_CONNECTIVES = frozenset({
 # Sentence-final colloquial/quotative EC endings that carry addressed 해체 force at utterance end
 _FINAL_ADDRESSED_EC = frozenset({
     "다며", "라며", "냐며", "자며", "라고", "자고", "냐고", "다고",
-    "다니까", "라니까", "잖아", "잖니", "잖나",
+    "다니까", "라니까", "잖아", "잖니", "잖나", "야", "이야", "어", "아", "래", "대",
 })
 
 
@@ -211,6 +211,8 @@ def analyze_turn_morphemes(turn_text: str) -> TurnMorphemeAnalysis:
                     ltk = st_tokens[li]
                     if ltk.tag == "JX" and ltk.form in ("요", "이요"):
                         clause_levels.append("haeyo")
+                    elif s_idx == len(sents) - 1 and ltk.tag == "JX" and ltk.form in ("이야", "야"):
+                        clause_levels.append("hae")
                     elif ltk.tag == "IC":
                         if ltk.form.endswith("요"):
                             clause_levels.append("haeyo")
@@ -246,6 +248,8 @@ def analyze_turn_morphemes(turn_text: str) -> TurnMorphemeAnalysis:
             has_q = "?" in clean
             if ltk.tag == "JX" and ltk.form in ("요", "이요"):
                 clause_levels.append("haeyo")
+            elif ltk.tag == "JX" and ltk.form in ("이야", "야"):
+                clause_levels.append("hae")
             elif ltk.tag == "IC":
                 if ltk.form.endswith("요"):
                     clause_levels.append("haeyo")
