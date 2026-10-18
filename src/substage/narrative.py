@@ -182,6 +182,8 @@ def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
                 t.start_ms, t.end_ms = ds + start_ms, de + start_ms
             elif start_ms <= ds <= end_ms:
                 t.start_ms, t.end_ms = ds, max(ds, de)
+            else:
+                continue
         elif batch_mmss and _is_mmss_cand(t):
             t.start_ms = _decode_mmss_ms(t.start_ms)
             t.end_ms = _decode_mmss_ms(t.end_ms)
@@ -190,6 +192,8 @@ def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
             t.end_ms += start_ms
         t.start_ms = min(max(t.start_ms, start_ms), end_ms)
         t.end_ms = min(max(t.end_ms, t.start_ms), end_ms)
+        if end_ms > 0 and t.start_ms == end_ms and t.end_ms == end_ms:
+            continue
         kept.append(t)
     obs.on_screen_text = kept
 

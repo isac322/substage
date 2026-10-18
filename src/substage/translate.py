@@ -2394,8 +2394,11 @@ def _same_text(a: str, b: str) -> bool:
     na, nb = _norm_text(a), _norm_text(b)
     if not na or not nb:
         return False
-    return na == nb or SequenceMatcher(None, na, nb).ratio() >= 0.85
-
+    if na == nb:
+        return True
+    if re.findall(r"\d+", a) != re.findall(r"\d+", b):
+        return False
+    return SequenceMatcher(None, na, nb).ratio() >= 0.85
 
 def _carried_by(text: str, cue_texts: list[str]) -> bool:
     """True when the cue texts together carry *text*: most of its words, or
@@ -2619,7 +2622,54 @@ def ost_cues(
                     ost_kind=b_kind or kind,
                 )
             )
-    return new
+    return dedupe_ost_shadows(new, cues)
+
+
+def _is_frame_exact_cue(c: Cue) -> bool:
+    return (c.start_ms % 10 != 0) or (c.end_ms % 10 != 0)
+
+
+def _is_half_sec_cue(c: Cue) -> bool:
+    return (c.start_ms % 500 == 0) and (c.end_ms % 500 == 0)
+
+
+def dedupe_ost_shadows(ost_list: list[Cue], spoken_cues: Sequence[Cue] = ()) -> list[Cue]:
+    """Drop coarse VLM timestamp-drift shadow duplicates within a 360s window
+    while preserving frame-exact occurrences and genuine cross-scene repeats."""
+    if len(ost_list) <= 1:
+        return list(ost_list)
+    kept: list[Cue] = []
+    for a in ost_list:
+        if _is_frame_exact_cue(a):
+            kept.append(a)
+            continue
+        a_ov = any(
+            min(a.end_ms, sc.end_ms) - max(a.start_ms, sc.start_ms) > 100
+            for sc in spoken_cues
+        )
+        drop = False
+        for b in ost_list:
+            if b.id == a.id or not _same_text(a.text, b.text):
+                continue
+            gap = abs(a.start_ms - b.start_ms)
+            if not (0 < gap <= 360_000):
+                continue
+            b_ov = any(
+                min(b.end_ms, sc.end_ms) - max(b.start_ms, sc.start_ms) > 100
+                for sc in spoken_cues
+            )
+            if _is_frame_exact_cue(b) and (_is_half_sec_cue(a) or a_ov or gap <= 60_000):
+                drop = True
+                break
+            if not _is_frame_exact_cue(b) and _is_half_sec_cue(a) and not _is_half_sec_cue(b):
+                drop = True
+                break
+            if not _is_frame_exact_cue(b) and a_ov and not b_ov:
+                drop = True
+                break
+        if not drop:
+            kept.append(a)
+    return kept
 
 
 def merge_ost_cues_into_spine(
@@ -2644,5 +2694,6 @@ def merge_ost_cues_into_spine(
         if not already:
             max_num += 1
             merged_ost.append(cand.model_copy(update={"id": f"ost-{max_num:04d}"}))
+    merged_ost = dedupe_ost_shadows(merged_ost, spoken)
     out = sorted([*spoken, *merged_ost], key=lambda c: (c.start_ms, c.end_ms, c.id))
     return out

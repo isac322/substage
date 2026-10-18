@@ -1148,6 +1148,37 @@ def test_episode_partition_salesman_vs_locker_and_voiceover_bridge():
     assert s11_locked["c0177"] == ("wade", NARRATION)
     s11_lvls = lock_scene_dyad_levels(None, ["c0175", "c0176", "c0177"], s11_cues, s11_locked)
     assert s11_lvls[("wade", NARRATION)] == "hae"
+
+
+def test_dedupe_ost_shadows_and_digit_guard():
+    from substage.translate import _same_text, dedupe_ost_shadows
+
+    # 1. Digit-exact guard: TIMELINE INTEGRITY 77% vs 2% must never match
+    assert _same_text("TIMELINE INTEGRITY 77%", "TIMELINE INTEGRITY 2%") is False
+    assert _same_text("TIMELINE INTEGRITY 2%", "Timeline Integrity 2%") is True
+
+    # 2. Logan phantom shadows (ost-0049 at 79540, ost-0050 at 199000, ost-0063 at 7709000) dropped;
+    #    frame-exact ost-0068 (119736..122417) and ost-0072 (7868170..7872503) kept!
+    spoken = [
+        cue("c0014", 79910, 80910, "Fuck."),
+        cue("c0047", 199440, 201030, "(MAN SPEAKING SPANISH)"),
+    ]
+    logan_ost = [
+        Cue(id="ost-0049", start_ms=79540, end_ms=82420, text="LOGAN", raw="[title] LOGAN", source="ost"),
+        Cue(id="ost-0068", start_ms=119736, end_ms=122417, text="LOGAN", raw="[title] LOGAN", source="ost"),
+        Cue(id="ost-0050", start_ms=199000, end_ms=204000, text="LOGAN", raw="[title] LOGAN", source="ost"),
+        Cue(id="ost-0063", start_ms=7709000, end_ms=7711500, text="LOGAN", raw="[title] LOGAN", source="ost"),
+        Cue(id="ost-0072", start_ms=7868170, end_ms=7872503, text="LOGAN", raw="[title] LOGAN", source="ost"),
+    ]
+    kept = dedupe_ost_shadows(logan_ost, spoken)
+    assert [c.id for c in kept] == ["ost-0068", "ost-0072"]
+
+    # 3. Genuine cross-scene repeats (STARK INDUSTRIES > 60s apart) are both preserved
+    stark_ost = [
+        Cue(id="ost-0033", start_ms=2159850, end_ms=2162820, text="STARK INDUSTRIES", raw="STARK INDUSTRIES", source="ost"),
+        Cue(id="ost-0057", start_ms=2407893, end_ms=2409295, text="STARK INDUSTRIES", raw="STARK INDUSTRIES", source="ost"),
+    ]
+    assert [c.id for c in dedupe_ost_shadows(stark_ost, [])] == ["ost-0033", "ost-0057"]
 # ------------------------------------------------------------ character names
 
 
