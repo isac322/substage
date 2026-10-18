@@ -35,7 +35,7 @@ from .models import (
     SceneTranslation,
     Snapshot,
 )
-from .levels import addressed_levels, has_internal_register_clash, speaker_turns
+from .levels import addressed_levels, analyze_turn_morphemes, has_internal_register_clash, speaker_turns
 from .register import THEATRICAL_VOCATIVE_RE, RegisterTable, binary, lock_scene_dyad_levels, lock_scene_pairs, render_scene_register, same_level, scene_dash_turn_pairs
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
@@ -274,9 +274,14 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
         return False
     known = [t for t in turns if t is not None]
     if known:
-        return any(not same_level(t, target_spec) for t in known)
+        if any(not same_level(t, target_spec) for t in known):
+            return True
+    if want_bin == "J":
+        for t_str in t_strs:
+            m = analyze_turn_morphemes(t_str)
+            if m.has_plain_1p or m.has_plain_2p or m.has_banmal_ic or m.has_bare_final_ec:
+                return True
     return False
-
 def _cue_lines(
     cues: list[Cue],
     ko_by_id: dict[str, str],

@@ -35,7 +35,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .levels import addressed_levels, has_internal_register_clash, speaker_turns
+from .levels import DASHES, Level, addressed_levels, analyze_turn_morphemes, ending_level, has_internal_register_clash, jongseong, speaker_turns
 from .models import (
     ChunkObservations,
     Cue,
@@ -58,7 +58,8 @@ _MIN_LINES = 3  # addressed lines that make a pair required
 _BATCH_PAIRS = 25  # pairs per S2r call
 _MIN_COVERAGE = 0.95  # required pairs the table must cover after the re-ask
 GROUP = "group"
-#: addressee words that mean "everyone present" (normalized; a leading
+NARRATION = "narration"
+_SELF_TOKENS = frozenset({"self", "nobody", "none", "unknown", "himself", "herself", "themselves", "narration", "monologue"})
 #: "the"/"a" is dropped first)
 GROUP_WORDS = frozenset(
     {"group", "audience", "crowd", "press", "viewers", "viewer", "everyone", "everybody", "all"}
@@ -445,6 +446,25 @@ THEATRICAL_VOCATIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_TRAIL_ELLIPSIS_RE = re.compile(r"(?:\.\.\.|…)['\"’”)\]]*$")
+
+
+def _mint_ep_id(raw_name: str | None, known_ids: Mapping[str, str]) -> str | None:
+    if not raw_name or not raw_name.strip():
+        return None
+    if is_group(raw_name) or _is_system_ai_speaker(raw_name):
+        return None
+    toks = _name_tokens(raw_name)
+    if not toks or (len(toks) == 1 and toks[0] in _SELF_TOKENS):
+        return None
+    joined = "".join(toks)
+    if joined in _SELF_TOKENS:
+        return None
+    for tok in (joined, toks[0], toks[-1]):
+        if tok in known_ids:
+            return known_ids[tok]
+    return f"ep:{joined}"
+
 
 def lock_scene_pairs(
     scene_cue_ids: Sequence[str],
@@ -452,49 +472,131 @@ def lock_scene_pairs(
     pairs_by_cue: Mapping[str, Pair],
     observations: Iterable[ChunkObservations | CueObservation] = (),
 ) -> dict[str, Pair]:
-    """Lock interpersonal (speaker, addressee) pairs inside a 2-3 person scene.
+    """Lock interpersonal (speaker, addressee) pairs per conversational episode.
 
-    Resolves spurious ``addressee='group'`` tags when the English text has no
-    crowd address token, and stabilizes short unattributed/swapped turns inside
-    a dominant two-hander while exempting theatrical/courtroom vocatives.
+    1. Detects cross-cut voiceover bridges (trailing ``...`` across an ``ost-``
+       location/title card) and marks them ``(speaker, 'narration')``.
+    2. Admits episodic characters absent from ``film_map.yaml`` as ``ep:<slug>``
+       (e.g. ``ep:tammy``) so service/stranger turns are never overwritten onto
+       another episode's buddy dyad.
+    3. Partitions the scene into homogeneous conversational episodes via
+       :func:`substage.scenes.partition_episodes` and resolves spurious
+       ``addressee='group'`` tags inside each episode independently.
     """
+    from .scenes import partition_episodes
+
     obs_map = _flat_observations(observations) if observations else {}
     out: dict[str, Pair] = {cid: pairs_by_cue[cid] for cid in scene_cue_ids if cid in pairs_by_cue}
-    interpersonal = [
-        (cid, out[cid])
-        for cid in scene_cue_ids
-        if cid in out and out[cid][1] != GROUP and out[cid][0] != SYSTEM_AI and out[cid][1] != SYSTEM_AI
-    ]
-    if len(interpersonal) < 2:
-        return out
-    dyad_counts: Counter[frozenset[str]] = Counter(frozenset(p) for _, p in interpersonal if p[0] != p[1])
-    if not dyad_counts:
-        return out
-    top_dyad, top_cnt = dyad_counts.most_common(1)[0]
-    if len(top_dyad) != 2 or top_cnt < max(2, len(interpersonal) // 2):
-        return out
-    members = tuple(sorted(top_dyad))
-    other_of = {members[0]: members[1], members[1]: members[0]}
+
+    # Collect known character ID tokens from pairs_by_cue
+    known_ids: dict[str, str] = {}
+    for spk, adr in pairs_by_cue.values():
+        for pid in (spk, adr):
+            if pid not in (GROUP, SYSTEM_AI, NARRATION) and not pid.startswith("ep:"):
+                known_ids[pid.lower()] = pid
+
+    # Admit episodic speaker/addressee pairs dropped by cue_pairs
     for cid in scene_cue_ids:
+        if cid in out or cid not in obs_map:
+            continue
         c = cues_by_id.get(cid)
         if c is None or c.lyric or c.id.startswith("ost-") or c.source == "ost":
             continue
-        if THEATRICAL_VOCATIVE_RE.search(c.text):
+        o = obs_map[cid]
+        spk_id = _mint_ep_id(o.speaker or c.speaker_hint, known_ids)
+        adr_id = GROUP if is_group(o.addressee) else _mint_ep_id(o.addressee, known_ids)
+        if spk_id and adr_id and spk_id != adr_id:
+            out[cid] = (spk_id, adr_id)
+
+    # Detect cross-cut voiceover sentence bridges across OST cards
+    spoken_cids = [
+        cid for cid in scene_cue_ids
+        if (c := cues_by_id.get(cid)) is not None and not c.lyric and not c.id.startswith("ost-") and c.source != "ost"
+    ]
+    all_ost_intervals: list[tuple[int, int]] = [
+        (c.start_ms, c.end_ms)
+        for c in cues_by_id.values()
+        if c.id.startswith("ost-") or c.source == "ost"
+    ]
+    for item in observations or ():
+        if isinstance(item, ChunkObservations):
+            for ost in item.on_screen_text:
+                all_ost_intervals.append((ost.start_ms, ost.end_ms))
+
+    for idx in range(len(spoken_cids) - 1):
+        cid1, cid2 = spoken_cids[idx], spoken_cids[idx + 1]
+        c1, c2 = cues_by_id[cid1], cues_by_id[cid2]
+        if not _TRAIL_ELLIPSIS_RE.search(c1.text.strip()):
             continue
-        pair = out.get(cid)
-        if pair is not None:
-            spk, adr = pair
-            if spk in other_of and adr == GROUP:
-                words = set(_words(c.text))
-                if not (words & GROUP_WORDS):
-                    out[cid] = (spk, other_of[spk])
-        elif cid in obs_map:
-            o = obs_map[cid]
-            raw_s = (o.speaker or c.speaker_hint or "").strip().lower()
-            for m in members:
-                if m in raw_s:
-                    out[cid] = (m, other_of[m])
-                    break
+        if c2.start_ms - c1.end_ms > 8000:
+            continue
+        has_intervening_ost = any(
+            ost_s >= c1.end_ms - 400 and ost_e <= c2.start_ms + 800
+            for ost_s, ost_e in all_ost_intervals
+        )
+        if has_intervening_ost:
+            p1 = out.get(cid1) or out.get(cid2)
+            if p1 is not None:
+                out[cid1] = (p1[0], NARRATION)
+                out[cid2] = (p1[0], NARRATION)
+
+    # Inject any OST cues falling inside the scene window so partition_episodes sees location/title cards
+    if spoken_cids:
+        sc_start = min(cues_by_id[cid].start_ms for cid in spoken_cids)
+        sc_end = max(cues_by_id[cid].end_ms for cid in spoken_cids)
+        ost_in_window = [
+            c.id for c in cues_by_id.values()
+            if (c.id.startswith("ost-") or c.source == "ost")
+            and sc_start <= c.start_ms <= sc_end
+            and c.id not in scene_cue_ids
+        ]
+        ordered_cids = sorted(
+            [*scene_cue_ids, *ost_in_window],
+            key=lambda cid: (cues_by_id[cid].start_ms, cues_by_id[cid].end_ms, cid) if cid in cues_by_id else (0, 0, cid),
+        )
+    else:
+        ordered_cids = list(scene_cue_ids)
+
+    episodes = partition_episodes(ordered_cids, cues_by_id, out)
+    for ep in episodes:
+        ep_cids = [cid for cid in ep.cue_ids if cid in scene_cue_ids]
+        interpersonal = [
+            (cid, out[cid])
+            for cid in ep_cids
+            if cid in out and out[cid][1] not in (GROUP, NARRATION) and out[cid][0] != SYSTEM_AI and out[cid][1] != SYSTEM_AI
+        ]
+        if len(interpersonal) < 2:
+            continue
+        dyad_counts: Counter[frozenset[str]] = Counter(frozenset(p) for _, p in interpersonal if p[0] != p[1])
+        if not dyad_counts:
+            continue
+        top_dyad, top_cnt = dyad_counts.most_common(1)[0]
+        if len(top_dyad) != 2 or top_cnt < max(2, len(interpersonal) // 2):
+            continue
+        members = tuple(sorted(top_dyad))
+        other_of = {members[0]: members[1], members[1]: members[0]}
+        for cid in ep_cids:
+            c = cues_by_id.get(cid)
+            if c is None or c.lyric or c.id.startswith("ost-") or c.source == "ost":
+                continue
+            if THEATRICAL_VOCATIVE_RE.search(c.text):
+                continue
+            pair = out.get(cid)
+            if pair is not None:
+                spk, adr = pair
+                if spk in other_of and adr == GROUP:
+                    words = set(_words(c.text))
+                    if not (words & GROUP_WORDS):
+                        out[cid] = (spk, other_of[spk])
+            elif cid in obs_map:
+                o = obs_map[cid]
+                if o.addressee and _words(o.addressee) and _words(o.addressee)[0] in _SELF_TOKENS:
+                    continue
+                raw_s = (o.speaker or c.speaker_hint or "").strip().lower()
+                for m in members:
+                    if m in raw_s:
+                        out[cid] = (m, other_of[m])
+                        break
     return out
 
 
@@ -511,7 +613,7 @@ def scene_dash_turn_pairs(
         if c is None or pair is None:
             continue
         spk, adr = pair
-        if adr == GROUP or spk == adr:
+        if adr in (GROUP, NARRATION) or spk == adr:
             continue
         if len(speaker_turns(c.text)) == 2:
             out[cid] = ((spk, adr), (adr, spk))
@@ -526,7 +628,16 @@ def lock_scene_dyad_levels(
     ko: Mapping[str, str] | None = None,
     context_map: ContextMap | None = None,
 ) -> dict[Pair, str]:
-    """Compute one locked target speech level per directed ``(speaker, addressee)`` pair in a scene."""
+    """Compute one locked target speech level per directed ``(speaker, addressee)`` pair in a scene.
+
+    Precedence (Goffman Footing & Brown-Levinson Politeness Lattice):
+    1. Narration / 4th-wall voiceover bridge (``adr == 'narration'``) -> ``'hae'``.
+    2. Episodic service / stranger encounter (``ep:*``) -> symmetric ``'haeyo'``
+       whenever either direction in the episode uses polite speech (``J``).
+    3. Character idiolect override for Nicepool / unmapped same-man peers.
+    4. Explicit ``register.yaml`` table level (``table.level_at``).
+    5. Episode-scoped Korean majority vote.
+    """
     voice_by_id = {
         ch.id: (ch.voice.idiolect if ch.voice else "")
         for ch in (context_map.characters if context_map is not None else ())
@@ -540,30 +651,49 @@ def lock_scene_dyad_levels(
         if pair is not None:
             pair_cids.setdefault(pair, []).append(cid)
 
+    def _votes_for(cids_list: Sequence[str]) -> Counter[str]:
+        v: Counter[str] = Counter()
+        if ko is None:
+            return v
+        for cid in cids_list:
+            txt = ko.get(cid, "")
+            if not txt or has_internal_register_clash(txt):
+                continue
+            for lv in addressed_levels(txt):
+                if lv is not None:
+                    v["hae" if binary(lv) == "B" else "haeyo"] += 1
+        return v
+
     locked: dict[Pair, str] = {}
     for pair, cids in pair_cids.items():
         spk, adr = pair
-        spk_voice = voice_by_id.get(spk, "")
-        if _voice_forces_banmal_to_peer(spk_voice) and adr != GROUP:
+        if adr == NARRATION:
             locked[pair] = "hae"
             continue
+        if spk.startswith("ep:") or adr.startswith("ep:"):
+            rev_cids = pair_cids.get((adr, spk), [])
+            both_votes = _votes_for([*cids, *rev_cids])
+            if both_votes["haeyo"] > 0 or both_votes["hae"] < 2:
+                locked[pair] = "haeyo"
+            else:
+                locked[pair] = "hae"
+            continue
+        spk_voice = voice_by_id.get(spk, "")
         if table is not None:
             tb_lvls = [table.level_at(spk, adr, cid) for cid in cids]
             tb_known = [lv for lv in tb_lvls if lv is not None]
             if tb_known:
-                locked[pair] = tb_known[0]
+                if (spk == "nicepool" or adr == "nicepool") and _voice_forces_banmal_to_peer(spk_voice):
+                    locked[pair] = "hae"
+                else:
+                    locked[pair] = tb_known[0]
                 continue
-        if ko is not None:
-            votes: Counter[str] = Counter()
-            for cid in cids:
-                txt = ko.get(cid, "")
-                if not txt or has_internal_register_clash(txt):
-                    continue
-                for lv in addressed_levels(txt):
-                    if lv is not None:
-                        votes["hae" if binary(lv) == "B" else "haeyo"] += 1
-            if votes:
-                locked[pair] = "hae" if votes["hae"] >= votes["haeyo"] else "haeyo"
+        if _voice_forces_banmal_to_peer(spk_voice) and adr != GROUP:
+            locked[pair] = "hae"
+            continue
+        votes = _votes_for(cids)
+        if votes:
+            locked[pair] = "hae" if votes["hae"] >= votes["haeyo"] else "haeyo"
     return locked
 def cue_turn_pairs(
     context_map: ContextMap,

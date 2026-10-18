@@ -97,7 +97,7 @@ class TurnMorphemeAnalysis:
     has_plain_2p: bool
     has_banmal_ic: bool
     has_internal_clash: bool
-
+    has_bare_final_ec: bool = False
 
 def _classify_ef_token(
     tokens: list,
@@ -283,7 +283,19 @@ def analyze_turn_morphemes(turn_text: str) -> TurnMorphemeAnalysis:
         and (i + 1 < n and tokens1[i + 1].tag in ("JKS", "JX", "JKG", "JKO", "JKB"))
         for i, tk in enumerate(tokens1)
     )
-    has_banmal_ic = any(tk.tag == "IC" and tk.form in ("응", "야", "아니야", "아냐") for tk in tokens1)
+    has_banmal_ic = any(
+        (tk.tag == "IC" and tk.form in ("응", "야", "아니야", "아냐"))
+        or (
+            tk.form == "미안"
+            and (i + 1 == n or tokens1[i + 1].tag in ("SF", "SP", "SS", "SE"))
+        )
+        for i, tk in enumerate(tokens1)
+    )
+    has_bare_ec = (
+        last_content_idx >= 0
+        and tokens1[last_content_idx].tag == "EC"
+        and tokens1[last_content_idx].form in ("어서", "아서", "여서", "해서", "니까", "으니까", "길래", "는데", "은데", "\u11ab데", "던데")
+    )
 
     has_clash = (
         len(bins) > 1
@@ -301,6 +313,7 @@ def analyze_turn_morphemes(turn_text: str) -> TurnMorphemeAnalysis:
         has_plain_2p=has_plain_2p,
         has_banmal_ic=has_banmal_ic,
         has_internal_clash=has_clash,
+        has_bare_final_ec=has_bare_ec,
     )
 
 

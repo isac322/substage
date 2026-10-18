@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+
 from .models import Cue, Scene
 
 
@@ -141,3 +144,130 @@ def viewing_chunks(
         chunks.append((f"v{i + 1:02d}", start, end, [s.id for s in grp]))
         start = end
     return chunks
+
+
+@dataclass(frozen=True)
+class ConversationalEpisode:
+    """Homogeneous participation-framework episode inside a silence-bounded Scene."""
+
+    id: str
+    scene_id: str
+    cue_ids: tuple[str, ...]
+    participants: frozenset[str]
+    has_episodic_participant: bool
+
+
+_GENERIC_PARTICIPANTS = frozenset({"group", "audience", "narration", "self", "system_ai", "unknown", "none", ""})
+
+
+def partition_episodes(
+    scene_cue_ids: Sequence[str],
+    cues_by_id: Mapping[str, Cue],
+    pairs_by_cue: Mapping[str, tuple[str, str]],
+    *,
+    scene_id: str = "s000",
+) -> list[ConversationalEpisode]:
+    """Partition a scene's cue ids into homogeneous conversational episodes.
+
+    Splits a scene when the active interpersonal participant set shifts
+    (Jaccard similarity < 0.5 across blocks of >= 2 interpersonal cues, or
+    across a gap >= 2500 ms / an intervening OST location/title card).
+    Unresolved ``group`` cues attach to their nearest contiguous episode.
+    """
+    cids = [cid for cid in scene_cue_ids if cid in cues_by_id]
+    if not cids:
+        return []
+
+    def _Specific(cid: str) -> frozenset[str]:
+        p = pairs_by_cue.get(cid)
+        if p is None:
+            return frozenset()
+        return frozenset(x for x in p if x and x.lower() not in _GENERIC_PARTICIPANTS)
+
+    # Identify contiguous runs of cues sharing compatible specific participant sets
+    blocks: list[tuple[list[str], frozenset[str]]] = []
+    cur_cids: list[str] = []
+    cur_parts: frozenset[str] = frozenset()
+
+    for idx, cid in enumerate(cids):
+        c = cues_by_id[cid]
+        if c.id.startswith("ost-") or c.source == "ost":
+            if cur_cids:
+                blocks.append((cur_cids, cur_parts))
+                cur_cids, cur_parts = [], frozenset()
+            continue
+        sp = _Specific(cid)
+        if not cur_cids:
+            cur_cids = [cid]
+            cur_parts = sp
+            continue
+        prev_c = cues_by_id[cur_cids[-1]]
+        gap = c.start_ms - prev_c.end_ms
+        if len(sp) >= 2 and len(cur_parts) >= 2:
+            inter = len(sp & cur_parts)
+            union = len(sp | cur_parts)
+            jacc = inter / union if union else 1.0
+            if jacc < 0.5:
+                blocks.append((cur_cids, cur_parts))
+                cur_cids = [cid]
+                cur_parts = sp
+                continue
+        if gap >= 2500 and len(cur_parts) >= 2 and len(sp) < 2:
+            # Look ahead to see if the next specific participant set after this gap shifts
+            ahead_parts: frozenset[str] = frozenset()
+            for nxt_cid in cids[idx:]:
+                np = _Specific(nxt_cid)
+                if len(np) >= 2:
+                    ahead_parts = np
+                    break
+            if len(ahead_parts) >= 2:
+                inter = len(ahead_parts & cur_parts)
+                union = len(ahead_parts | cur_parts)
+                if (inter / union if union else 1.0) < 0.5:
+                    blocks.append((cur_cids, cur_parts))
+                    cur_cids = [cid]
+                    cur_parts = ahead_parts
+                    continue
+        cur_cids.append(cid)
+        if len(sp) >= len(cur_parts):
+            cur_parts = cur_parts | sp if len(cur_parts) < 2 else cur_parts
+
+    if cur_cids:
+        blocks.append((cur_cids, cur_parts))
+
+    if not blocks:
+        return [
+            ConversationalEpisode(
+                id=f"{scene_id}e01",
+                scene_id=scene_id,
+                cue_ids=tuple(cids),
+                participants=frozenset(),
+                has_episodic_participant=False,
+            )
+        ]
+
+    # Merge 1-cue blocks or blocks without specific participants into the closest neighbor
+    merged: list[tuple[list[str], frozenset[str]]] = []
+    for b_cids, b_parts in blocks:
+        if merged and (not b_parts or not merged[-1][1] or b_parts == merged[-1][1]):
+            prev_cids, prev_parts = merged[-1]
+            merged[-1] = (prev_cids + b_cids, prev_parts or b_parts)
+        elif merged and len(b_cids) < 2 and len(merged[-1][0]) >= 2:
+            prev_cids, prev_parts = merged[-1]
+            merged[-1] = (prev_cids + b_cids, prev_parts)
+        else:
+            merged.append((list(b_cids), b_parts))
+
+    episodes: list[ConversationalEpisode] = []
+    for i, (e_cids, e_parts) in enumerate(merged, 1):
+        has_ep = any(p.startswith("ep:") for p in e_parts)
+        episodes.append(
+            ConversationalEpisode(
+                id=f"{scene_id}e{i:02d}",
+                scene_id=scene_id,
+                cue_ids=tuple(e_cids),
+                participants=e_parts,
+                has_episodic_participant=has_ep,
+            )
+        )
+    return episodes

@@ -1042,6 +1042,112 @@ def test_detect_echo_and_moniker_chains_and_scene_register_lock():
         "w1__q3_contextual_meaning_and_pragmatics",
         "w1__q4_natural_korean_and_subtitle_limits",
     }
+
+
+def test_episode_partition_salesman_vs_locker_and_voiceover_bridge():
+    from substage.models import Character, CueObservation, VoiceCard
+    from substage.register import NARRATION, lock_scene_dyad_levels, lock_scene_pairs
+    from substage.review import _violates_target_level
+    from substage.scenes import partition_episodes
+
+    # Fixture A (s012): Kia Carnival salesman->customer (Tammy) followed by DRIVEMAX card and Locker Room (Peter)
+    s12_cues = {
+        "c0179": cue("c0179", 705162, 708374, "Technically, the, the Carnival's not a minivan."),
+        "c0180": cue("c0180", 709376, 710460, "It's an MPV."),
+        "c0181": cue("c0181", 710543, 713672, "So how does the Kia compare to the Honda Odyssey?"),
+        "c0183": cue("c0183", 713755, 716549, "That's a great question. It doesn't fucking suck."),
+        "c0184": cue("c0184", 716966, 719261, "You know, you can answer the question without swearing."),
+        "c0185": cue("c0185", 719344, 721513, "I'm sorry, Tammy, I don't have kids."),
+        "ost-0010": Cue(id="ost-0010", start_ms=727477, end_ms=729230, text="DRIVEMAX", raw="DRIVEMAX", source="ost"),
+        "c0187": cue("c0187", 729271, 730730, "You'll get 'em next time, pal."),
+        "c0188": cue("c0188", 730813, 735568, "And look, you can always go back to superhero-ing."),
+        "c0193": cue("c0193", 736027, 738780, "I don't keep it in my locker so that I can wear it."),
+        "c0194": cue("c0194", 738863, 741450, "I keep it in my locker in case we need to saddle up again."),
+        "c0201": cue("c0201", 741533, 744411, "Hey, hey, hey. What is that doing in there?"),
+    }
+    s12_cids = ["c0179", "c0180", "c0181", "c0183", "c0184", "c0185", "c0187", "c0188", "c0193", "c0194", "c0201"]
+    raw_pairs = {
+        "c0179": ("wade", "group"),
+        "c0180": ("wade", "group"),
+        # c0181..c0185 were dropped by cue_pairs because Tammy is not in film_map.yaml
+        "c0188": ("peter", "wade"),
+        "c0193": ("wade", "peter"),
+        "c0194": ("wade", "peter"),
+        "c0201": ("peter", "wade"),
+    }
+    obs = [
+        CueObservation(cue_id="c0179", speaker="Wade Wilson", addressee="group"),
+        CueObservation(cue_id="c0180", speaker="Wade Wilson", addressee="group"),
+        CueObservation(cue_id="c0181", speaker="Tammy", addressee="Wade Wilson"),
+        CueObservation(cue_id="c0183", speaker="Wade Wilson", addressee="Tammy"),
+        CueObservation(cue_id="c0184", speaker="Tammy", addressee="Wade Wilson"),
+        CueObservation(cue_id="c0185", speaker="Wade Wilson", addressee="Tammy"),
+        CueObservation(cue_id="c0187", speaker="Peter Pool", addressee="Wade Wilson"),
+        CueObservation(cue_id="c0188", speaker="Peter Pool", addressee="Wade Wilson"),
+        CueObservation(cue_id="c0193", speaker="Wade Wilson", addressee="Peter Pool"),
+        CueObservation(cue_id="c0194", speaker="Wade Wilson", addressee="Peter Pool"),
+        CueObservation(cue_id="c0201", speaker="Peter Pool", addressee="Wade Wilson"),
+    ]
+    locked = lock_scene_pairs(s12_cids, s12_cues, raw_pairs, obs)
+    # Carnival group cues must resolve to ep:tammy, NEVER to peter!
+    assert locked["c0179"] == ("wade", "ep:tammy")
+    assert locked["c0180"] == ("wade", "ep:tammy")
+    assert locked["c0181"] == ("ep:tammy", "wade")
+    assert locked["c0183"] == ("wade", "ep:tammy")
+    assert locked["c0187"] == ("peter", "wade")
+    assert locked["c0193"] == ("wade", "peter")
+
+    eps = partition_episodes(s12_cids + ["ost-0010"], s12_cues, locked, scene_id="s012")
+    assert len(eps) == 2
+    assert eps[0].has_episodic_participant is True
+    assert eps[1].has_episodic_participant is False
+
+    cmap = ContextMap(
+        synopsis="", tone_baseline="action",
+        characters=[
+            Character(id="wade", en_name="Wade Wilson", ko_name="웨이드", persona="merc", voice=VoiceCard(idiolect="Informal 반말 to everyone")),
+            Character(id="peter", en_name="Peter Pool", ko_name="피터", persona="buddy", voice=VoiceCard(idiolect="Warm 반말 to Wade")),
+        ],
+    )
+    ko_s12 = {
+        "c0179": "엄밀히 말하면\n카니발은 미니밴이 아니야",
+        "c0180": "MPV지",
+        "c0181": "기아차는 비교하면 어떤가요?",
+        "c0183": "좋은 질문이야",
+        "c0184": "욕 안 쓰고도 대답할 수 있잖아요",
+        "c0185": "미안, 태미\n난 애가 없어서",
+        "c0187": "다음엔 잘될 거야",
+        "c0188": "언제든 히어로로 돌아가도 되잖아",
+        "c0193": "내가 입으려고 사물함에 둔 게 아냐",
+        "c0194": "다시 출동할 때를 대비해서지",
+        "c0201": "야, 저게 왜 거기 있어?",
+    }
+    dyad_lvls = lock_scene_dyad_levels(None, s12_cids, s12_cues, locked, ko=ko_s12, context_map=cmap)
+    assert dyad_lvls[("wade", "ep:tammy")] == "haeyo"
+    assert dyad_lvls[("ep:tammy", "wade")] == "haeyo"
+    assert dyad_lvls[("wade", "peter")] == "hae"
+    assert dyad_lvls[("peter", "wade")] == "hae"
+    # Elliptical bare -어서 + plain 1p '난' + bare '미안' violates target 'haeyo'
+    assert _violates_target_level("미안, 태미\n난 애가 없어서", "haeyo") is True
+    assert _violates_target_level("죄송해요, 태미 씨\n제가 애가 없어서요", "haeyo") is False
+
+    # Fixture B (s011): Cross-cut voiceover sentence bridging EARTH-10005 card
+    s11_cues = {
+        "c0175": cue("c0175", 679053, 681889, "-Yeah, no, thank you.\n-Oh, okay."),
+        "c0176": cue("c0176", 683850, 686936, "You know what they say.\nWhen one door closes…"),
+        "ost-0008": Cue(id="ost-0008", start_ms=687000, end_ms=688400, text="EARTH-10005", raw="EARTH-10005", source="ost"),
+        "c0177": cue("c0177", 688271, 689314, "your locker at work opens."),
+    }
+    s11_raw = {
+        "c0175": ("happy", "wade"),
+        "c0176": ("wade", "happy"),
+        "c0177": ("wade", "happy"),
+    }
+    s11_locked = lock_scene_pairs(["c0175", "c0176", "c0177"], s11_cues, s11_raw)
+    assert s11_locked["c0176"] == ("wade", NARRATION)
+    assert s11_locked["c0177"] == ("wade", NARRATION)
+    s11_lvls = lock_scene_dyad_levels(None, ["c0175", "c0176", "c0177"], s11_cues, s11_locked)
+    assert s11_lvls[("wade", NARRATION)] == "hae"
 # ------------------------------------------------------------ character names
 
 
