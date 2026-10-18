@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from substage.levels import addressed_level, addressed_levels, ending_level, speaker_turns
+from substage.levels import addressed_level, addressed_levels, analyze_turn_morphemes, ending_level, has_internal_register_clash, speaker_turns
 
 
 @pytest.mark.parametrize(
@@ -119,3 +119,38 @@ def test_bidi_controls_do_not_hide_dash_turns():
     # Netflix official files (streaming) prefix every line with U+200E / U+202A
     assert addressed_levels("\u200e- 건배!\n\u200e- 가자") == [None, "hae"]
     assert addressed_levels("\u202a- 갈게요\u202c\n\u202a- 가자\u202c") == ["haeyo", "hae"]
+
+
+def test_sejong_pos_disambiguates_conditional_ec_vs_final_ef():
+    # Conditional connective -거든 (EC) does not override the matrix clause EF
+    assert addressed_level("시간이 나거든 연락하세요") == "haeyo"
+    assert addressed_level("네가 가게 되거든 나도 하렴") == "hae"
+    assert addressed_level("비가 오거든 창문을 닫아라") == "hae"
+    assert not has_internal_register_clash("시간이 나거든 연락하세요")
+    # Sentence-final explanatory -거든 (EF) is addressed 해체, and -거든요 is 해요체
+    assert addressed_level("난 페미니스트거든") == "hae"
+    assert addressed_level("벳시는 믿음직하거든") == "hae"
+    assert addressed_level("어제 돈봉투가 왔거든요") == "haeyo"
+    # Vowel-contracted 해체 imperatives/declaratives (꺼져, 닥쳐, 멈춰, 살려 줘)
+    assert addressed_level("여기서 당장 꺼져") == "hae"
+    assert addressed_level("아가리 닥쳐") == "hae"
+    assert addressed_level("야, 왜 멈춰?") == "hae"
+    assert addressed_level("제발 살려 줘") == "hae"
+    # Nouns not in any hardcoded list are tagged NNG -> None
+    for noun in ("국어", "노래", "새해", "감자", "사자", "할머니"):
+        assert addressed_level(noun) is None
+
+
+def test_three_axis_honorific_clash_detection():
+    # Intra-turn EF clash (해요체 + 해체 in one single-speaker turn)
+    assert has_internal_register_clash("그런 셈이죠\n그렇다고 치자")
+    # Banmal interjection (IC: 응) + 해요체 EF
+    assert has_internal_register_clash("응\n힘들게 컸어요?")
+    # Humble 1st-person NP (저/제) + 해체 EF
+    assert has_internal_register_clash("제가 지금 갈게")
+    # Colloquial 나/내 + 해요체 is valid in Korean dialogue (not a clash)
+    assert not has_internal_register_clash("모두가 구세주 타입은 아니에요\n나도 아니지만 행복해요")
+    # Demonstrative '저 둘' / '저들' is not humble 1st-person '저'
+    assert not has_internal_register_clash("저 둘이 우리의\n기회일지 몰라")
+    # Mirative exclamative (-네!) followed by addressed 해요체 is not a clash
+    assert not has_internal_register_clash("더럽게 껴드네!\n미안해요")
