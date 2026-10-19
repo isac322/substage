@@ -753,24 +753,13 @@ def lock_edges(
                 edges_by_pair[pair] = edge.model_copy(update=updates)
             continue
 
-        # Binary flip proposed! Check if:
-        # (a) Prior dyad was a provisional first-encounter stranger ('stranger_civil')
-        #     and the new episode establishes a permanent bond (crew_buddy/partner/protege/enemy), OR
-        # (b) Edge cites an explicit valid transition reason in this episode.
+        # Binary flip proposed! Check if edge cites an explicit valid transition reason
         valid_ev = [cid for cid in edge.evidence_cues if cid in cues_by_id]
-        is_stranger_graduation = (
-            (locked.lock == "provisional" or locked.relation == "stranger_civil")
-            and edge.relation in ("crew_buddy", "partner", "mentor", "protege", "enemy", "peer")
-            and edge.step in (2, 5, 6, 7, 10)
-            and len(valid_ev) >= 2
-        )
         has_explicit_shift = any(
             sh.reason in _VALID_CROSS_EP_SHIFT_REASONS and sh.until_cue is None
             for sh in edge.shifts
         )
-        if is_stranger_graduation:
-            edges_by_pair[pair] = edge
-        elif has_explicit_shift and len(valid_ev) >= 2 and clef_client is not None:
+        if has_explicit_shift and len(valid_ev) >= 2 and clef_client is not None:
             flip_candidates.append((pair, edge, locked))
         else:
             # Revert unlicensed cross-episode binary flip to locked baseline
@@ -970,7 +959,7 @@ def _replace_fuzzy_ko_name(ko_text: str, target_ko_name: str) -> str:
             word = m.group(0)
             stem, josa = word, ""
             for p in _KO_PARTICLES:
-                if len(word) > len(p) + 1 and word.endswith(p):
+                if len(word) > len(p) + 1 and word.endswith(p) and not tp.endswith(p):
                     stem = word[: -len(p)]
                     josa = p
                     break
@@ -983,7 +972,6 @@ def _replace_fuzzy_ko_name(ko_text: str, target_ko_name: str) -> str:
             ):
                 return tp + josa
             return word
-
         out = re.sub(r"[가-힣]{2,10}", _sub_tok, out)
     return out
 
@@ -1033,9 +1021,11 @@ def enforce_series_pins(
                 if norm_term == "heaven" and "천국" in curr:
                     curr = curr.replace("천국", locked_ko)
                 elif norm_term == "tie-dye guy":
-                    for syn in ("홀치기염색 남", "홀치기 염색 남", "타이다이 가이", "타이다이 남", "타이다이 사람"):
-                        if syn in curr and syn != locked_ko:
-                            curr = curr.replace(syn, locked_ko)
+                    curr = re.sub(
+                        r"홀치기\s*염색\s*(?:옷\s*|후드티\s*)?남(?:자)?|타이다이\s*(?:가이|후드티\s*남|사람|남자|남(?![자잔]))",
+                        locked_ko,
+                        curr,
+                    )
 
         out[cid] = curr
     return out
@@ -1062,29 +1052,22 @@ def enforce_event_pins(
     for ev in out_events:
         cids = list(getattr(ev, "cue_ids", ()) or ())
         ev_ko = str(getattr(ev, "ko", ""))
-        # If a multi-cue merged event contains a pinned recap/callback cue, unsplit it
-        if len(cids) >= 2 and any(
-            cid in pins
-            and pins[cid].tm_ko
-            and (pins[cid].is_recap or len(_norm_en_utterance(cues_by_id[cid].text)) >= 20)
+        # If a 2-cue merged event has distinct pinned recap TM lines for all cues, unsplit with 85ms gap
+        if len(cids) == 2 and all(
+            cid in pins and pins[cid].tm_ko and pins[cid].is_recap and cid in cues_by_id
             for cid in cids
-            if cid in cues_by_id
         ):
-            for cid in cids:
-                cue = cues_by_id.get(cid)
-                txt = enforced_ko.get(cid, "").strip()
-                if cue is not None and txt:
-                    updated.append(
-                        ev.model_copy(
-                            update={
-                                "start_ms": cue.start_ms,
-                                "end_ms": cue.end_ms,
-                                "ko": txt,
-                                "cue_ids": [cid],
-                            }
-                        )
-                    )
-            continue
+            c0, c1 = cues_by_id[cids[0]], cues_by_id[cids[1]]
+            t0, t1 = enforced_ko.get(cids[0], "").strip(), enforced_ko.get(cids[1], "").strip()
+            if t0 and t1 and t0 != t1:
+                end0 = min(c0.end_ms, max(c0.start_ms + 500, c1.start_ms - 85))
+                updated.append(
+                    ev.model_copy(update={"start_ms": c0.start_ms, "end_ms": end0, "ko": t0, "cue_ids": [cids[0]]})
+                )
+                updated.append(
+                    ev.model_copy(update={"start_ms": c1.start_ms, "end_ms": c1.end_ms, "ko": t1, "cue_ids": [cids[1]]})
+                )
+                continue
         if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
@@ -1107,9 +1090,11 @@ def enforce_event_pins(
                     ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
                     norm_term = _HYPHEN_NORM_RE.sub("-", en_term.lower())
                     if norm_term == "tie-dye guy":
-                        for syn in ("홀치기염색 남", "홀치기 염색 남", "타이다이 가이", "타이다이 남", "타이다이 사람"):
-                            if syn in ev_ko and syn != locked_ko:
-                                ev_ko = ev_ko.replace(syn, locked_ko)
+                        ev_ko = re.sub(
+                            r"홀치기\s*염색\s*(?:옷\s*|후드티\s*)?남(?:자)?|타이다이\s*(?:가이|후드티\s*남|사람|남자|남(?![자잔]))",
+                            locked_ko,
+                            ev_ko,
+                        )
         if ev_ko != getattr(ev, "ko", ""):
             ev = ev.model_copy(update={"ko": ev_ko})
         updated.append(ev)
