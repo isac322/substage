@@ -2177,8 +2177,8 @@ def _norm_recap_ko(text: str) -> str:
     from .series_state import _strip_recap_ko_header
 
     s = _strip_recap_ko_header(text or "")
-    # Drop separate quoted OST/sign line when stacked with dialogue
-    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    # Drop separate quoted OST/sign line when stacked with dialogue and deduplicate identical lines
+    lines = list(dict.fromkeys(ln.strip() for ln in s.splitlines() if ln.strip()))
     if len(lines) == 2:
         q0 = bool(re.match(r"^[\"'“”‘’].*[\"'“”‘’]$", lines[0]))
         q1 = bool(re.match(r"^[\"'“”‘’].*[\"'“”‘’]$", lines[1]))
@@ -2250,6 +2250,10 @@ def evaluate_series_consistency(
                         if len(g.en) == len(g.official) > 1:
                             for c, ln in zip(g.en, g.official):
                                 pairs.append((c, ln.text))
+                        elif len(g.en) == 2 and len(g.official) == 1 and len(g.official[0].text.splitlines()) == 2:
+                            lns = g.official[0].text.splitlines()
+                            pairs.append((g.en[0], lns[0]))
+                            pairs.append((g.en[1], lns[1]))
                         else:
                             ko_joined = "\n".join(ln.text for ln in g.official)
                             for c in g.en:

@@ -1021,9 +1021,13 @@ def enforce_series_pins(
                 else:
                     curr = clean_tm
 
-        # 2. Fuzzy Hangul name stabilization (e.g. 레반도스키/레반다우스키 -> 레반도프스키, 신디 -> 신다)
-        for _en_name, locked_ko in pin.required_names.items():
+        # 2. Fuzzy Hangul name stabilization (e.g. 레반도스키/레반다우스키 -> 레반도프스키, 신디 -> 신다, 우르술라 -> 어설라)
+        for en_name, locked_ko in pin.required_names.items():
             curr = _replace_fuzzy_ko_name(curr, locked_ko)
+            if en_name.lower() == "ursula" and locked_ko:
+                for syn in ("우르술라", "어슐라", "어설라"):
+                    if syn in curr and syn != locked_ko:
+                        curr = curr.replace(syn, locked_ko)
 
         # 3. Locked glossary & anon-slot term enforcement
         for en_term, locked_ko in pin.required_terms.items():
@@ -1032,13 +1036,16 @@ def enforce_series_pins(
                 norm_term = _HYPHEN_NORM_RE.sub("-", en_term.lower())
                 if norm_term == "heaven" and "천국" in curr:
                     curr = curr.replace("천국", locked_ko)
+                elif norm_term == "ursula":
+                    for syn in ("우르술라", "어슐라", "어설라"):
+                        if syn in curr and syn != locked_ko:
+                            curr = curr.replace(syn, locked_ko)
                 elif norm_term == "tie-dye guy":
                     curr = re.sub(
                         r"홀치기\s*염색\s*(?:옷\s*|후드티\s*)?남(?:자)?|타이다이\s*(?:가이|후드티\s*남|사람|남자|남(?![자잔]))",
                         locked_ko,
                         curr,
                     )
-
         out[cid] = curr
     return out
 
@@ -1065,23 +1072,30 @@ def enforce_event_pins(
     for ev in out_events:
         cids = list(getattr(ev, "cue_ids", ()) or ())
         ev_ko = str(getattr(ev, "ko", ""))
-        # If a 2-cue merged event has distinct pinned recap TM lines for all cues, unsplit with 85ms gap
-        if len(cids) == 2 and all(
+        # If a multi-cue merged event contains a pinned recap TM cue, unsplit with 85ms gap
+        if len(cids) >= 2 and any(
             cid in pins and pins[cid].tm_ko and pins[cid].is_recap and cid in cues_by_id
             for cid in cids
         ):
-            c0, c1 = cues_by_id[cids[0]], cues_by_id[cids[1]]
-            t0, t1 = enforced_ko.get(cids[0], "").strip(), enforced_ko.get(cids[1], "").strip()
-            if t0 and t1 and t0 != t1:
-                end0 = min(c0.end_ms, max(c0.start_ms + 500, c1.start_ms - 85))
-                updated.append(
-                    ev.model_copy(update={"start_ms": c0.start_ms, "end_ms": end0, "ko": t0, "cue_ids": [cids[0]]})
+            parts_ok = []
+            for idx_c, cid in enumerate(cids):
+                c_obj = cues_by_id.get(cid)
+                t_str = enforced_ko.get(cid, "").strip()
+                if c_obj is None or not t_str:
+                    parts_ok = []
+                    break
+                nxt_c = cues_by_id.get(cids[idx_c + 1]) if idx_c + 1 < len(cids) else None
+                end_t = (
+                    min(c_obj.end_ms, max(c_obj.start_ms + 500, nxt_c.start_ms - 85))
+                    if nxt_c is not None
+                    else c_obj.end_ms
                 )
-                updated.append(
-                    ev.model_copy(update={"start_ms": c1.start_ms, "end_ms": c1.end_ms, "ko": t1, "cue_ids": [cids[1]]})
+                parts_ok.append(
+                    ev.model_copy(update={"start_ms": c_obj.start_ms, "end_ms": end_t, "ko": t_str, "cue_ids": [cid]})
                 )
+            if parts_ok and len({p.ko for p in parts_ok}) == len(parts_ok):
+                updated.extend(parts_ok)
                 continue
-        if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
             cue = cues_by_id.get(cid)
@@ -1096,13 +1110,21 @@ def enforce_event_pins(
             pin = pins.get(cid)
             if pin is None:
                 continue
-            for _en_name, locked_ko in pin.required_names.items():
+            for en_name, locked_ko in pin.required_names.items():
                 ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
+                if en_name.lower() == "ursula" and locked_ko:
+                    for syn in ("우르술라", "어슐라", "어설라"):
+                        if syn in ev_ko and syn != locked_ko:
+                            ev_ko = ev_ko.replace(syn, locked_ko)
             for en_term, locked_ko in pin.required_terms.items():
                 if locked_ko and locked_ko not in ev_ko:
                     ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
                     norm_term = _HYPHEN_NORM_RE.sub("-", en_term.lower())
-                    if norm_term == "tie-dye guy":
+                    if norm_term == "ursula":
+                        for syn in ("우르술라", "어슐라", "어설라"):
+                            if syn in ev_ko and syn != locked_ko:
+                                ev_ko = ev_ko.replace(syn, locked_ko)
+                    elif norm_term == "tie-dye guy":
                         ev_ko = re.sub(
                             r"홀치기\s*염색\s*(?:옷\s*|후드티\s*)?남(?:자)?|타이다이\s*(?:가이|후드티\s*남|사람|남자|남(?![자잔]))",
                             locked_ko,
