@@ -1205,15 +1205,22 @@ def run(
     if ost:
         if video.video_path and Path(video.video_path).is_file():
             vpath = Path(video.video_path)
-            snapped_ost: list[Cue] = []
-            for o in ost:
-                ns, ne = media.snap_ost_shot(
-                    vpath, o.start_ms, o.end_ms, frame_exact=translate._is_frame_exact_cue(o)
-                )
-                if (ns, ne) != (o.start_ms, o.end_ms):
-                    o = o.model_copy(update={"start_ms": ns, "end_ms": max(ne, ns + 800)})
-                snapped_ost.append(o)
-            ost = snapped_ost
+            snap_ck = Checkpoints(ws, "ost_snap")
+            snap_h = input_hash(_Cues(items=ost), str(vpath))
+            cached_snap = snap_ck.get("snapped", snap_h, _Cues)
+            if cached_snap is not None:
+                ost = cached_snap.items
+            else:
+                snapped_ost: list[Cue] = []
+                for o in ost:
+                    ns, ne = media.snap_ost_shot(
+                        vpath, o.start_ms, o.end_ms, frame_exact=translate._is_frame_exact_cue(o)
+                    )
+                    if (ns, ne) != (o.start_ms, o.end_ms):
+                        o = o.model_copy(update={"start_ms": ns, "end_ms": max(ne, ns + 800)})
+                    snapped_ost.append(o)
+                ost = snapped_ost
+                snap_ck.put("snapped", snap_h, _Cues(items=ost))
         cues, scenes = _merge_ost(cues, scenes, ost)
         save_model(ws.path("cues.json"), cues)
         save_model(ws.path("scenes.json"), scenes)
