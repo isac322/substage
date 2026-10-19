@@ -1068,8 +1068,53 @@ def enforce_event_pins(
         return out_events
     cues_by_id = {c.id: c for c in cues}
     enforced_ko = enforce_series_pins(ko, cues, bible, pins, context_map=context_map)
+    # Pre-pass: align 2-cue + 1-cue recap spans when TM grouped them as 1-cue + 2-cue
+    realigned: list[Any] = []
+    idx_ev = 0
+    while idx_ev < len(out_events):
+        ev = out_events[idx_ev]
+        cids = list(getattr(ev, "cue_ids", ()) or ())
+        if idx_ev + 1 < len(out_events) and len(cids) == 2:
+            nxt_ev = out_events[idx_ev + 1]
+            nxt_cids = list(getattr(nxt_ev, "cue_ids", ()) or ())
+            if len(nxt_cids) == 1:
+                c0_id, c1_id, c2_id = cids[0], cids[1], nxt_cids[0]
+                p0, p1, p2 = pins.get(c0_id), pins.get(c1_id), pins.get(c2_id)
+                if (
+                    p0 and p1 and p2
+                    and p0.is_recap and p1.is_recap and p2.is_recap
+                    and p0.tm_ko and p1.tm_ko and p2.tm_ko
+                    and p0.tm_ko != p1.tm_ko and p1.tm_ko == p2.tm_ko
+                    and c0_id in cues_by_id and c1_id in cues_by_id and c2_id in cues_by_id
+                ):
+                    c0_obj, c1_obj, c2_obj = cues_by_id[c0_id], cues_by_id[c1_id], cues_by_id[c2_id]
+                    realigned.append(
+                        ev.model_copy(
+                            update={
+                                "start_ms": c0_obj.start_ms,
+                                "end_ms": min(c0_obj.end_ms, max(c0_obj.start_ms + 500, c1_obj.start_ms - 83)),
+                                "ko": _strip_recap_ko_header(p0.tm_ko),
+                                "cue_ids": [c0_id],
+                            }
+                        )
+                    )
+                    realigned.append(
+                        nxt_ev.model_copy(
+                            update={
+                                "start_ms": c1_obj.start_ms,
+                                "end_ms": c2_obj.end_ms,
+                                "ko": _strip_recap_ko_header(p1.tm_ko),
+                                "cue_ids": [c1_id, c2_id],
+                            }
+                        )
+                    )
+                    idx_ev += 2
+                    continue
+        realigned.append(ev)
+        idx_ev += 1
+
     updated: list[Any] = []
-    for ev in out_events:
+    for ev in realigned:
         cids = list(getattr(ev, "cue_ids", ()) or ())
         ev_ko = str(getattr(ev, "ko", ""))
         # If a multi-cue merged event is a recap span where every cue matches prior TM, restore the joined TM
@@ -1084,7 +1129,6 @@ def enforce_event_pins(
                     tm_parts.append(t_str)
             if tm_parts:
                 ev_ko = "\n".join(tm_parts)
-        if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
             cue = cues_by_id.get(cid)
