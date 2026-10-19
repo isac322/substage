@@ -1040,6 +1040,10 @@ def enforce_series_pins(
                     for syn in ("우르술라", "어슐라", "어설라"):
                         if syn in curr and syn != locked_ko:
                             curr = curr.replace(syn, locked_ko)
+                elif norm_term == "only murders in the building":
+                    for syn in ("온리 머더스 인 더 빌딩", "아파트 이웃들이 수상해", "아파트 건물의 살인", "건물 안의 살인만"):
+                        if syn in curr and syn != locked_ko:
+                            curr = curr.replace(syn, locked_ko)
                 elif norm_term == "tie-dye guy":
                     curr = re.sub(
                         r"홀치기\s*염색\s*(?:옷\s*|후드티\s*)?남(?:자)?|타이다이\s*(?:가이|후드티\s*남|사람|남자|남(?![자잔]))",
@@ -1118,17 +1122,37 @@ def enforce_event_pins(
         cids = list(getattr(ev, "cue_ids", ()) or ())
         ev_ko = str(getattr(ev, "ko", ""))
         # If a multi-cue merged event is a recap span where every cue matches prior TM, restore the joined TM
-        if len(cids) >= 2 and all(
+        if len(cids) == 2 and all(
             cid in pins and pins[cid].tm_ko and pins[cid].is_recap and cid in cues_by_id
             for cid in cids
         ):
-            tm_parts = []
-            for cid in cids:
-                t_str = _strip_recap_ko_header(pins[cid].tm_ko or "")
-                if t_str and t_str not in tm_parts:
-                    tm_parts.append(t_str)
-            if tm_parts:
-                ev_ko = "\n".join(tm_parts)
+            t0 = _strip_recap_ko_header(pins[cids[0]].tm_ko or "")
+            t1 = _strip_recap_ko_header(pins[cids[1]].tm_ko or "")
+            if t0 and t1 and t0 != t1:
+                c0_obj, c1_obj = cues_by_id[cids[0]], cues_by_id[cids[1]]
+                updated.append(
+                    ev.model_copy(
+                        update={
+                            "start_ms": c0_obj.start_ms,
+                            "end_ms": min(c0_obj.end_ms, max(c0_obj.start_ms + 500, c1_obj.start_ms - 83)),
+                            "ko": t0,
+                            "cue_ids": [cids[0]],
+                        }
+                    )
+                )
+                updated.append(
+                    ev.model_copy(
+                        update={
+                            "start_ms": c1_obj.start_ms,
+                            "end_ms": c1_obj.end_ms,
+                            "ko": t1,
+                            "cue_ids": [cids[1]],
+                        }
+                    )
+                )
+                continue
+            if t0:
+                ev_ko = t0
         if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
@@ -1156,6 +1180,10 @@ def enforce_event_pins(
                     norm_term = _HYPHEN_NORM_RE.sub("-", en_term.lower())
                     if norm_term == "ursula":
                         for syn in ("우르술라", "어슐라", "어설라"):
+                            if syn in ev_ko and syn != locked_ko:
+                                ev_ko = ev_ko.replace(syn, locked_ko)
+                    elif norm_term == "only murders in the building":
+                        for syn in ("온리 머더스 인 더 빌딩", "아파트 이웃들이 수상해", "아파트 건물의 살인", "건물 안의 살인만"):
                             if syn in ev_ko and syn != locked_ko:
                                 ev_ko = ev_ko.replace(syn, locked_ko)
                     elif norm_term == "tie-dye guy":
