@@ -175,11 +175,25 @@ class Corpus:
         self._indexes: dict[str, _Index] = {}
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _is_excluded(pair_video_id: str, exclude_video: str) -> bool:
+        if pair_video_id == exclude_video:
+            return True
+        from .series_state import parse_episode_coord
+
+        c_ex = parse_episode_coord(exclude_video)
+        if c_ex is None:
+            return False
+        c_pair = parse_episode_coord(pair_video_id)
+        if c_pair is None or c_pair.series_id != c_ex.series_id:
+            return False
+        return c_pair.pair >= c_ex.pair
+
     def index(self, exclude_video: str) -> _Index:
         with self._lock:
             idx = self._indexes.get(exclude_video)
             if idx is None:
-                idx = _Index([p for p in self.pairs if p.video_id != exclude_video])
+                idx = _Index([p for p in self.pairs if not self._is_excluded(p.video_id, exclude_video)])
                 self._indexes[exclude_video] = idx
             return idx
 

@@ -199,8 +199,14 @@ def _voice_forces_banmal_to_peer(voice_idiolect: str) -> bool:
     return "반말" in low and ("same man" in low or "enemies" in low or "everyone" in low or "strangers" in low or "nicepool" in low or "wade" in low)
 
 
-def canonicalize_register_map(rmap: RegisterMap, context_map: ContextMap | None = None) -> RegisterMap:
+def canonicalize_register_map(
+    rmap: RegisterMap,
+    context_map: ContextMap | None = None,
+    *,
+    locked_pairs: set[tuple[str, str]] | None = None,
+) -> RegisterMap:
     """Canonicalize all directed edges in *rmap* using paired reverse context and optional character voice cards."""
+    locked_pairs = locked_pairs or set()
     by_pair = {(e.speaker, e.addressee): e for e in rmap.edges}
     voice_by_id = {
         ch.id: (ch.voice.idiolect if ch.voice else "")
@@ -208,6 +214,9 @@ def canonicalize_register_map(rmap: RegisterMap, context_map: ContextMap | None 
     }
     edges: list[RegisterEdge] = []
     for raw_e in rmap.edges:
+        if (raw_e.speaker, raw_e.addressee) in locked_pairs:
+            edges.append(raw_e)
+            continue
         e = canonicalize_edge(raw_e, reverse=by_pair.get((raw_e.addressee, raw_e.speaker)))
         spk_voice = voice_by_id.get(e.speaker, "")
         if (
@@ -910,17 +919,23 @@ def build_register(
     context_map: ContextMap,
     cues: list[Cue],
     observations: Iterable[ChunkObservations | CueObservation],
+    *,
+    series_bible: object | None = None,
+    clef_client: object | None = None,
 ) -> RegisterMap:
     """Enumerate the required pairs (deterministic cue pairs ∪ the LLM
     enumeration pass), ask the text model for every one (batches of <= 25,
     full transcript each), re-ask the missing pairs once, and fail when
     coverage stays below 95 %. The table records its required pairs."""
+    from .series_state import lock_edges, render_register_locks
+
     observations = list(observations or [])
     pairs_by_cue = cue_pairs(context_map, cues, observations)
     llm_lines = enumerate_pairs(ws, gc, video, context_map, cues, observations)
     required = required_pairs(pairs_by_cue, llm_lines, [c.id for c in sorted(cues, key=lambda c: c.start_ms)])
     counts = line_counts(pairs_by_cue, llm_lines)
     tmpl = template()
+    locks_block = render_register_locks(series_bible)  # type: ignore[arg-type]
     characters = "\n".join(
         f"{ch.id} | {ch.en_name} | {ch.ko_name} | {' '.join(ch.persona.split())}" for ch in context_map.characters
     ) or "(none)"
@@ -939,7 +954,7 @@ def build_register(
                 characters=characters,
                 transcript=transcript,
                 pairs="\n".join(f"{s}>{a} ({counts.get((s, a), 0)} lines)" for s, a in batch),
-            )
+            ) + locks_block
             h = input_hash(prompt, gc.settings.model_main)
             key = f"{label}-{k // _BATCH_PAIRS + 1:02d}"
             hit = cp.get(key, h, _EdgeBatch)
@@ -965,14 +980,24 @@ def build_register(
         )
     if missing:
         logger.warning("s2r: pairs left without an edge: %s", ", ".join(f"{s}>{a}" for s, a in missing))
-    return canonicalize_register_map(
-        RegisterMap(
-            edges=[got[p] for p in required if p in got],
-            required_pairs=[f"{s}>{a}" for s, a in required],
-        ),
-        context_map=context_map,
+    rmap = RegisterMap(
+        edges=[got[p] for p in required if p in got],
+        required_pairs=[f"{s}>{a}" for s, a in required],
     )
-
+    locked_set: set[tuple[str, str]] = set()
+    if series_bible is not None and getattr(series_bible, "dyads", None):
+        rmap = lock_edges(
+            rmap,
+            series_bible,  # type: ignore[arg-type]
+            context_map=context_map,
+            cues=cues,
+            clef_client=clef_client,
+        )
+        for pk in series_bible.dyads:  # type: ignore[attr-defined]
+            if ">" in pk:
+                s_id, a_id = pk.split(">", 1)
+                locked_set.add((s_id, a_id))
+    return canonicalize_register_map(rmap, context_map=context_map, locked_pairs=locked_set)
 
 # ---------------------------------------------------------------- delivery
 

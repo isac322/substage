@@ -700,6 +700,7 @@ def filter_edits_with_decisions(
     ko: dict[str, str],
     *,
     levels: dict[str, tuple[str, str]] | None = None,
+    protected_forms: Mapping[str, Sequence[str]] | None = None,
 ) -> list[CueEdit]:
     """Clef Role-3 4-Pillar Acceptance Gate for surgical regeneration / polish edits.
 
@@ -712,12 +713,17 @@ def filter_edits_with_decisions(
          `delta_reg <= -0.15` or `delta_verbose <= -0.15`) OR spoken fluency
          improves (`delta_spoken >= +0.08`).
     """
+    protected_forms = protected_forms or {}
     candidates = [
         e for e in edits
         if e.cue_id in cues_by_id
         and e.new_ko.strip()
         and e.new_ko.strip() != ko.get(e.cue_id, "").strip()
         and len(e.new_ko.strip().splitlines()) <= 2
+        and all(
+            f not in ko.get(e.cue_id, "") or f in e.new_ko
+            for f in protected_forms.get(e.cue_id, ())
+        )
     ]
     if not candidates:
         return []

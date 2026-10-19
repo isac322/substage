@@ -805,12 +805,16 @@ def _required_forms(
             forms.append(g.ko)
     for cb in snap.callbacks_live:
         if cue.id in cb.payoff_cues:
+            if cb.note.startswith("LOCKED_SERIES_TM::"):
+                for line in cb.note.removeprefix("LOCKED_SERIES_TM::").split("\n"):
+                    phrase = line.strip().lstrip("-").strip()
+                    if phrase and phrase in orig_ko:
+                        forms.append(phrase)
             for sid in cb.setup_cues:
                 for line in ko.get(sid, "").split("\n"):
                     phrase = line.strip().lstrip("-").strip()
                     if phrase and phrase in orig_ko:
                         forms.append(phrase)
-    # stable de-dup
     return list(dict.fromkeys(forms))
 
 

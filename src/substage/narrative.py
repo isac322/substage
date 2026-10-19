@@ -254,6 +254,8 @@ def viewing_pass(
     proxy: UploadedFile,
     cues: list[Cue],
     chunks: list[tuple[str, int, int, list[str]]],
+    *,
+    series_bible: object | None = None,
 ) -> list[ChunkObservations]:
     """Watch the video chunk by chunk and report observations only.
 
@@ -261,8 +263,16 @@ def viewing_pass(
     video, as produced by ``scenes.viewing_chunks``. Clip offsets are absolute
     video seconds. Each chunk is checkpointed independently.
     """
+    from .series_state import render_viewing_roster
+
     cp = Checkpoints(ws, "s2v")
     template = _prompt("viewing.md")
+    roster_block = render_viewing_roster(series_bible)  # type: ignore[arg-type]
+    bible_tag = (
+        (series_bible.fingerprint(),)  # type: ignore[attr-defined]
+        if series_bible is not None and hasattr(series_bible, "fingerprint") and series_bible.fingerprint()  # type: ignore[attr-defined]
+        else ()
+    )
     out: list[ChunkObservations] = []
     for chunk_id, start_ms, end_ms, _scene_ids in chunks:
         chunk_cues = [c for c in cues if start_ms <= c.start_ms < end_ms]
@@ -272,6 +282,7 @@ def viewing_pass(
             template,
             gc.settings.model_main,
             *[c.model_dump_json() for c in chunk_cues],
+            *bible_tag,
         )
         hit = cp.get(chunk_id, h, ChunkObservations)
         if hit is not None:
@@ -288,7 +299,7 @@ def viewing_pass(
             year=video.year or "?",
             start_ms=start_ms,
             cues=cue_lines or "(no subtitle cues in this window)",
-        )
+        ) + roster_block
         obs = _observe_clip(
             gc, proxy, chunk_id, start_ms, end_ms, prompt, f"s2v:{chunk_id}"
         )
@@ -309,6 +320,7 @@ def viewing_pass(
                     start_ms=0,
                     cues=open_lines or "(no subtitle cues in this window)",
                 )
+                + roster_block
                 + "\n\nThis dialogue-free opening window often contains title/credit cards and readable English text on props (cups, covers, cards, flyers). Report every readable prop text as [sign] and every credit card as [credit] with exact video milliseconds (1 minute = 60,000 ms, 2 minutes = 120,000 ms)."
             )
             open_obs = _observe_clip(
@@ -321,7 +333,6 @@ def viewing_pass(
         cp.put(chunk_id, h, obs)
         out.append(obs)
     return out
-
 
 def selective_perception_pass(
     ws: Workspace,
@@ -383,10 +394,21 @@ def build_context_map(
     cues: list[Cue],
     observations: list[ChunkObservations],
     tmdb_hint: str | None = None,
+    *,
+    series_bible: object | None = None,
 ) -> ContextMap:
     """One text call over the whole transcript + compacted observations."""
+    from .series_state import reconcile_characters, render_context_map_locks
+
     cp = Checkpoints(ws, "s2a")
     template = _prompt("context_map.md")
+    locks_block = render_context_map_locks(series_bible)  # type: ignore[arg-type]
+    combined_hint = "\n".join(x for x in (tmdb_hint, locks_block) if x)
+    bible_tag = (
+        (series_bible.fingerprint(),)  # type: ignore[attr-defined]
+        if series_bible is not None and hasattr(series_bible, "fingerprint") and series_bible.fingerprint()  # type: ignore[attr-defined]
+        else ()
+    )
     # generator identity (exact template text + model) is part of the key so a
     # prompt or model change regenerates instead of reusing a stale map
     h = input_hash(
@@ -396,13 +418,14 @@ def build_context_map(
         tmdb_hint or "",
         *[c.model_dump_json() for c in cues],
         *[o.model_dump_json() for o in observations],
+        *bible_tag,
     )
     hit = cp.get("context_map", h, ContextMap)
     if hit is None:
         prompt = template.format(
             title=video.title,
             year=video.year or "?",
-            tmdb_hint=(f"Metadata hint: {tmdb_hint}" if tmdb_hint else ""),
+            tmdb_hint=(f"Metadata hint: {combined_hint}" if combined_hint else ""),
             transcript="\n".join(_transcript_line(c) for c in cues),
             observations=_compact_observations(observations),
         )
@@ -416,14 +439,15 @@ def build_context_map(
             prompt = template.format(
                 title=video.title,
                 year=video.year or "?",
-                tmdb_hint=(f"Metadata hint: {tmdb_hint}" if tmdb_hint else ""),
+                tmdb_hint=(f"Metadata hint: {combined_hint}" if combined_hint else ""),
                 transcript="\n".join(_transcript_line(c) for c in cues),
                 observations="(unavailable: viewing-pass observations blocked)",
             )
             hit = gc.generate(stage="s2a:transcript", prompt=prompt, schema=ContextMap)
         cp.put("context_map", h, hit)
+    if series_bible is not None:
+        hit = reconcile_characters(hit, series_bible, cues)  # type: ignore[arg-type]
     return hit
-
 
 # --------------------------------------------------------------------- S2b
 
@@ -574,22 +598,33 @@ def _norm_fact(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
-def apply_video_facts(snap: Snapshot, context_map: ContextMap) -> None:
+def apply_video_facts(
+    snap: Snapshot,
+    context_map: ContextMap,
+    *,
+    unrevealed_facts: Sequence[str] = (),
+) -> None:
     """Copy the video's tone baseline, rating and the one-line persona of each
     character named in *snap* (``character_names``) onto the snapshot. The
     persona carries the voice's idiolect too: attitude (irreverent, profane)
     often lives there, and register/profanity choices depend on it."""
+    from .series_state import mask_spoiler_persona
+
     snap.tone_baseline = context_map.tone_baseline
     snap.rating = context_map.rating
     snap.personas = {}
     for ch in context_map.characters:
         if ch.id not in snap.character_names or not ch.persona.strip():
             continue
-        line = " ".join(ch.persona.split())
+        raw_persona = (
+            mask_spoiler_persona(ch.persona, unrevealed_facts)
+            if unrevealed_facts
+            else ch.persona
+        )
+        line = " ".join(raw_persona.split())
         if ch.voice.idiolect.strip():
             line += " | talks: " + " ".join(ch.voice.idiolect.split())
         snap.personas[ch.id] = line
-
 
 def materialize_snapshots(
     context_map: ContextMap,
@@ -685,9 +720,14 @@ def materialize_snapshots(
         snap.voice_cards = {
             ch.id: ch.voice for ch in context_map.characters if ch.id in present
         }
-        apply_video_facts(snap, context_map)
+        unrevealed_facts = [
+            tf.fact for tf in context_map.twist_facts if p(tf.audience_reveal_cue) >= first
+        ]
+        apply_video_facts(snap, context_map, unrevealed_facts=unrevealed_facts)
+        from .series_state import word_boundary_in
+
         scene_text = " ".join(text_by_id.get(cid, "") for cid in sc.cue_ids).lower()
-        snap.glossary = [g for g in context_map.glossary if g.en.lower() in scene_text]
+        snap.glossary = [g for g in context_map.glossary if word_boundary_in(g.en, scene_text)]
         snap.callbacks_live = [
             cb
             for cb in context_map.callbacks

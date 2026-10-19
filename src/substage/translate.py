@@ -2194,13 +2194,16 @@ def translate_video(
     exclude_video = memory.base_video_id(ws.video_id)
 
     def _callback_ko_for(scene: Scene) -> dict[str, str]:
-        """motif -> established Korean line, from already-translated setup cues."""
+        """motif -> established Korean line, from already-translated setup cues or locked series TM."""
         ko_by_id = {t.cue_id: t.ko for st in results.values() for t in st.cues}
         snap = snapshots.get(scene.id)
         if snap is None:
             return {}
         out: dict[str, str] = {}
         for cb in snap.callbacks_live:
+            if cb.note.startswith("LOCKED_SERIES_TM::"):
+                out[cb.motif] = cb.note.removeprefix("LOCKED_SERIES_TM::").replace("\n", " / ")
+                continue
             for cid in cb.setup_cues:
                 if ko_by_id.get(cid):
                     out[cb.motif] = ko_by_id[cid]

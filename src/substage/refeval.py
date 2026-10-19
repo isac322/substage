@@ -2168,3 +2168,293 @@ def run_paired_refeval(
 
 def default_out_dir(video_id: str) -> Path:
     return workspace(video_id).data_dir / "refeval"
+
+
+# ---------------------------------------------------------------- series consistency (SCS)
+
+
+def _norm_recap_ko(text: str) -> str:
+    from .series_state import _strip_recap_ko_header
+
+    s = _strip_recap_ko_header(text or "")
+    # Drop separate quoted OST/sign line when stacked with dialogue
+    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if len(lines) == 2:
+        q0 = bool(re.match(r"^[\"'“”‘’].*[\"'“”‘’]$", lines[0]))
+        q1 = bool(re.match(r"^[\"'“”‘’].*[\"'“”‘’]$", lines[1]))
+        if q0 and not q1:
+            lines = [lines[1]]
+        elif q1 and not q0:
+            lines = [lines[0]]
+    joined = " ".join(lines)
+    joined = re.sub(r"[^0-9a-zA-Z가-힣]+", "", joined)
+    return joined
+
+
+def evaluate_series_consistency(
+    episodes: Sequence[dict[str, Any]],
+    *,
+    tracked_concepts: Mapping[str, Sequence[str]] | None = None,
+    spoiler_probes: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compute the 5-axis Series Consistency Score (SCS, 0..100) across an ordered
+    list of episode records.
+
+    Each item in `episodes` contains:
+      - `ep_id`: str (e.g. 's01e01')
+      - `cues`: Sequence[Cue]
+      - `ko_lines`: Sequence[Line] or Mapping[str, str] (`cue_id -> ko`)
+      - `context_map`: Optional[ContextMap]
+      - `register_map`: Optional[RegisterMap]
+      - `pairs_by_cue`: Optional[Mapping[str, tuple[str, str]]]
+    """
+    import math
+    from collections.abc import Mapping
+    from .register import binary
+    from .series_state import (
+        _content_tokens,
+        _levenshtein,
+        _norm_en_utterance,
+        word_boundary_in,
+    )
+
+    # Normalize each episode's aligned (Cue, ko_text) pairs
+    ep_aligned: list[tuple[str, list[tuple[Cue, str]], ContextMap | None, RegisterMap | None, Mapping[str, tuple[str, str]]]] = []
+    for ep in episodes:
+        ep_id = str(ep["ep_id"])
+        cues: list[Cue] = list(ep["cues"])
+        raw_ko = ep["ko_lines"]
+        cm: ContextMap | None = ep.get("context_map")
+        rm: RegisterMap | None = ep.get("register_map")
+        pbc: Mapping[str, tuple[str, str]] = ep.get("pairs_by_cue") or {}
+        if isinstance(raw_ko, Mapping):
+            pairs = [(c, str(raw_ko.get(c.id, ""))) for c in cues if c.text.strip()]
+        else:
+            groups = align([c for c in cues if c.text.strip()], list(raw_ko), {})
+            pairs = []
+            for g in groups:
+                if g.en and g.official:
+                    ko_joined = "\n".join(ln.text for ln in g.official)
+                    for c in g.en:
+                        pairs.append((c, ko_joined))
+        ep_aligned.append((ep_id, pairs, cm, rm, pbc))
+
+    # 1. Axis 1: Entity & Concept Conditional Entropy H(T|E) and LTCR
+    concepts: dict[str, list[str]] = {}
+    if tracked_concepts:
+        for en_k, ko_forms in tracked_concepts.items():
+            concepts[en_k] = list(ko_forms)
+    else:
+        # Auto-collect recurring character & glossary English keys from context_maps
+        seen_en: Counter[str] = Counter()
+        ko_cands: dict[str, list[str]] = {}
+        for _ep_id, _pairs, cm, _rm, _pbc in ep_aligned:
+            if cm is None:
+                continue
+            for ch in cm.characters:
+                if ch.en_name and ch.ko_name:
+                    k = ch.en_name.strip()
+                    seen_en[k] += 1
+                    ko_cands.setdefault(k, []).append(ch.ko_name.strip())
+            for g in cm.glossary:
+                if g.en and g.ko:
+                    k = g.en.strip()
+                    seen_en[k] += 1
+                    ko_cands.setdefault(k, []).append(g.ko.strip())
+        for k, cands in ko_cands.items():
+            if seen_en[k] >= 2 or len(set(cands)) >= 1:
+                concepts[k] = list(dict.fromkeys(cands))
+
+    concept_metrics: dict[str, dict[str, Any]] = {}
+    ltcr_num = 0.0
+    ltcr_den = 0
+    entropies: list[float] = []
+    defects: list[dict[str, Any]] = []
+
+    for en_key, ko_forms in sorted(concepts.items()):
+        counts: Counter[str] = Counter()
+        occ_eps: dict[str, list[str]] = {}
+        # Sort forms longest first so full name matches before given/family name
+        ordered_forms = sorted(set(ko_forms), key=len, reverse=True)
+        for ep_id, pairs, cm, _rm, _pbc in ep_aligned:
+            for c, ko_txt in pairs:
+                if not word_boundary_in(en_key, c.text.lower()):
+                    continue
+                matched = None
+                for f in ordered_forms:
+                    if f and f in ko_txt:
+                        matched = f
+                        break
+                if matched is not None:
+                    counts[matched] += 1
+                    occ_eps.setdefault(matched, []).append(f"{ep_id}:{c.id}")
+            if not counts and cm is not None:
+                for ch in cm.characters:
+                    if ch.en_name.strip().lower() == en_key.lower() and ch.ko_name.strip():
+                        counts[ch.ko_name.strip()] += 1
+                        occ_eps.setdefault(ch.ko_name.strip(), []).append(f"{ep_id}:context_map")
+        total = sum(counts.values())
+        if total < 2:
+            continue
+        # Merge pure shortenings (e.g. '신다' inside '신다 캐닝', '퍼타키' inside '새즈 퍼타키')
+        clustered: Counter[str] = Counter(counts)
+        forms_desc = sorted(clustered.keys(), key=len, reverse=True)
+        for short_f in list(forms_desc):
+            for long_f in forms_desc:
+                if short_f != long_f and short_f in long_f.split():
+                    clustered[long_f] += clustered.pop(short_f, 0)
+                    break
+        dom = max(clustered.values())
+        ltcr = dom / total
+        h = -sum((cnt / total) * math.log2(cnt / total) for cnt in clustered.values() if cnt > 0)
+        ltcr_num += dom
+        ltcr_den += total
+        entropies.append(h)
+        concept_metrics[en_key] = {
+            "n": total,
+            "ltcr": round(ltcr, 4),
+            "entropy_bits": round(h, 4),
+            "forms": dict(counts),
+            "clustered_forms": dict(clustered),
+        }
+        if len(clustered) > 1:
+            defects.append({
+                "axis": "entity_or_concept_drift",
+                "key": en_key,
+                "forms": dict(clustered),
+                "locations": {k: v[:5] for k, v in occ_eps.items()},
+            })
+
+    axis1_ltcr = (ltcr_num / ltcr_den) if ltcr_den > 0 else 1.0
+    mean_entropy = (sum(entropies) / len(entropies)) if entropies else 0.0
+
+    # 2. Axis 2: Dyadic Register Stability (1 - DFR)
+    dyad_history: dict[str, list[tuple[str, str]]] = {}
+    for ep_id, pairs, _cm, rm, pbc in ep_aligned:
+        if rm is not None:
+            for e in rm.edges:
+                if e.speaker.startswith("ep:") or e.addressee.startswith("ep:"):
+                    continue
+                b_lvl = binary(e.level)
+                if b_lvl:
+                    dyad_history.setdefault(f"{e.speaker}>{e.addressee}", []).append((ep_id, b_lvl))
+        elif pbc:
+            for c, ko_txt in pairs:
+                pair = pbc.get(c.id)
+                if not pair:
+                    continue
+                lvls = [binary(lv) for lv in addressed_levels(ko_txt) if binary(lv)]
+                if lvls:
+                    dyad_history.setdefault(f"{pair[0]}>{pair[1]}", []).append((f"{ep_id}:{c.id}", lvls[-1]))  # type: ignore[arg-type]
+
+    dyad_flips = 0
+    dyad_transitions = 0
+    for pair_key, seq in sorted(dyad_history.items()):
+        if len(seq) < 2:
+            continue
+        for i in range(1, len(seq)):
+            dyad_transitions += 1
+            if seq[i][1] != seq[i - 1][1]:
+                dyad_flips += 1
+                defects.append({
+                    "axis": "dyad_register_flip",
+                    "pair": pair_key,
+                    "from": seq[i - 1],
+                    "to": seq[i],
+                })
+    axis2_register = 1.0 - (dyad_flips / dyad_transitions) if dyad_transitions > 0 else 1.0
+
+    # 3. Axis 3: Recap & High-Information Callback Consistency (1 - mean_NED)
+    prior_utts: dict[str, tuple[str, str, str, str | None]] = {}
+    recap_neds: list[float] = []
+    recap_flips = 0
+    for ep_id, pairs, _cm, _rm, _pbc in ep_aligned:
+        seen_in_ep: list[tuple[str, str, str, str, str | None]] = []
+        for c, ko_txt in pairs:
+            en_norm = _norm_en_utterance(c.text)
+            toks = _content_tokens(c.text)
+            is_recap = c.start_ms <= 95_000
+            if len(en_norm) < 15 or len(toks) < (3 if is_recap else 4):
+                continue
+            ko_clean = _norm_recap_ko(ko_txt)
+            if not ko_clean:
+                continue
+            lvls = [binary(lv) for lv in addressed_levels(ko_txt) if binary(lv)]
+            b_lvl = lvls[-1] if lvls else None
+            if en_norm in prior_utts and (is_recap or len(set(toks)) >= 4):
+                prev_ep, prev_raw_ko, prev_clean, prev_lvl = prior_utts[en_norm]
+                dist = _levenshtein(prev_clean, ko_clean)
+                ned = dist / max(len(prev_clean), len(ko_clean), 1)
+                recap_neds.append(ned)
+                if prev_lvl and b_lvl and prev_lvl != b_lvl:
+                    recap_flips += 1
+                if ned > 0.15 or (prev_lvl and b_lvl and prev_lvl != b_lvl):
+                    defects.append({
+                        "axis": "recap_or_callback_drift",
+                        "en": c.text,
+                        "from_ep": prev_ep,
+                        "to_ep": f"{ep_id}:{c.id}",
+                        "ko_prev": prev_raw_ko,
+                        "ko_curr": ko_txt,
+                        "ned": round(ned, 4),
+                    })
+            seen_in_ep.append((en_norm, f"{ep_id}:{c.id}", ko_txt, ko_clean, b_lvl))
+        for en_norm, loc, ko_txt, ko_clean, b_lvl in seen_in_ep:
+            prior_utts.setdefault(en_norm, (loc, ko_txt, ko_clean, b_lvl))
+
+    axis3_recap = 1.0 - (sum(recap_neds) / len(recap_neds)) if recap_neds else 1.0
+
+    # 4. Axis 4: Locked Term Compliance (1 - LTV)
+    axis4_ltv = 1.0 - (len([d for d in defects if d["axis"] == "entity_or_concept_drift"]) / max(len(concept_metrics), 1))
+
+    # 5. Axis 5: Causal Spoiler Non-Leakage (1 - Leak)
+    leaks = 0
+    total_checked = sum(len(p) for _, p, _, _, _ in ep_aligned) or 1
+    if spoiler_probes:
+        for probe in spoiler_probes:
+            reveal_ep = str(probe["reveal_ep"])
+            forbidden_ko = [str(x) for x in probe.get("forbidden_ko", ())]
+            for ep_id, pairs, _cm, _rm, _pbc in ep_aligned:
+                if ep_id >= reveal_ep:
+                    break
+                for c, ko_txt in pairs:
+                    if any(fk in ko_txt for fk in forbidden_ko):
+                        leaks += 1
+                        defects.append({
+                            "axis": "causal_spoiler_leak",
+                            "ep": f"{ep_id}:{c.id}",
+                            "reveal_ep": reveal_ep,
+                            "ko": ko_txt,
+                        })
+    axis5_spoiler = 1.0 - (leaks / total_checked)
+
+    scs = 100.0 * (
+        0.30 * axis1_ltcr
+        + 0.25 * axis2_register
+        + 0.20 * axis3_recap
+        + 0.15 * axis4_ltv
+        + 0.10 * axis5_spoiler
+    )
+    return {
+        "scs": round(scs, 2),
+        "axes": {
+            "entity_concept_ltcr": round(axis1_ltcr, 4),
+            "mean_entropy_bits": round(mean_entropy, 4),
+            "dyadic_register_stability": round(axis2_register, 4),
+            "recap_callback_stability": round(axis3_recap, 4),
+            "locked_term_compliance": round(axis4_ltv, 4),
+            "causal_spoiler_free": round(axis5_spoiler, 4),
+        },
+        "counts": {
+            "episodes": len(ep_aligned),
+            "tracked_concepts": len(concept_metrics),
+            "dyad_transitions": dyad_transitions,
+            "dyad_flips": dyad_flips,
+            "recap_callback_pairs": len(recap_neds),
+            "recap_speech_level_flips": recap_flips,
+            "spoiler_leaks": leaks,
+            "total_defects": len(defects),
+        },
+        "concepts": concept_metrics,
+        "defects": defects,
+    }

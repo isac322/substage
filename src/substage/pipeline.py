@@ -39,6 +39,8 @@ from . import acquire, layout, media, narrative, recheck, review, style, subs, t
 from . import emit as emit_mod
 from . import register as register_mod
 from . import scenes as scenes_mod
+from . import llm
+from . import series_state
 from .capability import Architecture, RoutePlan, resolve_route
 from .config import Workspace, load_secrets, load_settings, workspace
 from .emit import SidecarCue
@@ -886,6 +888,11 @@ def run(
     architecture: str | Architecture | None = None,
     route: str | Architecture | None = None,
     experiment_id: str | None = None,
+    series_id: str | None = None,
+    season: int | None = None,
+    episode: int | None = None,
+    series_bible: series_state.SeriesBible | None = None,
+    series_bible_path: Path | None = None,
 ) -> Path:
     video = Path(video)
     if not video.is_file():
@@ -988,10 +995,28 @@ def run(
     )
     _write_route_artifact(ws, route_metadata)
     ck = Checkpoints(ws, "pipeline")
+    ep_coord = (
+        series_state.parse_episode_coord(video_id, series_id=series_id, season=season, episode=episode)
+        if (series_id is not None or series_bible is not None or season is not None or episode is not None)
+        else None
+    )
+    effective_series_id = (
+        f"{ep_coord.series_id}__{arm}" if (ep_coord is not None and arm) else (ep_coord.series_id if ep_coord else None)
+    )
+    bible_file = series_bible_path or (
+        series_state.default_bible_path(effective_series_id) if effective_series_id else None
+    )
+    active_bible: series_state.SeriesBible | None = None
+    if series_bible is not None:
+        active_bible = series_bible.causal_slice(ep_coord.pair) if ep_coord is not None else series_bible
+    elif ep_coord is not None and bible_file is not None:
+        active_bible = series_state.load_bible(effective_series_id or ep_coord.series_id, before_ep=ep_coord.pair, path=bible_file)
+    bible_fp = active_bible.fingerprint() if active_bible is not None else ""
     # no-viewing runs must never share narrative checkpoints with viewing runs;
     # viewing runs keep their historical hashes (no marker) so caches stay valid
     view_tag: tuple[str, ...] = ("no-viewing",) if no_viewing else ()
-
+    if bible_fp:
+        view_tag = (*view_tag, f"bible:{bible_fp}")
     # ---- S0 ingest (+ cue extraction) ------------------------------------
     video = _ingest(ws, gc, ck, video, en_sub, title, year, media_id)
     cues = _load_cues(ck, video)
@@ -1026,7 +1051,12 @@ def run(
             ck,
             "observations",
             input_hash(
-                video, _Cues(items=cues), _Scenes(items=scenes), narrative._prompt("viewing.md"), settings.model_main
+                video,
+                _Cues(items=cues),
+                _Scenes(items=scenes),
+                narrative._prompt("viewing.md"),
+                settings.model_main,
+                *(([f"bible:{bible_fp}"]) if bible_fp else ()),
             ),
             _Observations,
             lambda: _Observations(
@@ -1037,6 +1067,7 @@ def run(
                     proxy,
                     cues,
                     scenes_mod.viewing_chunks(scenes, video.duration_ms, settings.viewing_chunk_ms),
+                    **({"series_bible": active_bible} if bible_fp else {}),
                 )
             ),
         ).items
@@ -1076,11 +1107,16 @@ def run(
         _context_map_hash(txt.settings, cues, observations, view_tag),
         ContextMap,
         ws.path("context_map.yaml"),
-        lambda: narrative.build_context_map(ws, txt, video, cues, observations),
+        lambda: narrative.build_context_map(
+            ws, txt, video, cues, observations,
+            **({"series_bible": active_bible} if bible_fp else {}),
+        ),
     )
+    if active_bible is not None and not active_bible.is_empty():
+        context_map = series_state.reconcile_characters(context_map, active_bible, cues)
+        save_model(ws.path("context_map.yaml"), context_map)
     if _stopped(stop_after, "context_map", ws):
         return ws.data_dir
-
     # ---- S2b timeline ------------------------------------------------------
     decisions_cfg = getattr(settings, "decisions_model", None)
     lean_decisions_pipeline = bool(
@@ -1108,14 +1144,27 @@ def run(
         return ws.data_dir
 
     # ---- S2r register table ------------------------------------------------
+    series_clef = (
+        llm.ClefDecisionsClient(ws, settings, review.resolve_decisions_model(decisions_cfg, has_images=False))
+        if decisions_cfg and active_bible is not None and not active_bible.is_empty()
+        else None
+    )
     register_map = _editable(
         ck,
         "register",
         _register_hash(txt.settings, context_map, cues, observations, view_tag),
         RegisterMap,
         ws.path("register.yaml"),
-        lambda: register_mod.build_register(ws, txt, video, context_map, cues, observations),
+        lambda: register_mod.build_register(
+            ws, txt, video, context_map, cues, observations,
+            **({"series_bible": active_bible, "clef_client": series_clef} if bible_fp else {}),
+        ),
     )
+    if active_bible is not None and not active_bible.is_empty():
+        register_map = series_state.lock_edges(
+            register_map, active_bible, context_map=context_map, cues=cues, clef_client=series_clef
+        )
+        save_model(ws.path("register.yaml"), register_map)
     register_observations = list(observations)
     if perception_ledger is not None:
         register_observations.extend(perception_ledger.cues.values())
@@ -1301,12 +1350,18 @@ def run(
         return ws.data_dir
 
     # ---- S4 review -----------------------------------------------------------
+    series_pins = (
+        series_state.pin_cues(cues, active_bible, context_map)
+        if active_bible is not None and not active_bible.is_empty()
+        else {}
+    )
     ko: dict[str, str] = {c.id: "" for c in cues}
     for st in translations.values():
         for tc in st.cues:
             ko[tc.cue_id] = tc.ko
+    if series_pins:
+        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
     lineage = validate.combine_lineage(list(translations.values()))
-    semantic_trace: list[dict] = []
     semantic_checked_ko = dict(ko)
     semantic_checked_fragments = {
         cid: [fragment.model_copy(deep=True) for fragment in fragments]
@@ -1457,10 +1512,17 @@ def run(
     if decisions_cfg and regen_raw:
         gate_model = review.resolve_decisions_model(decisions_cfg, has_images=False)
         gate_client = llm.ClefDecisionsClient(ws, settings, gate_model)
+        prot_forms = {
+            cid: [*pin.required_names.values(), *pin.required_terms.values()]
+            for cid, pin in series_pins.items()
+        } if series_pins else None
         regen_raw = review.filter_edits_with_decisions(
             ws, gate_client, list(regen_raw), cues_by_id, ko, levels=levels,
+            protected_forms=prot_forms,
         )
     ko, regen_edits = _apply_edits(ko, list(regen_raw), gate, "regen", allow_omission=lineage is not None)
+    if series_pins:
+        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
     semantic_stage("s4-regeneration")
     edits += finale_edits + regen_edits
     save_model(ws.path("edits.json"), edits)
@@ -1490,6 +1552,8 @@ def run(
         observations_by_cue=s5_observations,
         lineage=lineage,
     )
+    if series_pins:
+        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
     s5_written = {
         cid for cid, normalized in normalized_before_s5.items() if ko.get(cid) != normalized
     }
@@ -1643,5 +1707,68 @@ def run(
             "issues": [issue.model_dump(mode="json") for issue in issues],
         }
         _atomic_write(_sidecar, (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    if ep_coord is not None and (series_id is not None or series_bible is not None) and stop_after is None:
+        committed_bible = series_state.commit_bible(
+            active_bible,
+            ep_coord,
+            context_map,
+            register_map,
+            cues,
+            ko,
+            timeline=timeline,
+            pairs_by_cue=pairs_by_cue,
+        )
+        if bible_file is not None:
+            series_state.save_bible(committed_bible, path=bible_file)
+        save_model(ws.path("series_state.json"), committed_bible)
     _print_cost(gc)
     return srt
+
+
+def run_series(
+    episodes: list[dict[str, Any]],
+    *,
+    series_id: str,
+    series_bible_path: Path | None = None,
+    **common_kwargs: Any,
+) -> tuple[list[Path], series_state.SeriesBible]:
+    """Execute a multi-episode series with strict causal left-fold equivalence:
+
+        B_t = Φ(B_{t-1}, E_t),   B_0 = ∅
+
+    Episodes are sorted by `(season, episode)` coordinate and folded in causal
+    order so batch execution produces bit-for-bit identical `B_t` and Korean
+    subtitles to one-by-one streaming execution.
+    """
+    arm = common_kwargs.get("arm")
+    eff_sid = f"{series_id}__{arm}" if arm else series_id
+    bible_file = series_bible_path or series_state.default_bible_path(eff_sid)
+
+    def _coord_of(item: dict[str, Any], idx: int) -> series_state.EpisodeCoord:
+        vid = item.get("video_id") or Path(item["video"]).stem
+        c = series_state.parse_episode_coord(
+            vid,
+            series_id=series_id,
+            season=item.get("season"),
+            episode=item.get("episode"),
+        )
+        return c or series_state.EpisodeCoord(season=1, episode=idx + 1, series_id=series_id, video_id=vid)
+
+    ordered = sorted(
+        ((_coord_of(ep, i), ep) for i, ep in enumerate(episodes)),
+        key=lambda pair: pair[0].pair,
+    )
+    bible = series_state.load_bible(eff_sid, before_ep=ordered[0][0].pair if ordered else None, path=bible_file)
+    srts: list[Path] = []
+    for coord, ep_spec in ordered:
+        kw = {**common_kwargs, **ep_spec}
+        video_path = Path(kw.pop("video"))
+        kw["series_id"] = series_id
+        kw["season"] = coord.season
+        kw["episode"] = coord.episode
+        kw["series_bible"] = bible.causal_slice(coord.pair)
+        kw["series_bible_path"] = bible_file
+        srt = run(video_path, **kw)
+        srts.append(srt)
+        bible = series_state.load_bible(eff_sid, path=bible_file)
+    return srts, bible
