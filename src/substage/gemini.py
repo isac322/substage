@@ -249,10 +249,12 @@ def _seconds(v: float) -> str:
 
 
 def _retryable(exc: Exception) -> bool:
-    """429 (rate limit) and 5xx (server) are retried; other 4xx are not."""
+    """429 (rate limit), 5xx (server), and network/read timeouts are retried."""
     if isinstance(exc, errors.APIError):
         code = exc.code or 0
         return code == 429 or 500 <= code < 600
+    if isinstance(exc, (TimeoutError, OSError)) or "timeout" in type(exc).__name__.lower():
+        return True
     return False
 
 
@@ -592,7 +594,13 @@ class GeminiClient:
         max_output, upper_usd = _request_bound(use_model, self.settings, stage)
         level = (thinking_level or self.settings.thinking_level).upper()
         effective_tier = None if vertex_mode else self.settings.service_tier
+        live_http = (
+            types.HttpOptions(timeout=180_000)
+            if not self._injected and isinstance(active_client, _REAL_GENAI_CLIENT)
+            else None
+        )
         config = types.GenerateContentConfig(
+            http_options=live_http,
             response_mime_type="application/json",
             response_schema=_wire_schema(active_client, schema),
             candidate_count=1,
