@@ -393,6 +393,17 @@ def _strip_recap_ko_header(ko: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _normalize_hyphenated_ko_name(en_name: str, ko_name: str) -> str:
+    """Ensure hyphenated English given names (e.g. 'Charles-Haden Savage') keep spaces in Korean."""
+    en_words = (en_name or "").strip().split()
+    ko_words = (ko_name or "").strip().split()
+    if len(en_words) == 2 and "-" in en_words[0] and len(ko_words) == 2:
+        first_ko = ko_words[0]
+        if len(first_ko) >= 4:
+            return f"{first_ko[:2]} {first_ko[2:]} {ko_words[1]}"
+    return (ko_name or "").strip()
+
+
 def _split_ko_name_parts(ko_name: str) -> tuple[str, str]:
     """Return `(ko_short, ko_last)` from a Korean name string like `'찰스 헤이든 새비지'`."""
     parts = [p.strip() for p in re.split(r"[\s·-]+", (ko_name or "").strip()) if p.strip()]
@@ -401,7 +412,6 @@ def _split_ko_name_parts(ko_name: str) -> tuple[str, str]:
     if len(parts) == 1:
         return (parts[0], parts[0])
     return (parts[0], parts[-1])
-
 
 def mask_spoiler_persona(persona: str, unrevealed_facts: Sequence[str] = ()) -> str:
     """Strip plot-reveal clauses from a character persona string."""
@@ -743,13 +753,24 @@ def lock_edges(
                 edges_by_pair[pair] = edge.model_copy(update=updates)
             continue
 
-        # Binary flip proposed! Check if edge cites an explicit valid transition reason
+        # Binary flip proposed! Check if:
+        # (a) Prior dyad was a provisional first-encounter stranger ('stranger_civil')
+        #     and the new episode establishes a permanent bond (crew_buddy/partner/protege/enemy), OR
+        # (b) Edge cites an explicit valid transition reason in this episode.
+        valid_ev = [cid for cid in edge.evidence_cues if cid in cues_by_id]
+        is_stranger_graduation = (
+            (locked.lock == "provisional" or locked.relation == "stranger_civil")
+            and edge.relation in ("crew_buddy", "partner", "mentor", "protege", "enemy", "peer")
+            and edge.step in (2, 5, 6, 7, 10)
+            and len(valid_ev) >= 2
+        )
         has_explicit_shift = any(
             sh.reason in _VALID_CROSS_EP_SHIFT_REASONS and sh.until_cue is None
             for sh in edge.shifts
         )
-        valid_ev = [cid for cid in edge.evidence_cues if cid in cues_by_id]
-        if has_explicit_shift and len(valid_ev) >= 2 and clef_client is not None:
+        if is_stranger_graduation:
+            edges_by_pair[pair] = edge
+        elif has_explicit_shift and len(valid_ev) >= 2 and clef_client is not None:
             flip_candidates.append((pair, edge, locked))
         else:
             # Revert unlicensed cross-episode binary flip to locked baseline
@@ -761,7 +782,6 @@ def lock_edges(
                     "step": locked.step,
                 }
             )
-
     if flip_candidates and clef_client is not None:
         questions: dict[str, dict[str, Any]] = {}
         state_items: list[dict[str, Any]] = []
@@ -954,11 +974,11 @@ def _replace_fuzzy_ko_name(ko_text: str, target_ko_name: str) -> str:
                     stem = word[: -len(p)]
                     josa = p
                     break
-            max_dist = 1 if len(tp) <= 3 else 2
+            max_dist = 1 if len(tp) <= 2 else 2
             if (
                 len(stem) >= 2
                 and abs(len(stem) - len(tp)) <= 1
-                and stem[0] == tp[0]
+                and (stem[0] == tp[0] or (len(tp) >= 3 and stem[-1] == tp[-1]))
                 and _levenshtein(stem, tp) <= max_dist
             ):
                 return tp + josa
@@ -1042,6 +1062,29 @@ def enforce_event_pins(
     for ev in out_events:
         cids = list(getattr(ev, "cue_ids", ()) or ())
         ev_ko = str(getattr(ev, "ko", ""))
+        # If a multi-cue merged event contains a pinned recap/callback cue, unsplit it
+        if len(cids) >= 2 and any(
+            cid in pins
+            and pins[cid].tm_ko
+            and (pins[cid].is_recap or len(_norm_en_utterance(cues_by_id[cid].text)) >= 20)
+            for cid in cids
+            if cid in cues_by_id
+        ):
+            for cid in cids:
+                cue = cues_by_id.get(cid)
+                txt = enforced_ko.get(cid, "").strip()
+                if cue is not None and txt:
+                    updated.append(
+                        ev.model_copy(
+                            update={
+                                "start_ms": cue.start_ms,
+                                "end_ms": cue.end_ms,
+                                "ko": txt,
+                                "cue_ids": [cid],
+                            }
+                        )
+                    )
+            continue
         if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
@@ -1121,7 +1164,11 @@ def commit_bible(
 
         existing = _match_bible_entity(ch, b)
         cid = existing.char_id if existing else ch.id
-        ko_short, ko_last = _split_ko_name_parts(existing.ko_name if existing else ch.ko_name)
+        norm_ko_name = _normalize_hyphenated_ko_name(
+            existing.en_name if existing else ch.en_name,
+            existing.ko_name if existing else ch.ko_name,
+        )
+        ko_short, ko_last = _split_ko_name_parts(norm_ko_name)
         n_cues = cue_counts.get(ch.id, 0) + cue_counts.get(cid, 0)
         if existing is not None:
             eps_seen = list(dict.fromkeys([*existing.episodes_seen, ep]))
@@ -1129,11 +1176,14 @@ def commit_bible(
                 dict.fromkeys(
                     a
                     for a in [*existing.aliases, *ch.aliases, ch.en_name]
-                    if a and a not in (cid, existing.ko_name)
+                    if a and a not in (cid, norm_ko_name)
                 )
             )
             b.entities[cid] = existing.model_copy(
                 update={
+                    "ko_name": norm_ko_name,
+                    "ko_short": ko_short,
+                    "ko_last": ko_last,
                     "aliases": aliases,
                     "lock": "hard",
                     "episodes_seen": eps_seen,
@@ -1146,7 +1196,7 @@ def commit_bible(
                 char_id=cid,
                 en_name=ch.en_name,
                 aliases=list(dict.fromkeys(a for a in ch.aliases if a)),
-                ko_name=ch.ko_name,
+                ko_name=norm_ko_name,
                 ko_short=ko_short,
                 ko_last=ko_last,
                 lock=lock,
@@ -1185,6 +1235,11 @@ def commit_bible(
                 }
             )
         else:
+            is_provisional_stranger = (
+                edge.relation == "stranger_civil"
+                or (edge.history == "met_as_adults" and edge.step in (8, 9))
+                or len(edge.evidence_cues) < 2
+            )
             b.dyads[pair_key] = DyadRecord(
                 speaker=edge.speaker,
                 addressee=edge.addressee,
@@ -1196,7 +1251,7 @@ def commit_bible(
                 level=end_level,
                 pronoun=edge.pronoun,
                 vocative=edge.vocative,
-                lock="hard" if len(edge.evidence_cues) >= 2 else "provisional",
+                lock="provisional" if is_provisional_stranger else "hard",
                 first_seen=ep,
                 last_updated=ep,
                 episodes_seen=[ep],

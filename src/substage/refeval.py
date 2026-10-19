@@ -2231,18 +2231,29 @@ def evaluate_series_consistency(
             pairs = [(c, str(raw_ko.get(c.id, ""))) for c in cues if (c.text or c.raw).strip()]
         else:
             ko_list = list(raw_ko)
-            has_an8 = any(ln.text.startswith("{\\an8}") for ln in ko_list)
+            ost_cues = [c for c in cues if c.id.startswith("ost-") and (c.text or c.raw).strip()]
+            main_cues = [c for c in cues if not c.id.startswith("ost-") and (c.text or c.raw).strip()]
             pairs = []
-            if has_an8:
-                main_cues = [c for c in cues if not c.id.startswith("ost-") and (c.text or c.raw).strip()]
-                ost_cues = [c for c in cues if c.id.startswith("ost-") and (c.text or c.raw).strip()]
-                main_ko = [ln for ln in ko_list if not ln.text.startswith("{\\an8}")]
-                ost_ko = [ln for ln in ko_list if ln.text.startswith("{\\an8}")]
+            if ost_cues:
+                def _is_ost_line(ln: Line) -> bool:
+                    if ln.text.startswith("{\\an8}"):
+                        return True
+                    return any(
+                        abs(ln.start_ms - oc.start_ms) <= 250 and abs(ln.end_ms - oc.end_ms) <= 350
+                        for oc in ost_cues
+                    )
+
+                ost_ko = [ln for ln in ko_list if _is_ost_line(ln)]
+                main_ko = [ln for ln in ko_list if not _is_ost_line(ln)]
                 for g in align(main_cues, main_ko, {}):
                     if g.en and g.official:
-                        ko_joined = "\n".join(ln.text for ln in g.official)
-                        for c in g.en:
-                            pairs.append((c, ko_joined))
+                        if len(g.en) == len(g.official) > 1:
+                            for c, ln in zip(g.en, g.official):
+                                pairs.append((c, ln.text))
+                        else:
+                            ko_joined = "\n".join(ln.text for ln in g.official)
+                            for c in g.en:
+                                pairs.append((c, ko_joined))
                 for g in align(ost_cues, ost_ko, {}):
                     if g.en and g.official:
                         ko_joined = "\n".join(ln.text.removeprefix("{\\an8}") for ln in g.official)
@@ -2252,9 +2263,13 @@ def evaluate_series_consistency(
             else:
                 for g in align([c for c in cues if (c.text or c.raw).strip()], ko_list, {}):
                     if g.en and g.official:
-                        ko_joined = "\n".join(ln.text for ln in g.official)
-                        for c in g.en:
-                            pairs.append((c, ko_joined))
+                        if len(g.en) == len(g.official) > 1:
+                            for c, ln in zip(g.en, g.official):
+                                pairs.append((c, ln.text))
+                        else:
+                            ko_joined = "\n".join(ln.text for ln in g.official)
+                            for c in g.en:
+                                pairs.append((c, ko_joined))
         ep_aligned.append((ep_id, pairs, cm, rm, pbc))
 
     # 1. Axis 1: Entity & Concept Conditional Entropy H(T|E) and LTCR
@@ -2347,7 +2362,7 @@ def evaluate_series_consistency(
     mean_entropy = (sum(entropies) / len(entropies)) if entropies else 0.0
 
     # 2. Axis 2: Dyadic Register Stability (1 - DFR)
-    dyad_history: dict[str, list[tuple[str, str, str]]] = {}
+    dyad_history: dict[str, list[tuple[str, str, str, str]]] = {}
     for ep_id, pairs, _cm, rm, pbc in ep_aligned:
         cues_in_ep = {c.id for c, _ in pairs}
         if rm is not None:
@@ -2363,7 +2378,7 @@ def evaluate_series_consistency(
                 open_shifts = [sh for sh in e.shifts if sh.until_cue is None and sh.at_cue in cues_in_ep]
                 b_exit = binary(open_shifts[-1].level) if open_shifts else b_entry
                 if b_entry and b_exit:
-                    dyad_history.setdefault(f"{e.speaker}>{e.addressee}", []).append((ep_id, b_entry, b_exit))
+                    dyad_history.setdefault(f"{e.speaker}>{e.addressee}", []).append((ep_id, b_entry, b_exit, e.relation))
         elif pbc:
             for c, ko_txt in pairs:
                 pair = pbc.get(c.id)
@@ -2372,7 +2387,7 @@ def evaluate_series_consistency(
                 lvls = [binary(lv) for lv in addressed_levels(ko_txt) if binary(lv)]
                 if lvls:
                     b_lv = lvls[-1]
-                    dyad_history.setdefault(f"{pair[0]}>{pair[1]}", []).append((f"{ep_id}:{c.id}", b_lv, b_lv))  # type: ignore[arg-type]
+                    dyad_history.setdefault(f"{pair[0]}>{pair[1]}", []).append((f"{ep_id}:{c.id}", b_lv, b_lv, "peer"))  # type: ignore[arg-type]
 
     dyad_flips = 0
     dyad_transitions = 0
@@ -2381,8 +2396,18 @@ def evaluate_series_consistency(
             continue
         for i in range(1, len(seq)):
             dyad_transitions += 1
-            prev_ep, _prev_entry, prev_exit = seq[i - 1]
-            curr_ep, curr_entry, _curr_exit = seq[i]
+            prev_ep, _prev_entry, prev_exit, prev_rel = seq[i - 1]
+            curr_ep, curr_entry, _curr_exit, curr_rel = seq[i]
+            # One-time graduation from first-encounter 'stranger_civil' (J) to permanent crew/partner (B)
+            if (
+                i == 1
+                and prev_exit == "J"
+                and curr_entry == "B"
+                and prev_rel in ("stranger_civil", "peer")
+                and curr_rel in ("crew_buddy", "partner", "mentor", "protege", "enemy", "peer")
+                and all(x[1] == "B" for x in seq[i:])
+            ):
+                continue
             if curr_entry != prev_exit:
                 dyad_flips += 1
                 defects.append({
