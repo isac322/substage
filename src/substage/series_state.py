@@ -1129,6 +1129,7 @@ def enforce_event_pins(
                     tm_parts.append(t_str)
             if tm_parts:
                 ev_ko = "\n".join(tm_parts)
+        if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
             cue = cues_by_id.get(cid)
