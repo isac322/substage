@@ -1072,30 +1072,18 @@ def enforce_event_pins(
     for ev in out_events:
         cids = list(getattr(ev, "cue_ids", ()) or ())
         ev_ko = str(getattr(ev, "ko", ""))
-        # If a multi-cue merged event contains a pinned recap TM cue, unsplit with 85ms gap
-        if len(cids) >= 2 and any(
+        # If a multi-cue merged event is a recap span where every cue matches prior TM, restore the joined TM
+        if len(cids) >= 2 and all(
             cid in pins and pins[cid].tm_ko and pins[cid].is_recap and cid in cues_by_id
             for cid in cids
         ):
-            parts_ok = []
-            for idx_c, cid in enumerate(cids):
-                c_obj = cues_by_id.get(cid)
-                t_str = enforced_ko.get(cid, "").strip()
-                if c_obj is None or not t_str:
-                    parts_ok = []
-                    break
-                nxt_c = cues_by_id.get(cids[idx_c + 1]) if idx_c + 1 < len(cids) else None
-                end_t = (
-                    min(c_obj.end_ms, max(c_obj.start_ms + 500, nxt_c.start_ms - 85))
-                    if nxt_c is not None
-                    else c_obj.end_ms
-                )
-                parts_ok.append(
-                    ev.model_copy(update={"start_ms": c_obj.start_ms, "end_ms": end_t, "ko": t_str, "cue_ids": [cid]})
-                )
-            if parts_ok and len({p.ko for p in parts_ok}) == len(parts_ok):
-                updated.extend(parts_ok)
-                continue
+            tm_parts = []
+            for cid in cids:
+                t_str = _strip_recap_ko_header(pins[cid].tm_ko or "")
+                if t_str and t_str not in tm_parts:
+                    tm_parts.append(t_str)
+            if tm_parts:
+                ev_ko = "\n".join(tm_parts)
         if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]

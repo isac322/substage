@@ -2250,10 +2250,6 @@ def evaluate_series_consistency(
                         if len(g.en) == len(g.official) > 1:
                             for c, ln in zip(g.en, g.official):
                                 pairs.append((c, ln.text))
-                        elif len(g.en) == 2 and len(g.official) == 1 and len(g.official[0].text.splitlines()) == 2:
-                            lns = g.official[0].text.splitlines()
-                            pairs.append((g.en[0], lns[0]))
-                            pairs.append((g.en[1], lns[1]))
                         else:
                             ko_joined = "\n".join(ln.text for ln in g.official)
                             for c in g.en:
