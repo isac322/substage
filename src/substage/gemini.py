@@ -249,12 +249,10 @@ def _seconds(v: float) -> str:
 
 
 def _retryable(exc: Exception) -> bool:
-    """429 (rate limit), 5xx (server), and network/read timeouts are retried."""
+    """429 (rate limit) and 5xx (server) are retried; other 4xx are not."""
     if isinstance(exc, errors.APIError):
         code = exc.code or 0
         return code == 429 or 500 <= code < 600
-    if isinstance(exc, (TimeoutError, OSError)) or "timeout" in type(exc).__name__.lower():
-        return True
     return False
 
 
