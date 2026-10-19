@@ -1096,6 +1096,7 @@ def enforce_event_pins(
             if parts_ok and len({p.ko for p in parts_ok}) == len(parts_ok):
                 updated.extend(parts_ok)
                 continue
+        if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
             cue = cues_by_id.get(cid)
