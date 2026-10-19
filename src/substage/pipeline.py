@@ -1595,6 +1595,8 @@ def run(
     if pic_edits:
         ko = _apply_picture_edits(ko, pic_edits, settings, {c.id: c for c in cues}, lineage=lineage)
         save_model(ws.path("edits.json"), edits)
+    if series_pins:
+        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
     semantic_stage("c7-picture-output")
     issues = [
         issue for cue in cues for issue in validate.check(
@@ -1636,6 +1638,13 @@ def run(
         ),
     )
     events = layout_result.items
+    if series_pins:
+        events = series_state.enforce_event_pins(
+            events, cues, ko, active_bible, series_pins, context_map=context_map
+        )
+        for ev in events:
+            if len(ev.cue_ids) == 1 and ev.cue_ids[0] in ko:
+                ko[ev.cue_ids[0]] = ev.ko.removeprefix("{\\an8}")
     if lineage is not None:
         semantic_trace.append({
             "stage": "s5c-layout", "kind": "actual-display-events",

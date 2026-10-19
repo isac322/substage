@@ -2230,13 +2230,31 @@ def evaluate_series_consistency(
         if isinstance(raw_ko, Mapping):
             pairs = [(c, str(raw_ko.get(c.id, ""))) for c in cues if (c.text or c.raw).strip()]
         else:
-            groups = align([c for c in cues if (c.text or c.raw).strip()], list(raw_ko), {})
+            ko_list = list(raw_ko)
+            has_an8 = any(ln.text.startswith("{\\an8}") for ln in ko_list)
             pairs = []
-            for g in groups:
-                if g.en and g.official:
-                    ko_joined = "\n".join(ln.text for ln in g.official)
-                    for c in g.en:
-                        pairs.append((c, ko_joined))
+            if has_an8:
+                main_cues = [c for c in cues if not c.id.startswith("ost-") and (c.text or c.raw).strip()]
+                ost_cues = [c for c in cues if c.id.startswith("ost-") and (c.text or c.raw).strip()]
+                main_ko = [ln for ln in ko_list if not ln.text.startswith("{\\an8}")]
+                ost_ko = [ln for ln in ko_list if ln.text.startswith("{\\an8}")]
+                for g in align(main_cues, main_ko, {}):
+                    if g.en and g.official:
+                        ko_joined = "\n".join(ln.text for ln in g.official)
+                        for c in g.en:
+                            pairs.append((c, ko_joined))
+                for g in align(ost_cues, ost_ko, {}):
+                    if g.en and g.official:
+                        ko_joined = "\n".join(ln.text.removeprefix("{\\an8}") for ln in g.official)
+                        for c in g.en:
+                            pairs.append((c, ko_joined))
+                pairs.sort(key=lambda pair: (pair[0].start_ms, pair[0].id))
+            else:
+                for g in align([c for c in cues if (c.text or c.raw).strip()], ko_list, {}):
+                    if g.en and g.official:
+                        ko_joined = "\n".join(ln.text for ln in g.official)
+                        for c in g.en:
+                            pairs.append((c, ko_joined))
         ep_aligned.append((ep_id, pairs, cm, rm, pbc))
 
     # 1. Axis 1: Entity & Concept Conditional Entropy H(T|E) and LTCR
@@ -2382,6 +2400,11 @@ def evaluate_series_consistency(
     for ep_id, pairs, _cm, _rm, _pbc in ep_aligned:
         seen_in_ep: list[tuple[str, str, str, str, str | None]] = []
         for c, ko_txt in pairs:
+            if c.lyric or re.search(
+                r"\b(?:theme\s+song|music|song|noise)\s+(?:playing|continues|stops)\b",
+                c.text.lower(),
+            ):
+                continue
             en_norm = _norm_en_utterance(c.text)
             toks = _content_tokens(c.text)
             is_recap = c.start_ms <= 95_000

@@ -64,7 +64,7 @@ _STOPWORDS = frozenset({
 })
 
 _RECAP_HEADER_RE = re.compile(
-    r"^(?:[\"'“”‘’\s-]*(?:previously\s+on[^.?!:\n]*[.?!:\n]+|지난\s*이야기[^\"\n]*[\"'”’\s/:\n-]+))+",
+    r"^(?:[\"'“”‘’\s-]*(?:previously\s+on[^.?!:\n]*[.?!:\n]+|(?:지난|전편)\s*(?:이야기|줄거리)[^\"\n]*[\"'”’\s/:\n-]+))+",
     re.IGNORECASE,
 )
 
@@ -388,7 +388,7 @@ def _content_tokens(text: str) -> list[str]:
 def _strip_recap_ko_header(ko: str) -> str:
     s = _RECAP_HEADER_RE.sub("", (ko or "").strip())
     lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
-    if len(lines) >= 2 and re.match(r"^[\"'“”‘’]*지난\s*이야기", lines[0]):
+    while len(lines) >= 2 and re.match(r"^[\"'“”‘’]*(?:지난|전편)\s*(?:이야기|줄거리)", lines[0]):
         lines = lines[1:]
     return "\n".join(lines).strip()
 
@@ -880,7 +880,7 @@ def pin_cues(
         matched_tm: TMRecord | None = None
         if en_norm and len(en_norm) >= 10 and en_norm in tm_by_norm:
             cand = tm_by_norm[en_norm]
-            if is_recap or c.id.startswith("ost-") or len(c_toks) >= 4:
+            if is_recap or c.id.startswith("ost-") or len(c_toks) >= 3:
                 matched_tm = cand
         if matched_tm is None and is_recap and len(c_tok_set) >= 3:
             best_j = 0.0
@@ -911,7 +911,9 @@ def pin_cues(
         for g in bible.glossary.values():
             if word_boundary_in(g.en, en_lower):
                 req_terms[g.en] = g.ko
-
+        for slot in bible.anon_slots.values():
+            if not slot.revealed_as and word_boundary_in(slot.en_label, en_lower):
+                req_terms[slot.en_label] = slot.ko_label
         if matched_tm is not None or req_names or req_terms:
             pins[c.id] = CuePin(
                 cue_id=c.id,
@@ -926,15 +928,24 @@ def pin_cues(
 
 
 def _replace_fuzzy_ko_name(ko_text: str, target_ko_name: str) -> str:
-    """Replace near-homophone Hangul tokens (syllable edit distance <= 2) with `target_ko_name`."""
-    if not ko_text or not target_ko_name or target_ko_name in ko_text:
+    """Replace near-homophone or unspaced Hangul tokens with `target_ko_name`."""
+    if not ko_text or not target_ko_name:
         return ko_text
     target_parts = [p for p in target_ko_name.split() if len(p) >= 2]
     out = ko_text
+    if len(target_parts) >= 2:
+        joined_2 = "".join(target_parts[:2])
+        spaced_2 = " ".join(target_parts[:2])
+        if joined_2 in out:
+            out = out.replace(joined_2, spaced_2)
+        joined_all = "".join(target_parts)
+        if joined_all in out:
+            out = out.replace(joined_all, " ".join(target_parts))
+    if target_ko_name in out:
+        return out
     for tp in target_parts:
         if tp in out:
             continue
-        # Scan Hangul tokens in `out`, stripping trailing Korean particles
         def _sub_tok(m: re.Match[str]) -> str:
             word = m.group(0)
             stem, josa = word, ""
@@ -994,15 +1005,72 @@ def enforce_series_pins(
         for _en_name, locked_ko in pin.required_names.items():
             curr = _replace_fuzzy_ko_name(curr, locked_ko)
 
-        # 3. Locked glossary term enforcement (fuzzy stem or literal calque replacement)
+        # 3. Locked glossary & anon-slot term enforcement
         for en_term, locked_ko in pin.required_terms.items():
             if locked_ko and locked_ko not in curr:
                 curr = _replace_fuzzy_ko_name(curr, locked_ko)
-                if locked_ko not in curr and en_term.lower() == "heaven" and "천국" in curr:
+                norm_term = _HYPHEN_NORM_RE.sub("-", en_term.lower())
+                if norm_term == "heaven" and "천국" in curr:
                     curr = curr.replace("천국", locked_ko)
+                elif norm_term == "tie-dye guy":
+                    for syn in ("홀치기염색 남", "홀치기 염색 남", "타이다이 가이", "타이다이 남", "타이다이 사람"):
+                        if syn in curr and syn != locked_ko:
+                            curr = curr.replace(syn, locked_ko)
 
         out[cid] = curr
     return out
+
+
+def enforce_event_pins(
+    events: Sequence[Any],
+    cues: Sequence[Cue],
+    ko: Mapping[str, str],
+    bible: SeriesBible | None,
+    pins: Mapping[str, CuePin] | None = None,
+    *,
+    context_map: ContextMap | None = None,
+) -> list[Any]:
+    """Ensure S5c layout condensation/merging does not overwrite pinned series cues or names."""
+    out_events = list(events)
+    if bible is None or bible.is_empty() or not out_events:
+        return out_events
+    pins = pins if pins is not None else pin_cues(cues, bible, context_map)
+    cues_by_id = {c.id: c for c in cues}
+    enforced_ko = enforce_series_pins(ko, cues, bible, pins, context_map=context_map)
+
+    updated: list[Any] = []
+    for ev in out_events:
+        cids = list(getattr(ev, "cue_ids", ()) or ())
+        ev_ko = str(getattr(ev, "ko", ""))
+        if len(cids) == 1 and cids[0] in pins:
+            cid = cids[0]
+            pin = pins[cid]
+            cue = cues_by_id.get(cid)
+            if pin.tm_ko and cue is not None and (
+                pin.is_recap or cid.startswith("ost-") or len(_norm_en_utterance(cue.text)) >= 20
+            ):
+                target = enforced_ko.get(cid, "").strip()
+                if target:
+                    prefix = "{\\an8}" if ev_ko.startswith("{\\an8}") and not target.startswith("{\\an8}") else ""
+                    ev_ko = prefix + target
+        for cid in cids:
+            pin = pins.get(cid)
+            if pin is None:
+                continue
+            for _en_name, locked_ko in pin.required_names.items():
+                ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
+            for en_term, locked_ko in pin.required_terms.items():
+                if locked_ko and locked_ko not in ev_ko:
+                    ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
+                    norm_term = _HYPHEN_NORM_RE.sub("-", en_term.lower())
+                    if norm_term == "tie-dye guy":
+                        for syn in ("홀치기염색 남", "홀치기 염색 남", "타이다이 가이", "타이다이 남", "타이다이 사람"):
+                            if syn in ev_ko and syn != locked_ko:
+                                ev_ko = ev_ko.replace(syn, locked_ko)
+        if ev_ko != getattr(ev, "ko", ""):
+            ev = ev.model_copy(update={"ko": ev_ko})
+        updated.append(ev)
+    return updated
 
 
 # --------------------------------------------------------- pure left-fold commit Φ
