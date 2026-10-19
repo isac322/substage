@@ -2442,8 +2442,13 @@ def evaluate_series_consistency(
             b_lvl = lvls[-1] if lvls else None
             if en_norm in prior_utts and (is_recap or len(set(toks)) >= 4):
                 prev_ep, prev_raw_ko, prev_clean, prev_lvl = prior_utts[en_norm]
-                dist = _levenshtein(prev_clean, ko_clean)
-                ned = dist / max(len(prev_clean), len(ko_clean), 1)
+                prev_sub_cleans = [_norm_recap_ko(ln) for ln in prev_raw_ko.splitlines() if _norm_recap_ko(ln)]
+                curr_sub_cleans = [_norm_recap_ko(ln) for ln in ko_txt.splitlines() if _norm_recap_ko(ln)]
+                if ko_clean in prev_sub_cleans or prev_clean in curr_sub_cleans:
+                    ned = 0.0
+                else:
+                    dist = _levenshtein(prev_clean, ko_clean)
+                    ned = dist / max(len(prev_clean), len(ko_clean), 1)
                 recap_neds.append(ned)
                 if prev_lvl and b_lvl and prev_lvl != b_lvl:
                     recap_flips += 1

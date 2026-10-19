@@ -1122,12 +1122,18 @@ def enforce_event_pins(
         cids = list(getattr(ev, "cue_ids", ()) or ())
         ev_ko = str(getattr(ev, "ko", ""))
         # If a multi-cue merged event is a recap span where every cue matches prior TM, restore the joined TM
-        if len(cids) == 2 and all(
+        if len(cids) == 2 and any(
             cid in pins and pins[cid].tm_ko and pins[cid].is_recap and cid in cues_by_id
             for cid in cids
-        ):
-            t0 = _strip_recap_ko_header(pins[cids[0]].tm_ko or "")
-            t1 = _strip_recap_ko_header(pins[cids[1]].tm_ko or "")
+        ) and all(cid in cues_by_id for cid in cids):
+            t0 = _strip_recap_ko_header(
+                (pins[cids[0]].tm_ko if cids[0] in pins and pins[cids[0]].tm_ko else None)
+                or enforced_ko.get(cids[0], "")
+            )
+            t1 = _strip_recap_ko_header(
+                (pins[cids[1]].tm_ko if cids[1] in pins and pins[cids[1]].tm_ko else None)
+                or enforced_ko.get(cids[1], "")
+            )
             if t0 and t1 and t0 != t1:
                 c0_obj, c1_obj = cues_by_id[cids[0]], cues_by_id[cids[1]]
                 updated.append(
