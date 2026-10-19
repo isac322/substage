@@ -344,8 +344,7 @@ def assert_causal_integrity(bible: SeriesBible, current_ep: tuple[int, int]) -> 
 
 def default_bible_path(series_id: str) -> Path:
     slug = re.sub(r"[^a-z0-9_-]+", "-", series_id.strip().lower()).strip("-") or "series"
-    return config.data_dir() / f"_series_{slug}" / "series_state.json"
-
+    return config.workspace(f"_series_{slug}").data_dir / "series_state.json"
 
 def load_bible(
     series_id: str,
@@ -879,9 +878,9 @@ def pin_cues(
         c_tok_set = set(c_toks)
 
         matched_tm: TMRecord | None = None
-        if en_norm and len(en_norm) >= 12 and en_norm in tm_by_norm:
+        if en_norm and len(en_norm) >= 10 and en_norm in tm_by_norm:
             cand = tm_by_norm[en_norm]
-            if is_recap or len(c_toks) >= 4:
+            if is_recap or c.id.startswith("ost-") or len(c_toks) >= 4:
                 matched_tm = cand
         if matched_tm is None and is_recap and len(c_tok_set) >= 3:
             best_j = 0.0
@@ -979,8 +978,8 @@ def enforce_series_pins(
         if cue is None or not curr.strip():
             continue
 
-        # 1. Opening recap exact TM restoration (preserving '지난 이야기' header if present)
-        if pin.is_recap and pin.tm_ko:
+        # 1. Opening recap, recurring OST title/sign, or exact verbatim callback TM restoration
+        if pin.tm_ko and (pin.is_recap or cid.startswith("ost-") or len(_norm_en_utterance(cue.text)) >= 22):
             has_recap_hdr = bool(re.search(r"지난\s*이야기|전편\s*줄거리", curr)) or (
                 "previously on" in cue.text.lower()
             )
@@ -994,6 +993,13 @@ def enforce_series_pins(
         # 2. Fuzzy Hangul name stabilization (e.g. 레반도스키/레반다우스키 -> 레반도프스키, 신디 -> 신다)
         for _en_name, locked_ko in pin.required_names.items():
             curr = _replace_fuzzy_ko_name(curr, locked_ko)
+
+        # 3. Locked glossary term enforcement (fuzzy stem or literal calque replacement)
+        for en_term, locked_ko in pin.required_terms.items():
+            if locked_ko and locked_ko not in curr:
+                curr = _replace_fuzzy_ko_name(curr, locked_ko)
+                if locked_ko not in curr and en_term.lower() == "heaven" and "천국" in curr:
+                    curr = curr.replace("천국", locked_ko)
 
         out[cid] = curr
     return out
@@ -1085,7 +1091,12 @@ def commit_bible(
 
     # 2. Fold Dyad Registers (including open-ended shifts that persist at episode end)
     for edge in register_map.edges:
-        if edge.speaker.startswith("ep:") or edge.addressee.startswith("ep:"):
+        if (
+            edge.speaker.startswith("ep:")
+            or edge.addressee.startswith("ep:")
+            or edge.speaker == "group"
+            or edge.addressee == "group"
+        ):
             continue
         pair_key = f"{edge.speaker}>{edge.addressee}"
         open_shifts = [sh for sh in edge.shifts if sh.until_cue is None and sh.at_cue in cues_by_id]
@@ -1145,14 +1156,16 @@ def commit_bible(
     # 4. Fold Episodic Translation Memory (TM)
     existing_tm_keys = {(tuple(r.ep_coord), r.cue_id) for r in b.tm}
     for c in cues:
-        if c.id.startswith("ost-") or c.lyric:
+        if c.lyric:
             continue
         ko_txt = _strip_recap_ko_header(ko.get(c.id, ""))
         if not ko_txt or not re.search(r"[가-힣]", ko_txt):
             continue
         en_norm = _norm_en_utterance(c.text)
         c_toks = _content_tokens(c.text)
-        if len(c_toks) < 3 or len(en_norm) < 12:
+        min_toks = 2 if c.id.startswith("ost-") else 3
+        min_len = 8 if c.id.startswith("ost-") else 12
+        if len(c_toks) < min_toks or len(en_norm) < min_len:
             continue
         if (ep, c.id) in existing_tm_keys:
             continue

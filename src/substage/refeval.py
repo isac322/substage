@@ -2228,9 +2228,9 @@ def evaluate_series_consistency(
         rm: RegisterMap | None = ep.get("register_map")
         pbc: Mapping[str, tuple[str, str]] = ep.get("pairs_by_cue") or {}
         if isinstance(raw_ko, Mapping):
-            pairs = [(c, str(raw_ko.get(c.id, ""))) for c in cues if c.text.strip()]
+            pairs = [(c, str(raw_ko.get(c.id, ""))) for c in cues if (c.text or c.raw).strip()]
         else:
-            groups = align([c for c in cues if c.text.strip()], list(raw_ko), {})
+            groups = align([c for c in cues if (c.text or c.raw).strip()], list(raw_ko), {})
             pairs = []
             for g in groups:
                 if g.en and g.official:
@@ -2278,7 +2278,7 @@ def evaluate_series_consistency(
         ordered_forms = sorted(set(ko_forms), key=len, reverse=True)
         for ep_id, pairs, cm, _rm, _pbc in ep_aligned:
             for c, ko_txt in pairs:
-                if not word_boundary_in(en_key, c.text.lower()):
+                if not word_boundary_in(en_key, f"{c.text} {c.raw}".lower()):
                     continue
                 matched = None
                 for f in ordered_forms:
@@ -2329,23 +2329,32 @@ def evaluate_series_consistency(
     mean_entropy = (sum(entropies) / len(entropies)) if entropies else 0.0
 
     # 2. Axis 2: Dyadic Register Stability (1 - DFR)
-    dyad_history: dict[str, list[tuple[str, str]]] = {}
+    dyad_history: dict[str, list[tuple[str, str, str]]] = {}
     for ep_id, pairs, _cm, rm, pbc in ep_aligned:
+        cues_in_ep = {c.id for c, _ in pairs}
         if rm is not None:
             for e in rm.edges:
-                if e.speaker.startswith("ep:") or e.addressee.startswith("ep:"):
+                if (
+                    e.speaker.startswith("ep:")
+                    or e.addressee.startswith("ep:")
+                    or e.speaker == "group"
+                    or e.addressee == "group"
+                ):
                     continue
-                b_lvl = binary(e.level)
-                if b_lvl:
-                    dyad_history.setdefault(f"{e.speaker}>{e.addressee}", []).append((ep_id, b_lvl))
+                b_entry = binary(e.level)
+                open_shifts = [sh for sh in e.shifts if sh.until_cue is None and sh.at_cue in cues_in_ep]
+                b_exit = binary(open_shifts[-1].level) if open_shifts else b_entry
+                if b_entry and b_exit:
+                    dyad_history.setdefault(f"{e.speaker}>{e.addressee}", []).append((ep_id, b_entry, b_exit))
         elif pbc:
             for c, ko_txt in pairs:
                 pair = pbc.get(c.id)
-                if not pair:
+                if not pair or "group" in pair:
                     continue
                 lvls = [binary(lv) for lv in addressed_levels(ko_txt) if binary(lv)]
                 if lvls:
-                    dyad_history.setdefault(f"{pair[0]}>{pair[1]}", []).append((f"{ep_id}:{c.id}", lvls[-1]))  # type: ignore[arg-type]
+                    b_lv = lvls[-1]
+                    dyad_history.setdefault(f"{pair[0]}>{pair[1]}", []).append((f"{ep_id}:{c.id}", b_lv, b_lv))  # type: ignore[arg-type]
 
     dyad_flips = 0
     dyad_transitions = 0
@@ -2354,13 +2363,15 @@ def evaluate_series_consistency(
             continue
         for i in range(1, len(seq)):
             dyad_transitions += 1
-            if seq[i][1] != seq[i - 1][1]:
+            prev_ep, _prev_entry, prev_exit = seq[i - 1]
+            curr_ep, curr_entry, _curr_exit = seq[i]
+            if curr_entry != prev_exit:
                 dyad_flips += 1
                 defects.append({
                     "axis": "dyad_register_flip",
                     "pair": pair_key,
-                    "from": seq[i - 1],
-                    "to": seq[i],
+                    "from": (prev_ep, prev_exit),
+                    "to": (curr_ep, curr_entry),
                 })
     axis2_register = 1.0 - (dyad_flips / dyad_transitions) if dyad_transitions > 0 else 1.0
 
