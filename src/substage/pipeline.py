@@ -1357,7 +1357,7 @@ def run(
     # ---- S4 review -----------------------------------------------------------
     series_pins = (
         series_state.pin_cues(cues, active_bible, context_map)
-        if active_bible is not None and not active_bible.is_empty()
+        if (ep_coord is not None or (active_bible is not None and not active_bible.is_empty()))
         else {}
     )
     ko: dict[str, str] = {c.id: "" for c in cues}

@@ -855,18 +855,17 @@ def pin_cues(
     bible: SeriesBible | None,
     context_map: ContextMap | None = None,
 ) -> dict[str, CuePin]:
-    """Build deterministic per-cue pins from `bible` (TM recaps/callbacks, names, glossary)."""
-    if bible is None or bible.is_empty():
+    """Build deterministic per-cue pins from `bible` + `context_map` (TM recaps/callbacks, names, glossary)."""
+    if (bible is None or bible.is_empty()) and context_map is None:
         return {}
 
     tm_by_norm: dict[str, TMRecord] = {}
     tm_by_toks: list[tuple[set[str], TMRecord]] = []
-    for r in bible.tm:
+    for r in (bible.tm if bible is not None else ()):
         if r.en_norm and r.ko.strip():
             tm_by_norm.setdefault(r.en_norm, r)
             if len(r.content_tokens) >= 3:
                 tm_by_toks.append((set(r.content_tokens), r))
-
     in_recap_window = False
     recap_cutoff_ms = 95_000
     for c in cues:
@@ -905,7 +904,7 @@ def pin_cues(
 
         en_lower = c.text.lower()
         req_names: dict[str, str] = {}
-        for ent in bible.entities.values():
+        for ent in (bible.entities.values() if bible is not None else ()):
             if word_boundary_in(ent.en_name, en_lower):
                 req_names[ent.en_name] = ent.ko_name
             else:
@@ -915,14 +914,28 @@ def pin_cues(
                         req_names[en_parts[0]] = ent.ko_short
                     if ent.ko_last and word_boundary_in(en_parts[-1], en_lower):
                         req_names[en_parts[-1]] = ent.ko_last
+        if context_map is not None:
+            for ch in context_map.characters:
+                if _ANON_MONIKER_RE.search(ch.en_name or ch.id):
+                    continue
+                norm_ko = _normalize_hyphenated_ko_name(ch.en_name, ch.ko_name)
+                if word_boundary_in(ch.en_name, en_lower):
+                    req_names.setdefault(ch.en_name, norm_ko)
 
         req_terms: dict[str, str] = {}
-        for g in bible.glossary.values():
+        for g in (bible.glossary.values() if bible is not None else ()):
             if word_boundary_in(g.en, en_lower):
                 req_terms[g.en] = g.ko
-        for slot in bible.anon_slots.values():
+        for slot in (bible.anon_slots.values() if bible is not None else ()):
             if not slot.revealed_as and word_boundary_in(slot.en_label, en_lower):
                 req_terms[slot.en_label] = slot.ko_label
+        if context_map is not None:
+            for ch in context_map.characters:
+                if _ANON_MONIKER_RE.search(ch.en_name or ch.id) and word_boundary_in(ch.en_name, en_lower):
+                    req_terms.setdefault(ch.en_name, ch.ko_name)
+            for g in context_map.glossary:
+                if word_boundary_in(g.en, en_lower):
+                    req_terms.setdefault(g.en, g.ko)
         if matched_tm is not None or req_names or req_terms:
             pins[c.id] = CuePin(
                 cue_id=c.id,
@@ -986,11 +999,10 @@ def enforce_series_pins(
 ) -> dict[str, str]:
     """Deterministically enforce recap TM matches, locked character names, and glossary terms."""
     out = dict(ko)
-    if bible is None or bible.is_empty():
-        return out
     pins = pins if pins is not None else pin_cues(cues, bible, context_map)
+    if not pins:
+        return out
     cues_by_id = {c.id: c for c in cues}
-
     for cid, pin in pins.items():
         curr = out.get(cid, "")
         cue = cues_by_id.get(cid)
@@ -1042,12 +1054,13 @@ def enforce_event_pins(
 ) -> list[Any]:
     """Ensure S5c layout condensation/merging does not overwrite pinned series cues or names."""
     out_events = list(events)
-    if bible is None or bible.is_empty() or not out_events:
+    if not out_events:
         return out_events
     pins = pins if pins is not None else pin_cues(cues, bible, context_map)
+    if not pins:
+        return out_events
     cues_by_id = {c.id: c for c in cues}
     enforced_ko = enforce_series_pins(ko, cues, bible, pins, context_map=context_map)
-
     updated: list[Any] = []
     for ev in out_events:
         cids = list(getattr(ev, "cue_ids", ()) or ())
