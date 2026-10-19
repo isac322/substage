@@ -431,14 +431,18 @@ def mask_spoiler_persona(persona: str, unrevealed_facts: Sequence[str] = ()) -> 
     return cleaned or persona.split(",")[0].strip()
 
 
+_HYPHEN_NORM_RE = re.compile(r"[\u2010-\u2015\u2212-]+")
+
+
 def word_boundary_in(term_en: str, text_lower: str) -> bool:
     """True when `term_en` appears in `text_lower` on word boundaries (with optional plural `s`/`'s`)."""
-    t = term_en.strip().lower()
+    t = _HYPHEN_NORM_RE.sub("-", term_en.strip().lower())
     if not t:
         return False
-    escaped = re.escape(t)
+    s = _HYPHEN_NORM_RE.sub("-", text_lower.lower())
+    escaped = re.escape(t).replace(r"\-", r"[-\s]+")
     pat = rf"(?<![a-z0-9]){escaped}(?:'s|s)?(?![a-z0-9])"
-    return bool(re.search(pat, text_lower))
+    return bool(re.search(pat, s))
 
 
 def _levenshtein(a: str, b: str) -> int:
