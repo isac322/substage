@@ -1056,7 +1056,6 @@ def run(
                 _Scenes(items=scenes),
                 narrative._prompt("viewing.md"),
                 settings.model_main,
-                *(([f"bible:{bible_fp}"]) if bible_fp else ()),
             ),
             _Observations,
             lambda: _Observations(
@@ -1067,7 +1066,6 @@ def run(
                     proxy,
                     cues,
                     scenes_mod.viewing_chunks(scenes, video.duration_ms, settings.viewing_chunk_ms),
-                    **({"series_bible": active_bible} if bible_fp else {}),
                 )
             ),
         ).items
