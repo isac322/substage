@@ -2669,7 +2669,7 @@ def evaluate_series_consistency(
         dialogue = [
             (c, ko_txt) for c, ko_txt in pairs
             if not c.lyric and not re.search(
-                r"\b(?:theme\s+song|music|song|noise)\s+(?:playing|continues|stops)\b",
+                r"\b(?:theme\s+song|music|song|noise)\s+(?:playing|plays|continues|stops)\b",
                 c.text.lower(),
             )
         ]
@@ -2726,28 +2726,34 @@ def evaluate_series_consistency(
             if prev_norm is None:
                 continue
             prev_ep, prev_raw_ko, prev_clean, prev_lvl, _, _ = prior_utts[prev_norm]
+            prev_lvls = [binary(lv) for lv in addressed_levels(prev_raw_ko) if binary(lv)]
             if target is not None:
                 prev_raw_ko = target[1]
                 prev_clean = _norm_recap_ko(prev_raw_ko)
                 prev_lvls = [binary(lv) for lv in addressed_levels(prev_raw_ko) if binary(lv)]
                 prev_lvl = prev_lvls[-1] if prev_lvls else None
             ko_clean = _norm_recap_ko(ko_txt)
+            if not ko_clean:
+                continue
             lvls = [binary(lv) for lv in addressed_levels(ko_txt) if binary(lv)]
             b_lvl = lvls[-1] if lvls else None
             prev_sub_cleans = [_norm_recap_ko(ln) for ln in prev_raw_ko.splitlines() if _norm_recap_ko(ln)]
             curr_sub_cleans = [_norm_recap_ko(ln) for ln in ko_txt.splitlines() if _norm_recap_ko(ln)]
+            shared_sub_lines = [s for s in (set(prev_sub_cleans) & set(curr_sub_cleans)) if len(s) >= 5]
             if (
                 ko_clean in prev_sub_cleans
                 or prev_clean in curr_sub_cleans
+                or bool(shared_sub_lines)
                 or (min(len(prev_clean), len(ko_clean)) >= 4 and (prev_clean in ko_clean or ko_clean in prev_clean))
             ):
                 ned = 0.0
             else:
                 ned = _levenshtein(prev_clean, ko_clean) / max(len(prev_clean), len(ko_clean), 1)
             recap_neds.append(ned)
-            if prev_lvl and b_lvl and prev_lvl != b_lvl:
+            lvl_mismatch = bool(prev_lvls and lvls and not (set(prev_lvls) & set(lvls)))
+            if lvl_mismatch:
                 recap_flips += 1
-            if ned > 0.15 or (prev_lvl and b_lvl and prev_lvl != b_lvl):
+            if ned > 0.15 or lvl_mismatch:
                 defects.append({
                     "axis": "recap_or_callback_drift",
                     "en": c.text,

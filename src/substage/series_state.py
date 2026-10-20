@@ -1105,14 +1105,16 @@ def enforce_series_pins(
                 else:
                     curr = clean_tm
 
-        # 2. Fuzzy Hangul name stabilization (e.g. 레반도스키/레반다우스키 -> 레반도프스키, 신디 -> 신다, 우르술라 -> 어설라)
-        for en_name, locked_ko in pin.required_names.items():
-            curr = _replace_fuzzy_ko_name(curr, locked_ko)
-            if en_name.lower() == "ursula" and locked_ko:
-                for syn in ("우르술라", "어슐라", "어설라"):
-                    if syn in curr and syn != locked_ko:
-                        curr = curr.replace(syn, locked_ko)
-
+        # 2. Fuzzy Hangul name stabilization (skip when restoring verbatim recap TM except 칼라닉->캘러닉)
+        if not (pin.is_recap and pin.tm_ko):
+            for en_name, locked_ko in pin.required_names.items():
+                curr = _replace_fuzzy_ko_name(curr, locked_ko)
+                if en_name.lower() == "ursula" and locked_ko:
+                    for syn in ("우르술라", "어슐라", "어설라"):
+                        if syn in curr and syn != locked_ko:
+                            curr = curr.replace(syn, locked_ko)
+        elif "칼라닉" in curr:
+            curr = curr.replace("칼라닉", "캘러닉")
         # 3. Locked glossary & anon-slot term enforcement
         for en_term, locked_ko in pin.required_terms.items():
             if locked_ko and locked_ko not in curr:
@@ -1253,6 +1255,8 @@ def enforce_event_pins(
                 continue
             if t0:
                 ev_ko = t0
+            elif t1:
+                ev_ko = t1
         if len(cids) == 1 and cids[0] in pins:
             cid = cids[0]
             pin = pins[cid]
@@ -1268,12 +1272,15 @@ def enforce_event_pins(
             pin = pins.get(cid)
             if pin is None:
                 continue
-            for en_name, locked_ko in pin.required_names.items():
-                ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
-                if en_name.lower() == "ursula" and locked_ko:
-                    for syn in ("우르술라", "어슐라", "어설라"):
-                        if syn in ev_ko and syn != locked_ko:
-                            ev_ko = ev_ko.replace(syn, locked_ko)
+            if not (pin.is_recap and pin.tm_ko):
+                for en_name, locked_ko in pin.required_names.items():
+                    ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
+                    if en_name.lower() == "ursula" and locked_ko:
+                        for syn in ("우르술라", "어슐라", "어설라"):
+                            if syn in ev_ko and syn != locked_ko:
+                                ev_ko = ev_ko.replace(syn, locked_ko)
+            elif "칼라닉" in ev_ko:
+                ev_ko = ev_ko.replace("칼라닉", "캘러닉")
             for en_term, locked_ko in pin.required_terms.items():
                 if locked_ko and locked_ko not in ev_ko:
                     ev_ko = _replace_fuzzy_ko_name(ev_ko, locked_ko)
@@ -1483,10 +1490,18 @@ def commit_bible(
         str(getattr(ev, "ko", "")).removeprefix("{\\an8}")
         for ev in events
     }
-    displayed_ko = {
-        c.id: _strip_recap_ko_header(ev_by_cids.get((c.id,), ko.get(c.id, "")))
-        for c in cues
-    }
+    ev_by_member: dict[str, str] = {}
+    for cids_tup, ev_txt in ev_by_cids.items():
+        for m_cid in cids_tup:
+            ev_by_member.setdefault(m_cid, ev_txt)
+    has_kalanick = any("캘러닉" in ch.ko_name for ch in context_map.characters)
+    displayed_ko: dict[str, str] = {}
+    for c in cues:
+        raw_disp = ev_by_cids.get((c.id,)) or ko.get(c.id, "") or ev_by_member.get(c.id, "")
+        clean_disp = _strip_recap_ko_header(raw_disp)
+        if has_kalanick and "칼라닉" in clean_disp:
+            clean_disp = clean_disp.replace("칼라닉", "캘러닉")
+        displayed_ko[c.id] = clean_disp
     for c in cues:
         if c.lyric:
             continue
