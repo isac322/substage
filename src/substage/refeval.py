@@ -2320,7 +2320,12 @@ def evaluate_pragmatic_address(
                 elif (is_upward or (edge and pair[1] != "group" and edge.pronoun == "none")) and not is_hostile:
                     bad = "upward_or_mixed_neohui"
             elif _PARA_NER_RE.search(ko_txt) and not is_multi_turn:
-                if (edge and pair[1] != "group" and (edge.relation in _PARA_UPWARD_KIN_RELATIONS or edge.apparent_generation == "addressee_older")) or ko_is_polite:
+                if (
+                    edge
+                    and pair[1] != "group"
+                    and edge.relation != "partner"
+                    and (edge.relation in _PARA_UPWARD_KIN_RELATIONS or edge.apparent_generation == "addressee_older")
+                ) or ko_is_polite:
                     bad = "upward_ner"
             elif _PARA_DANGSIN_RE.search(ko_txt) and is_no_dangsin:
                 bad = "civil_dangsin"
@@ -2632,7 +2637,11 @@ def evaluate_series_consistency(
                 prev_ep, prev_raw_ko, prev_clean, prev_lvl = prior_utts[en_norm]
                 prev_sub_cleans = [_norm_recap_ko(ln) for ln in prev_raw_ko.splitlines() if _norm_recap_ko(ln)]
                 curr_sub_cleans = [_norm_recap_ko(ln) for ln in ko_txt.splitlines() if _norm_recap_ko(ln)]
-                if ko_clean in prev_sub_cleans or prev_clean in curr_sub_cleans:
+                if (
+                    ko_clean in prev_sub_cleans
+                    or prev_clean in curr_sub_cleans
+                    or (min(len(prev_clean), len(ko_clean)) >= 8 and (prev_clean in ko_clean or ko_clean in prev_clean))
+                ):
                     ned = 0.0
                 else:
                     dist = _levenshtein(prev_clean, ko_clean)

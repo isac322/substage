@@ -1213,15 +1213,22 @@ def enforce_event_pins(
             ev = ev.model_copy(update={"ko": ev_ko})
         updated.append(ev)
     if register_map is not None:
-        for index, event in enumerate(updated):
-            event_ko = str(getattr(event, "ko", ""))
-            for cid in getattr(event, "cue_ids", ()) or ():
-                event_ko = register_mod.enforce_pragmatic_address(
-                    {cid: event_ko}, cues, register_map, context_map=context_map,
-                    observations=observations, scenes=scenes,
-                ).get(cid, event_ko)
-            if event_ko != getattr(event, "ko", ""):
-                updated[index] = event.model_copy(update={"ko": event_ko})
+        ev_ko_map: dict[str, str] = {}
+        for event in updated:
+            cids = list(getattr(event, "cue_ids", ()) or ())
+            if cids:
+                ev_ko_map[cids[0]] = str(getattr(event, "ko", ""))
+        if ev_ko_map:
+            fixed_ev_ko = register_mod.enforce_pragmatic_address(
+                ev_ko_map, cues, register_map, context_map=context_map,
+                observations=observations, scenes=scenes,
+            )
+            for index, event in enumerate(updated):
+                cids = list(getattr(event, "cue_ids", ()) or ())
+                if cids and cids[0] in fixed_ev_ko:
+                    new_ko = fixed_ev_ko[cids[0]]
+                    if new_ko != getattr(event, "ko", ""):
+                        updated[index] = event.model_copy(update={"ko": new_ko})
     return updated
 
 
