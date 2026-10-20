@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from . import config
+from . import config, register as register_mod
 from .levels import addressed_levels, speaker_turns
 from .models import (
     Callback,
@@ -996,12 +996,13 @@ def enforce_series_pins(
     pins: Mapping[str, CuePin] | None = None,
     *,
     context_map: ContextMap | None = None,
+    register_map: RegisterMap | None = None,
+    observations: Sequence[Any] = (),
+    scenes: Sequence[Any] = (),
 ) -> dict[str, str]:
     """Deterministically enforce recap TM matches, locked character names, and glossary terms."""
     out = dict(ko)
     pins = pins if pins is not None else pin_cues(cues, bible, context_map)
-    if not pins:
-        return out
     cues_by_id = {c.id: c for c in cues}
     for cid, pin in pins.items():
         curr = out.get(cid, "")
@@ -1051,6 +1052,10 @@ def enforce_series_pins(
                         curr,
                     )
         out[cid] = curr
+    if register_map is not None:
+        out = register_mod.enforce_pragmatic_address(
+            out, cues, register_map, context_map=context_map, observations=observations, scenes=scenes,
+        )
     return out
 
 
@@ -1062,16 +1067,22 @@ def enforce_event_pins(
     pins: Mapping[str, CuePin] | None = None,
     *,
     context_map: ContextMap | None = None,
+    register_map: RegisterMap | None = None,
+    observations: Sequence[Any] = (),
+    scenes: Sequence[Any] = (),
 ) -> list[Any]:
     """Ensure S5c layout condensation/merging does not overwrite pinned series cues or names."""
     out_events = list(events)
     if not out_events:
         return out_events
     pins = pins if pins is not None else pin_cues(cues, bible, context_map)
-    if not pins:
+    if not pins and register_map is None:
         return out_events
     cues_by_id = {c.id: c for c in cues}
-    enforced_ko = enforce_series_pins(ko, cues, bible, pins, context_map=context_map)
+    enforced_ko = enforce_series_pins(
+        ko, cues, bible, pins, context_map=context_map, register_map=register_map,
+        observations=observations, scenes=scenes,
+    )
     # Pre-pass: align 2-cue + 1-cue recap spans when TM grouped them as 1-cue + 2-cue
     realigned: list[Any] = []
     idx_ev = 0
@@ -1201,6 +1212,16 @@ def enforce_event_pins(
         if ev_ko != getattr(ev, "ko", ""):
             ev = ev.model_copy(update={"ko": ev_ko})
         updated.append(ev)
+    if register_map is not None:
+        for index, event in enumerate(updated):
+            event_ko = str(getattr(event, "ko", ""))
+            for cid in getattr(event, "cue_ids", ()) or ():
+                event_ko = register_mod.enforce_pragmatic_address(
+                    {cid: event_ko}, cues, register_map, context_map=context_map,
+                    observations=observations, scenes=scenes,
+                ).get(cid, event_ko)
+            if event_ko != getattr(event, "ko", ""):
+                updated[index] = event.model_copy(update={"ko": event_ko})
     return updated
 
 

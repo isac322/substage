@@ -49,7 +49,7 @@ import random
 import re
 import statistics
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,7 +62,7 @@ from .config import Settings, Workspace, load_settings, workspace
 from .evaluate import _en_text, arm_srt, evaluation_metadata, mmss, numeric_deltas, shuffle_labels
 from .levels import DASHES, addressed_levels, ending_level, jongseong, strip_bidi
 from .llm import ClefDecisionsClient
-from .models import Cue, ContextMap, RegisterMap, Scene
+from .models import ChunkObservations, Cue, CueObservation, ContextMap, RegisterMap, Scene
 from .style import PRO_SUBTITLE_LAWS
 from .store import Checkpoints, input_hash, load_model, load_models
 from .validate import cps_chars
@@ -2170,6 +2170,185 @@ def default_out_dir(video_id: str) -> Path:
     return workspace(video_id).data_dir / "refeval"
 
 
+# ---------------------------------------------------------------- pragmatic address (PARA / GRA)
+
+
+_PARA_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"|‘[^’]*’|“[^”]*”")
+_PARA_NEOHUI_RE = re.compile(r"(?<![가-힣])(너희|너네|니들|니네)(?:들)?(?=[은는이가을를도만에게한테의와과랑이나]|\s|$|[^가-힣])")
+_PARA_COLLECTIVE_POSS_RE = re.compile(
+    r"(?<![가-힣])(너희|너네|니네)\s*(아빠|엄마|아버지|어머니|부모님|집|가족|형|누나|오빠|언니|동생|할머니|할아버지)"
+)
+_PARA_DANGSIN_RE = re.compile(r"(?<![가-힣])(당신)(?:들)?(?=[은는이가을를도만에게한테의와과랑이나]|\s|$|[^가-힣])")
+_PARA_NER_RE = re.compile(r"(?<![가-힣])(너|네가|니가|널|넌)(?=[은는이가을를도만에게한테의와과랑이나]|\s|$|[^가-힣])")
+_PARA_HOSTILE_EN_RE = re.compile(
+    r"\b(fuck|fucking|motherfucker|motherfuckers|screw|screwed|asshole|bastard|bitch|rodents|limp\s+dick|crush|sue|sued|kill|vultures|traitor)\b",
+    re.I,
+)
+_PARA_VOCATIVE_KIN_EN_RE = re.compile(r"(?:^|[,?!\s])(mom|dad|mother|father|parents)(?=[,?!\s]|$)", re.I)
+_PARA_POSS_BEFORE_KIN_RE = re.compile(r"\b(your|my|his|her|their|our|a|the)\s+(mom|dad|mother|father|parents)\b", re.I)
+_PARA_UPWARD_KIN_RELATIONS = frozenset({"own_parent", "elder_kin", "surrogate_parent"})
+_PARA_UPWARD_CIVIL_RELATIONS = frozenset({"own_parent", "elder_kin", "surrogate_parent", "mentor", "subordinate", "kid_to_adult"})
+_PARA_NO_DANGSIN_CIVIL_RELATIONS = frozenset({"own_parent", "elder_kin", "surrogate_parent", "mentor", "protege", "subordinate"})
+
+
+def evaluate_pragmatic_address(
+    cues: Sequence[Cue],
+    ko_lines: Sequence[Line] | Mapping[str, str],
+    *,
+    context_map: ContextMap | None = None,
+    register_map: RegisterMap | None = None,
+    observations: Sequence[ChunkObservations | CueObservation] = (),
+    scenes: Sequence[Scene] = (),
+    ep_id: str = "",
+) -> dict[str, Any]:
+    """Score pragmatic pronoun use and parent-address graph coverage per aligned turn."""
+    from . import register as register_mod
+
+    non_ost_cues = [c for c in cues if not c.id.startswith("ost-") and c.source != "ost"]
+    if isinstance(ko_lines, Mapping):
+        groups_iter = [([c], ko_lines.get(c.id, "")) for c in non_ost_cues]
+    else:
+        groups_iter = [
+            (g.en, " ".join(ln.text for ln in g.official))
+            for g in align(non_ost_cues, list(ko_lines), {})
+        ]
+    edges = {
+        (e.speaker, e.addressee): e
+        for e in (register_map.edges if register_map else ())
+    }
+    pairs = (
+        register_mod.cue_pairs(context_map, non_ost_cues, observations)
+        if context_map is not None else {}
+    )
+    obs_by_cid = {
+        co.cue_id: co
+        for ch in observations for co in getattr(ch, "cues", [ch])
+        if hasattr(co, "cue_id")
+    }
+    scene_of = {cid: scene.id for scene in scenes for cid in scene.cue_ids}
+    scene_speakers = {
+        scene.id: {
+            participant for cid in scene.cue_ids
+            for participant in pairs.get(cid, ()) if participant != "group"
+        }
+        for scene in scenes
+    }
+    n_risk = 0
+    n_viol = 0
+    gra_triggers = 0
+    gra_satisfied = 0
+    viols: list[dict[str, Any]] = []
+    by_kind: Counter[str] = Counter()
+    known_parent_chars = {
+        ch.id for ch in (context_map.characters if context_map else ())
+        if any(a.lower() in ("mom", "dad", "mother", "father") for a in ch.aliases)
+    }
+    for c_list, raw_ko in groups_iter:
+        if not c_list:
+            continue
+        ko_txt = _PARA_QUOTED_RE.sub("", raw_ko)
+        is_multi_turn = ("-" in raw_ko) or (len(c_list) > 1)
+        c = c_list[0]
+        en_txt = " ".join(x.text for x in c_list)
+        pair = pairs.get(c.id)
+        edge = edges.get(pair) if pair else None
+        co = obs_by_cid.get(c.id)
+        sc_id = scene_of.get(c.id, "")
+        sc_participants = scene_speakers.get(sc_id, set())
+        spk = pair[0] if pair else None
+
+        has_voc_kin = bool(_PARA_VOCATIVE_KIN_EN_RE.search(en_txt)) and not bool(_PARA_POSS_BEFORE_KIN_RE.search(en_txt))
+        if has_voc_kin and spk and (known_parent_chars & sc_participants):
+            gra_triggers += 1
+            if any(
+                (spk, o) in edges and edges[(spk, o)].relation in _PARA_UPWARD_KIN_RELATIONS and edges[(spk, o)].pronoun == "none"
+                for o in (known_parent_chars & sc_participants)
+            ):
+                gra_satisfied += 1
+
+        en_has_2p = bool(re.search(r"\b(you|your|yours|yourself|yourselves)\b", en_txt, re.I))
+        en_has_plural_2p = bool(re.search(r"\b(you guys|you all|all of you|you two|both of you)\b", en_txt, re.I))
+        en_is_two_only = bool(re.search(r"\b(you two|both of you)\b", en_txt, re.I))
+        is_hostile = (
+            bool(_PARA_HOSTILE_EN_RE.search(en_txt))
+            or bool(re.search(r"(새끼|개새끼|하이에나|병신|자식)", ko_txt))
+            or bool(edge and edge.stance in ("open_enmity", "contempt_from_power"))
+        )
+        has_kin_upward_in_scene = any(
+            (spk, other) in edges and edges[(spk, other)].relation in _PARA_UPWARD_KIN_RELATIONS
+            for other in sc_participants if other != "group"
+        ) if spk else False
+        has_upward_in_scene = any(
+            (spk, other) in edges and (
+                edges[(spk, other)].relation in _PARA_UPWARD_CIVIL_RELATIONS
+                or edges[(spk, other)].apparent_generation == "addressee_older"
+                or edges[(spk, other)].level in ("haeyo", "hasipsio")
+            )
+            for other in sc_participants if other != "group"
+        ) if spk else False
+        has_hae_peer_in_scene = any(
+            (spk, other) in edges and edges[(spk, other)].level == "hae" and edges[(spk, other)].pronoun == "너"
+            for other in sc_participants if other != "group"
+        ) if spk else False
+        if en_is_two_only and has_hae_peer_in_scene and not has_kin_upward_in_scene:
+            has_upward_in_scene = False
+
+        ko_lvls = [level for level in addressed_levels(ko_txt) if level]
+        ko_is_polite = any(level in ("haeyo", "hasipsio") for level in ko_lvls) and not is_multi_turn
+        is_upward = (
+            (edge and pair[1] != "group" and (edge.relation in _PARA_UPWARD_CIVIL_RELATIONS or edge.apparent_generation == "addressee_older" or edge.level in ("haeyo", "hasipsio")))
+            or (en_has_plural_2p and has_upward_in_scene)
+            or has_voc_kin
+            or ko_is_polite
+        )
+        is_no_dangsin = bool(
+            (edge and edge.relation in _PARA_NO_DANGSIN_CIVIL_RELATIONS and edge.stance == "civil" and not is_hostile)
+            or (pair and pair[1] == "group" and edge and edge.relation == "group" and not is_hostile and "당신도 그렇게" in ko_txt)
+        )
+        is_audience = bool(
+            (co and co.addressee in ("audience", "press", "crowd", "viewers", "viewer"))
+            or (co and (co.speaker or "").lower() == "narrator")
+            or (pair and pair[1] == "group" and not en_is_two_only and not is_hostile and has_upward_in_scene)
+        )
+        if en_has_2p and (is_upward or is_no_dangsin or is_audience):
+            n_risk += 1
+            ko_for_neohui = _PARA_COLLECTIVE_POSS_RE.sub("", ko_txt) if (edge and edge.relation == "peer" and edge.level == "hae") else ko_txt
+            bad = None
+            if _PARA_NEOHUI_RE.search(ko_for_neohui):
+                if is_audience:
+                    bad = "audience_neohui"
+                elif (is_upward or (edge and pair[1] != "group" and edge.pronoun == "none")) and not is_hostile:
+                    bad = "upward_or_mixed_neohui"
+            elif _PARA_NER_RE.search(ko_txt) and not is_multi_turn:
+                if (edge and pair[1] != "group" and (edge.relation in _PARA_UPWARD_KIN_RELATIONS or edge.apparent_generation == "addressee_older")) or ko_is_polite:
+                    bad = "upward_ner"
+            elif _PARA_DANGSIN_RE.search(ko_txt) and is_no_dangsin:
+                bad = "civil_dangsin"
+            if bad:
+                n_viol += 1
+                by_kind[bad] += 1
+                viols.append({
+                    "ep": f"{ep_id}:{c.id}" if ep_id else c.id,
+                    "kind": bad,
+                    "pair": f"{pair[0]}>{pair[1]}" if pair else None,
+                    "relation": edge.relation if edge else None,
+                    "level": edge.level if edge else None,
+                    "en": en_txt,
+                    "ko": raw_ko,
+                })
+    para = 1.0 - n_viol / max(n_risk, 1)
+    gra = gra_satisfied / gra_triggers if gra_triggers else 1.0
+    return {
+        "para": round(para, 4),
+        "gra": round(gra, 4),
+        "risk_turns": n_risk,
+        "violations": viols,
+        "by_kind": dict(by_kind),
+        "gra_triggers": gra_triggers,
+        "gra_satisfied": gra_satisfied,
+    }
+
+
 # ---------------------------------------------------------------- series consistency (SCS)
 
 
@@ -2206,6 +2385,8 @@ def evaluate_series_consistency(
       - `ko_lines`: Sequence[Line] or Mapping[str, str] (`cue_id -> ko`)
       - `context_map`: Optional[ContextMap]
       - `register_map`: Optional[RegisterMap]
+      - `observations`: Optional[Sequence[ChunkObservations | CueObservation]]
+      - `scenes`: Optional[Sequence[Scene]]
       - `pairs_by_cue`: Optional[Mapping[str, tuple[str, str]]]
     """
     import math
@@ -2220,6 +2401,7 @@ def evaluate_series_consistency(
 
     # Normalize each episode's aligned (Cue, ko_text) pairs
     ep_aligned: list[tuple[str, list[tuple[Cue, str]], ContextMap | None, RegisterMap | None, Mapping[str, tuple[str, str]]]] = []
+    pragmatic_results: list[dict[str, Any]] = []
     for ep in episodes:
         ep_id = str(ep["ep_id"])
         cues: list[Cue] = list(ep["cues"])
@@ -2271,6 +2453,12 @@ def evaluate_series_consistency(
                             for c in g.en:
                                 pairs.append((c, ko_joined))
         ep_aligned.append((ep_id, pairs, cm, rm, pbc))
+        if any(key in ep for key in ("register_map", "observations", "scenes")):
+            pragmatic_results.append(evaluate_pragmatic_address(
+                cues, raw_ko, context_map=cm, register_map=rm,
+                observations=ep.get("observations") or (), scenes=ep.get("scenes") or (),
+                ep_id=ep_id,
+            ))
 
     # 1. Axis 1: Entity & Concept Conditional Entropy H(T|E) and LTCR
     concepts: dict[str, list[str]] = {}
@@ -2492,6 +2680,19 @@ def evaluate_series_consistency(
                         })
     axis5_spoiler = 1.0 - (leaks / total_checked)
 
+    pragmatic_risks = sum(result["risk_turns"] for result in pragmatic_results)
+    pragmatic_violations = [
+        violation for result in pragmatic_results for violation in result["violations"]
+    ]
+    gra_triggers = sum(result["gra_triggers"] for result in pragmatic_results)
+    gra_satisfied = sum(result["gra_satisfied"] for result in pragmatic_results)
+    para = 1.0 - len(pragmatic_violations) / max(pragmatic_risks, 1)
+    gra = gra_satisfied / gra_triggers if gra_triggers else 1.0
+    defects.extend(
+        {"axis": "pragmatic_address_calque", **violation}
+        for violation in pragmatic_violations
+    )
+
     scs = 100.0 * (
         0.30 * axis1_ltcr
         + 0.25 * axis2_register
@@ -2508,6 +2709,8 @@ def evaluate_series_consistency(
             "recap_callback_stability": round(axis3_recap, 4),
             "locked_term_compliance": round(axis4_ltv, 4),
             "causal_spoiler_free": round(axis5_spoiler, 4),
+            "pragmatic_address_para": round(para, 4),
+            "relationship_graph_gra": round(gra, 4),
         },
         "counts": {
             "episodes": len(ep_aligned),

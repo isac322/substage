@@ -148,11 +148,16 @@ Why: each setting has a fixed register; drifting down and over-formalizing both 
 - My husband was an ordinary person. (eulogy) | 평범한 사람이었습니다 | 평범한 사람이었어요
 
 ### 3.5 Choose pronouns by relationship.
-당신: adult strangers, rivals, adult confrontation, a respected colleague, and also spouses, lovers and exes, at any speech level. 너: kids, teens, friends, or deliberate disrespect. 자네: a mature man to a younger man or to a male peer his own age (old friends, veteran colleagues); never to women, never from young speakers. 그대: royal address or song lyrics only. Drop the pronoun among friends and with children. Never 그/그녀 as a default "he/she": use the name, the role, or nothing. Upward (ladder 3, 4, 6) the speaker usually drops the pronoun and, where an English "you", name or "Pop" must surface, uses the kin or role term; never 너 upward, though an adult may use 당신 to a senior in a bitter or heated line. The pair's address term in the register table wins over this paragraph.
+당신: adult strangers, rivals, adult confrontation, a respected colleague outside an upward hierarchy, and spouses, lovers and exes, at any speech level. 너: kids, teens, friends, or deliberate disrespect. 자네: a mature man to a younger man or to a male peer his own age (old friends, veteran colleagues); never to women, never from young speakers. 그대: royal address or song lyrics only. Drop the pronoun among friends and with children. Never 그/그녀 as a default "he/she": use the name, the role, or nothing. Civil upward kinship (own parent, elder kin, surrogate parent) never takes 너/너희/당신, even with warm-home 반말; use omission or a kin/role term. Civil mentor/protege/subordinate exchanges at 해요/하십시오 use omission or the established name/title, not 너/당신. Anger alone does not license 당신 to a parent or mentor. The register table's `pronoun="none"` explicitly forbids surface second-person pronouns; it is not permission to guess one.
 Why: an unmarked 너 to a stranger reads as a challenge; 그녀 reads as written prose.
 - Who are you? And where am I? (to a stranger) | 넌 누구고 여긴 어디야? | 당신 누구야? / 여긴 어디지?
 - I can't imagine my life without you! (wife to husband) | 너 없인 못 살아! | 난 당신 없인 / 한순간도 못 살아!
 - You came up to town with your girlfriend and met us all. (old classmates, 60s) | 네가 여자 친구를 데려와서... | 자네가 데려와서 / 다 같이 만났잖아
+
+**Highest-Status Addressee Dominance (존자 우선의 법칙).** A mixed group's plural "you" follows the highest-status addressee's address standard. If a parent, elder or mentor is included, never reduce the group to 너희/너네/니들; omit the pronoun or use 다들, 두 분 or the established kin/role term, retaining the table's speech level. A civil public/company audience takes 여러분 with 해요/하십시오, 다들/모두 or omission with 반말, never 너희 or singular 당신. A quoted line, a peer's collective possessive (너희 엄마/집), or a genuinely hostile taunt is not civil upward/group address.
+- I invited all you guys. (group includes speaker's mother) | 너희 다 초대했잖아 | 다 초대했잖아
+- You all think so? (company audience, 반말) | 너희도 그렇게 생각해? | 다들 그렇게 생각해?
+- We care about you, Bill. (civil mentor, 해요) | 우린 당신을 아껴요, 빌 | 우린 빌을 아껴요
 
 ### 3.6 Use level play as a weapon.
 Mock-honorifics inside 반말 make a taunt (좋아하시네, 어련하시겠어, 대단하시군, 그러셔?); an abrupt shift marks a turn in the scene.

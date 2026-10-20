@@ -1365,7 +1365,13 @@ def run(
         for tc in st.cues:
             ko[tc.cue_id] = tc.ko
     if series_pins:
-        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
+        ko = series_state.enforce_series_pins(
+            ko, cues, active_bible, series_pins, context_map=context_map,
+            register_map=register_map, observations=observations, scenes=scenes,
+        )
+    ko = register_mod.enforce_pragmatic_address(
+        ko, cues, register_map, context_map=context_map, observations=observations, scenes=scenes,
+    )
     lineage = validate.combine_lineage(list(translations.values()))
     semantic_checked_ko = dict(ko)
     semantic_checked_fragments = {
@@ -1527,7 +1533,10 @@ def run(
         )
     ko, regen_edits = _apply_edits(ko, list(regen_raw), gate, "regen", allow_omission=lineage is not None)
     if series_pins:
-        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
+        ko = series_state.enforce_series_pins(
+            ko, cues, active_bible, series_pins, context_map=context_map,
+            register_map=register_map, observations=observations, scenes=scenes,
+        )
     semantic_stage("s4-regeneration")
     edits += finale_edits + regen_edits
     save_model(ws.path("edits.json"), edits)
@@ -1558,7 +1567,10 @@ def run(
         lineage=lineage,
     )
     if series_pins:
-        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
+        ko = series_state.enforce_series_pins(
+            ko, cues, active_bible, series_pins, context_map=context_map,
+            register_map=register_map, observations=observations, scenes=scenes,
+        )
     s5_written = {
         cid for cid, normalized in normalized_before_s5.items() if ko.get(cid) != normalized
     }
@@ -1596,7 +1608,10 @@ def run(
         ko = _apply_picture_edits(ko, pic_edits, settings, {c.id: c for c in cues}, lineage=lineage)
         save_model(ws.path("edits.json"), edits)
     if series_pins:
-        ko = series_state.enforce_series_pins(ko, cues, active_bible, series_pins, context_map=context_map)
+        ko = series_state.enforce_series_pins(
+            ko, cues, active_bible, series_pins, context_map=context_map,
+            register_map=register_map, observations=observations, scenes=scenes,
+        )
     semantic_stage("c7-picture-output")
     issues = [
         issue for cue in cues for issue in validate.check(
@@ -1640,7 +1655,8 @@ def run(
     events = layout_result.items
     if series_pins:
         events = series_state.enforce_event_pins(
-            events, cues, ko, active_bible, series_pins, context_map=context_map
+            events, cues, ko, active_bible, series_pins, context_map=context_map,
+            register_map=register_map, observations=observations, scenes=scenes,
         )
         for ev in events:
             if len(ev.cue_ids) == 1 and ev.cue_ids[0] in ko:

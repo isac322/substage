@@ -8,6 +8,8 @@ Married spouses and established couples of the same generation (`relation="partn
 Persona adjectives (rude, insolent, gruff, polite, gentle, warm) are not evidence for a level; kinship, who raised whom, generation, rank, shared history and enmity are.
 Cite the cue ids that establish every non-default feature in `evidence_cues`.
 address: `pronoun` is 너|자네|당신|none (what surfaces for English "you"), `vocative` the kin/role/name term used for the addressee, or none.
+`pronoun="none"` is an explicit ban on surface second-person pronouns (너/너희/당신), not missing data. Use omission or the established kin/role/name term. Civil own-parent, elder-kin, surrogate-parent and child→adult edges require `none`, including warm-home 반말 to one's parent. Civil mentor/protege/subordinate edges using 해요/하십시오 also require `none`; anger alone does not license 당신.
+Highest-Status Addressee Dominance (존자 우선의 법칙): when plural "you" includes a parent, elder or mentor, address the whole group at the highest-status member's address standard; never flatten them into 너희/너네/니들. Prefer omission, 다들, 두 분 or a kin/role term without changing the table's speech level. Civil public/company audiences take 여러분 in polite speech, 다들/모두 or omission in 반말, not 너희 or singular 당신. Peer-group possessives (너희 엄마/집) and genuinely hostile taunts are distinct from civil upward/group address.
 basis: one short English sentence naming the relationship and the step that decided the level.
 
 KOREAN REGISTER CONVENTIONS (from the house style guide; examples read EN | literal (bad) | good):

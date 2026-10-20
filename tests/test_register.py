@@ -513,3 +513,85 @@ def test_unmapped_acronym_ai_resolves_to_system_ai_haeyo_and_two_turn_dash_gate(
     gate = register.RegisterGate(table, {"c0001": (register.SYSTEM_AI, "peter"), "c0003": ("peter", "tony")})
     assert gate.check("regen", ["c0001"], "드론 공격을 시작할 거야?", "드론 공격을 시작할까요?")
     assert gate.check("regen", ["c0003"], "- 멋지다\n- 내 기능 한번 볼래?", "- 멋지다\n- 제 기능 보실래요?")
+
+
+def test_canonicalize_edge_clears_upward_and_civil_mentor_pronouns_and_renders_none_ban():
+    parent_edge = _edge(
+        "travis", "bonnie", "hae", step=3, relation="own_parent",
+        apparent_generation="addressee_older", history="raised_by_addressee",
+        pronoun="너", vocative="엄마",
+    )
+    mentor_edge = _edge(
+        "travis", "bill", "haeyo", step=6, relation="mentor",
+        apparent_generation="addressee_older", history="met_as_adults",
+        pronoun="당신", vocative="빌",
+    )
+    spouse_edge = _edge(
+        "donald", "bonnie", "hae", step=10, relation="partner",
+        apparent_generation="same", history="met_as_adults",
+        pronoun="당신", vocative="당신",
+    )
+    assert register.canonicalize_edge(parent_edge).pronoun == "none"
+    assert register.canonicalize_edge(mentor_edge).pronoun == "none"
+    assert register.canonicalize_edge(spouse_edge).pronoun == "당신"
+
+    sr = register.SceneRegister(level="hae", pronoun="none", vocative="엄마")
+    rendered = "\n".join(register.render_scene_register("travis>bonnie", sr))
+    assert "2인칭대명사생략(너/너희/당신 금지)" in rendered
+
+
+def test_enforce_pragmatic_address_repairs_parent_neohui_and_mentor_dangsin():
+    from substage.models import Character, ChunkObservations, ContextMap, Cue, CueObservation, RegisterMap, Scene, VoiceCard
+
+    cm = ContextMap(
+        synopsis="test",
+        tone_baseline="drama",
+        characters=[
+            Character(id="travis", en_name="Travis Kalanick", ko_name="트래비스 캘러닉", aliases=["TK"], persona="CEO", voice=VoiceCard(idiolect="test")),
+            Character(id="bonnie", en_name="Bonnie Kalanick", ko_name="보니 캘러닉", aliases=["Mom"], persona="Mom", voice=VoiceCard(idiolect="test")),
+            Character(id="bill", en_name="Bill Gurley", ko_name="빌 걸리", aliases=["Bill"], persona="VC", voice=VoiceCard(idiolect="test")),
+        ],
+    )
+    cues = [
+        Cue(id="c0485", start_ms=1000, end_ms=2500, text="I invited all you guys.", raw="I invited all you guys."),
+        Cue(id="c0201", start_ms=3000, end_ms=4500, text="But if I had a mentor, like you...", raw="But if I had a mentor, like you..."),
+        Cue(id="c0799", start_ms=5000, end_ms=6500, text="You are Uber.", raw="You are Uber."),
+    ]
+    obs = [
+        ChunkObservations(
+            chunk_id="chunk_000", start_ms=0, end_ms=10000,
+            cues=[
+                CueObservation(cue_id="c0485", speaker="Travis Kalanick", addressee="Bonnie Kalanick"),
+                CueObservation(cue_id="c0201", speaker="Travis Kalanick", addressee="Bill Gurley"),
+                CueObservation(cue_id="c0799", speaker="Travis Kalanick", addressee="audience"),
+            ],
+        )
+    ]
+    rm = RegisterMap(
+        edges=[
+            _edge(
+                "travis", "bonnie", "hae", step=3, relation="own_parent",
+                apparent_generation="addressee_older", history="raised_by_addressee",
+                pronoun="none", vocative="엄마",
+            ),
+            _edge(
+                "travis", "bill", "haeyo", step=6, relation="mentor",
+                apparent_generation="addressee_older", history="met_as_adults",
+                pronoun="none", vocative="빌",
+            ),
+        ]
+    )
+    scenes = [Scene(id="s001", start_ms=0, end_ms=10000, cue_ids=["c0485", "c0201", "c0799"])]
+    ko = {
+        "c0485": "너희 다 초대했잖아",
+        "c0201": "하지만 당신 같은 멘토가 있다면...",
+        "c0799": "너희가 바로 우버야",
+    }
+    fixed = register.enforce_pragmatic_address(
+        ko, cues, rm, context_map=cm, observations=obs, scenes=scenes
+    )
+    assert "너희" not in fixed["c0485"]
+    assert fixed["c0485"] == "다 초대했잖아"
+    assert "당신" not in fixed["c0201"]
+    assert "빌" in fixed["c0201"]
+    assert "너희" not in fixed["c0799"]

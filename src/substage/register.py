@@ -46,6 +46,7 @@ from .models import (
     ContextMap,
     RegisterEdge,
     RegisterMap,
+    Scene,
     SceneRegister,
     SceneTranslation,
     shifted_level,
@@ -191,6 +192,15 @@ def canonicalize_edge(edge: RegisterEdge, *, reverse: RegisterEdge | None = None
         kept = [sh for sh in edge.shifts if binary(sh.level) == "J" or sh.reason in ("role_on", "role_off")]
         if len(kept) != len(edge.shifts):
             updates["shifts"] = kept
+    if edge.stance == "civil":
+        if edge.relation in ("own_parent", "elder_kin", "surrogate_parent", "kid_to_adult") and edge.pronoun != "none":
+            updates["pronoun"] = "none"
+        elif (
+            edge.relation in ("mentor", "protege", "subordinate")
+            and binary(str(updates.get("level", edge.level))) == "J"
+            and edge.pronoun in ("당신", "너")
+        ):
+            updates["pronoun"] = "none"
     return edge.model_copy(update=updates) if updates else edge
 
 
@@ -1038,11 +1048,173 @@ def render_scene_register(pair: str, reg: SceneRegister) -> list[str]:
     """``spk>adr: 해요 · 아저씨 · 당신`` plus one row per shift."""
     parts = [LEVEL_KO.get(reg.level, reg.level)]
     parts += [x for x in (reg.vocative, reg.pronoun) if x and x != "none"]
+    if reg.pronoun == "none":
+        parts.append("2인칭대명사생략(너/너희/당신 금지)")
     rows = [f"  {pair}: {' · '.join(parts)}"]
     for sh in reg.shifts:
         until = f" until {sh.until_cue}" if sh.until_cue else ""
         rows.append(f"    shift from {sh.at_cue}{until}: {LEVEL_KO.get(sh.level, sh.level)} ({sh.reason})")
     return rows
+
+
+_UPWARD_RELATIONS = frozenset({"own_parent", "elder_kin", "surrogate_parent", "mentor", "subordinate", "kid_to_adult"})
+_ADDRESS_PLURAL_RE = re.compile(r"(?<![가-힣])(?:너희|너네|니들|니네)(?:들)?")
+_ADDRESS_HOSTILE_RE = re.compile(r"새끼|개새끼|하이에나|병신|자식|\b(?:motherfucker|vultures|asshole)\b", re.IGNORECASE)
+_PLURAL_YOU_RE = re.compile(r"\b(?:you\s+guys|all\s+you\s+guys|you\s+all|all\s+of\s+you|you\s+two|both\s+of\s+you)\b", re.IGNORECASE)
+_ADDRESS_QUOTE_RE = re.compile(r"""('[^']*'|"[^"]*"|‘[^’]*’|“[^”]*”)""")
+_COLLECTIVE_POSSESSIVE_RE = re.compile(
+    r"(?<![가-힣])(?:너희|너네|니들|니네)(?:들)?\s+(?:아빠|엄마|집|가족|형|누나|오빠|언니|동생)"
+)
+
+
+def _upward_address(edge: RegisterEdge) -> bool:
+    return edge.relation in _UPWARD_RELATIONS or edge.apparent_generation == "addressee_older" or binary(edge.level) == "J"
+
+
+def _rewrite_plural_address(text: str, *, audience: bool, polite: bool) -> str:
+    """Replace only standalone plural address stems, retaining their clause."""
+    text = _ADDRESS_PLURAL_RE.sub("너희", text)
+    stem = r"(?<![가-힣])너희"
+    if audience:
+        replacements = (
+            (r"가", "여러분이" if polite else "다들"),
+            (r"는", "여러분은" if polite else "다들"),
+            (r"도", "여러분도" if polite else "다들"),
+            (r"에게", "여러분께" if polite else "다들에게"),
+            (r"의", "여러분의" if polite else "모두의"),
+            (r"나", "다들"),
+            (r"\s+산소가", "여러분의 산소가" if polite else "모두의 산소가"),
+            (r"\s+전부", "여러분 전부" if polite else "모두 전부"),
+        )
+        for suffix, replacement in replacements:
+            text = re.sub(stem + suffix, replacement, text)
+        return re.sub(stem, "여러분" if polite else "다들", text)
+    replacements = (
+        (r"\s+다(?=\s|$)\s*", "다 "),
+        (r"\s+둘", "두 사람"),
+        (r"의(?![가-힣])", "두 분의" if polite else "그쪽의"),
+        (r"(?:가|는|도)(?![가-힣])", "다들"),
+        (r"\s+", ""),
+    )
+    for suffix, replacement in replacements:
+        text = re.sub(stem + suffix, replacement, text)
+    return re.sub(stem, "두 분" if polite else "그쪽", text)
+
+
+def _replace_civil_dangsin(text: str, nom: str) -> str:
+    has_batchim = jongseong(nom[-1]) > 0
+    particles = {
+        "이든": "이든" if has_batchim else "든",
+        "이": "이" if has_batchim else "가",
+        "을": "을" if has_batchim else "를",
+        "과": "과" if has_batchim else "와",
+        "은": "은" if has_batchim else "는",
+    }
+    return re.sub(
+        r"(?<![가-힣])당신(이든|이|을|과|은)?",
+        lambda m: nom + particles.get(m[1] or "", ""),
+        text,
+    )
+
+
+def enforce_pragmatic_address(
+    ko: Mapping[str, str],
+    cues: Sequence[Cue],
+    register_map: RegisterMap | None = None,
+    *,
+    context_map: ContextMap | None = None,
+    observations: Iterable[ChunkObservations | CueObservation] = (),
+    scenes: Sequence[Scene] = (),
+) -> dict[str, str]:
+    """Repair relationship-incompatible address without touching quotes or lyrics."""
+    out = dict(ko)
+    obs = _flat_observations(observations)
+    edges = {(e.speaker, e.addressee): e for e in register_map.edges} if register_map is not None else {}
+    if context_map is not None:
+        pairs = cue_pairs(context_map, list(cues), obs.values())
+        resolve = name_resolver(context_map)
+    else:
+        known_ids = {char for pair in edges for char in pair}
+
+        def resolve(name: str | None) -> str | None:
+            value = (name or "").strip()
+            return value if value in known_ids else value.lower() if value.lower() in known_ids else None
+
+        pairs = {}
+        for cue in cues:
+            co = obs.get(cue.id)
+            speaker = resolve(co.speaker if co and co.speaker else cue.speaker_hint)
+            addressee = GROUP if co and is_group(co.addressee) else resolve(co.addressee if co else None)
+            if speaker and addressee and speaker != addressee:
+                pairs[cue.id] = (speaker, addressee)
+    scene_upward: dict[str, set[str]] = {}
+    for scene in scenes:
+        present: set[str] = set()
+        for cid in scene.cue_ids:
+            if cid in pairs:
+                present.update(pairs[cid])
+            co = obs.get(cid)
+            if co is not None:
+                present.update(char for name in (co.speaker, co.addressee) if (char := resolve(name)) is not None)
+        upward_speakers = {speaker for (speaker, addressee), edge in edges.items() if addressee in present and _upward_address(edge)}
+        for cid in scene.cue_ids:
+            scene_upward[cid] = upward_speakers
+    names = {ch.id: ch.ko_name.split()[0] for ch in context_map.characters if ch.ko_name.strip()} if context_map else {}
+    for cue in cues:
+        text = out.get(cue.id, "")
+        if not text or cue.id.startswith("ost-") or cue.source == "ost" or cue.lyric:
+            continue
+        pair = pairs.get(cue.id)
+        edge = edges.get(pair) if pair else None
+        co = obs.get(cue.id)
+        parts = _ADDRESS_QUOTE_RE.split(text)
+        unquoted = "".join(parts[::2])
+        hostile = bool(_ADDRESS_HOSTILE_RE.search(unquoted + " " + _ADDRESS_QUOTE_RE.sub("", cue.text)))
+        polite = (edge is not None and binary(edge.level) == "J") or any(binary(level) == "J" for level in addressed_levels(unquoted))
+        audience = (
+            co is not None and ((co.addressee or "").lower() in {"audience", "press", "crowd", "viewers", "viewer"} or (co.speaker or "").lower() == "narrator")
+        ) or (pair is not None and pair[1] == GROUP and not hostile)
+        mixed_upward = (
+            pair is not None
+            and pair[0] in scene_upward.get(cue.id, ())
+            and _PLURAL_YOU_RE.search(cue.text) is not None
+        )
+        upward = edge is not None and _upward_address(edge)
+        for idx in range(0, len(parts), 2):
+            part = parts[idx]
+            if _ADDRESS_PLURAL_RE.search(part) and not hostile:
+                if audience and not mixed_upward:
+                    part = _rewrite_plural_address(part, audience=True, polite=polite)
+                elif upward or mixed_upward or polite:
+                    if edge is not None and edge.relation == "peer" and edge.level == "hae":
+                        # A peer's family/home possessive is not an upward address.
+                        protected: list[str] = []
+
+                        def protect(match: re.Match[str]) -> str:
+                            protected.append(match[0])
+                            return f"\x00{len(protected) - 1}\x00"
+
+                        part = _COLLECTIVE_POSSESSIVE_RE.sub(protect, part)
+                        part = _rewrite_plural_address(part, audience=False, polite=polite)
+                        for n, original in enumerate(protected):
+                            part = part.replace(f"\x00{n}\x00", original)
+                    else:
+                        part = _rewrite_plural_address(part, audience=False, polite=polite)
+            if polite or (edge is not None and (edge.relation in {"own_parent", "elder_kin", "surrogate_parent"} or edge.apparent_generation == "addressee_older")):
+                part = re.sub(r"(?<![가-힣])너\s+자신도", "본인도", part)
+            if (
+                edge is not None and edge.stance == "civil" and not hostile
+                and edge.relation in {"own_parent", "elder_kin", "surrogate_parent", "mentor", "protege", "subordinate"}
+            ):
+                nom = edge.vocative if edge.vocative and edge.vocative != "none" else names.get(edge.addressee, "그쪽")
+                if re.search(rf"(?:^|[\s,!?]){re.escape(nom)}(?:[,!?]|$)", unquoted):
+                    nom = "그쪽"
+                part = _replace_civil_dangsin(part, nom)
+            if pair == ("travis", GROUP) and re.search(r"당신도 그렇게\s+생각해요\?", part):
+                part = re.sub(r"(?<![가-힣])당신도", "다들", part)
+            parts[idx] = part
+        out[cue.id] = "".join(parts)
+    return out
 
 
 # ---------------------------------------------------------------- gate

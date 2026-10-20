@@ -326,3 +326,65 @@ def test_evaluate_series_consistency_detects_drift_and_clusters_shortenings():
     assert drift_res["scs"] < 90.0
     assert drift_res["counts"]["total_defects"] >= 2
     assert drift_res["concepts"]["Cinda Canning"]["clustered_forms"] == {"신다 캐닝": 2, "신디 캐닝": 1}
+
+
+def test_evaluate_pragmatic_address_para_and_gra():
+    from substage.models import ChunkObservations, CueObservation, Scene, VoiceCard
+
+    cm = ContextMap(
+        synopsis="test",
+        tone_baseline="drama",
+        characters=[
+            Character(id="travis", en_name="Travis Kalanick", ko_name="트래비스 캘러닉", aliases=["TK"], persona="CEO", voice=VoiceCard(idiolect="test")),
+            Character(id="bonnie", en_name="Bonnie Kalanick", ko_name="보니 캘러닉", aliases=["Mom"], persona="Mom", voice=VoiceCard(idiolect="test")),
+            Character(id="bill", en_name="Bill Gurley", ko_name="빌 걸리", aliases=["Bill"], persona="VC", voice=VoiceCard(idiolect="test")),
+        ],
+    )
+    cues = [
+        _cue("c0485", 1000, 2500, "Mom, I invited all you guys."),
+        _cue("c0201", 3000, 4500, "But if I had a mentor, like you..."),
+    ]
+    obs = [
+        ChunkObservations(
+            chunk_id="chunk_000", start_ms=0, end_ms=10000,
+            cues=[
+                CueObservation(cue_id="c0485", speaker="Travis Kalanick", addressee="Bonnie Kalanick"),
+                CueObservation(cue_id="c0201", speaker="Travis Kalanick", addressee="Bill Gurley"),
+            ],
+        )
+    ]
+    rm = RegisterMap(
+        edges=[
+            RegisterEdge(
+                speaker="travis", addressee="bonnie", relation="own_parent",
+                apparent_generation="addressee_older", history="raised_by_addressee",
+                stance="civil", step=3, level="hae", pronoun="none", vocative="엄마",
+                evidence_cues=["c0485"], basis="mother",
+            ),
+            RegisterEdge(
+                speaker="travis", addressee="bill", relation="mentor",
+                apparent_generation="addressee_older", history="met_as_adults",
+                stance="civil", step=6, level="haeyo", pronoun="none", vocative="빌",
+                evidence_cues=["c0201"], basis="mentor",
+            ),
+        ]
+    )
+    scenes = [Scene(id="s001", start_ms=0, end_ms=10000, cue_ids=["c0485", "c0201"])]
+
+    bad_res = refeval.evaluate_pragmatic_address(
+        cues,
+        {"c0485": "너희 다 초대했잖아", "c0201": "하지만 당신 같은 멘토가 있다면..."},
+        context_map=cm, register_map=rm, observations=obs, scenes=scenes, ep_id="s01e01",
+    )
+    assert bad_res["para"] < 1.0
+    assert len(bad_res["violations"]) == 2
+    assert bad_res["gra"] == 1.0
+
+    good_res = refeval.evaluate_pragmatic_address(
+        cues,
+        {"c0485": "다 초대했잖아", "c0201": "하지만 빌 같은 멘토가 있다면..."},
+        context_map=cm, register_map=rm, observations=obs, scenes=scenes, ep_id="s01e01",
+    )
+    assert good_res["para"] == 1.0
+    assert len(good_res["violations"]) == 0
+    assert good_res["gra"] == 1.0
