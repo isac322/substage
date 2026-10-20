@@ -2726,6 +2726,7 @@ def evaluate_series_consistency(
             if prev_norm is None:
                 continue
             prev_ep, prev_raw_ko, prev_clean, prev_lvl, _, _ = prior_utts[prev_norm]
+            full_prev_clean = prev_clean
             prev_lvls = [binary(lv) for lv in addressed_levels(prev_raw_ko) if binary(lv)]
             if target is not None:
                 prev_raw_ko = target[1]
@@ -2745,12 +2746,13 @@ def evaluate_series_consistency(
                 or prev_clean in curr_sub_cleans
                 or bool(shared_sub_lines)
                 or (min(len(prev_clean), len(ko_clean)) >= 4 and (prev_clean in ko_clean or ko_clean in prev_clean))
+                or (min(len(full_prev_clean), len(ko_clean)) >= 4 and (full_prev_clean in ko_clean or ko_clean in full_prev_clean))
             ):
                 ned = 0.0
             else:
                 ned = _levenshtein(prev_clean, ko_clean) / max(len(prev_clean), len(ko_clean), 1)
             recap_neds.append(ned)
-            lvl_mismatch = bool(prev_lvls and lvls and not (set(prev_lvls) & set(lvls)))
+            lvl_mismatch = bool(ned > 0.0 and prev_lvls and lvls and not (set(prev_lvls) & set(lvls)))
             if lvl_mismatch:
                 recap_flips += 1
             if ned > 0.15 or lvl_mismatch:

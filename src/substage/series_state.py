@@ -1490,14 +1490,32 @@ def commit_bible(
         str(getattr(ev, "ko", "")).removeprefix("{\\an8}")
         for ev in events
     }
-    ev_by_member: dict[str, str] = {}
+    ev_by_member: dict[str, tuple[tuple[str, ...], str]] = {}
     for cids_tup, ev_txt in ev_by_cids.items():
         for m_cid in cids_tup:
-            ev_by_member.setdefault(m_cid, ev_txt)
+            ev_by_member.setdefault(m_cid, (cids_tup, ev_txt))
     has_kalanick = any("캘러닉" in ch.ko_name for ch in context_map.characters)
     displayed_ko: dict[str, str] = {}
     for c in cues:
-        raw_disp = ev_by_cids.get((c.id,)) or ko.get(c.id, "") or ev_by_member.get(c.id, "")
+        if (c.id,) in ev_by_cids:
+            raw_disp = ev_by_cids[(c.id,)]
+        else:
+            ko_cand = ko.get(c.id, "")
+            mem = ev_by_member.get(c.id)
+            if mem is not None:
+                cids_tup, ev_txt = mem
+                ko_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", ko_cand)
+                ev_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", ev_txt)
+                if not ko_alnum or ko_alnum not in ev_alnum:
+                    ev_lines = [ln for ln in ev_txt.splitlines() if ln.strip()]
+                    if len(cids_tup) == 2 and len(ev_lines) == 2:
+                        raw_disp = ev_lines[0] if c.id == cids_tup[0] else ev_lines[1]
+                    else:
+                        raw_disp = ev_txt
+                else:
+                    raw_disp = ko_cand
+            else:
+                raw_disp = ko_cand
         clean_disp = _strip_recap_ko_header(raw_disp)
         if has_kalanick and "칼라닉" in clean_disp:
             clean_disp = clean_disp.replace("칼라닉", "캘러닉")
