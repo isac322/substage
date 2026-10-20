@@ -388,3 +388,75 @@ def test_evaluate_pragmatic_address_para_and_gra():
     assert good_res["para"] == 1.0
     assert len(good_res["violations"]) == 0
     assert good_res["gra"] == 1.0
+
+
+def test_slash_ost_sync_and_recap_bead_alignment():
+    from substage import translate, validate
+    from substage.models import ChunkObservations, OnScreenText
+
+    # 1. Slash sanitization preserves fixed tokens and strips clause separators
+    assert validate.normalize_punct("거래처 결제 / 잠깐 미뤄") == "거래처 결제 잠깐 미뤄"
+    assert validate.normalize_punct("저희 의뢰인들이 /\n후원한 액수는 잘 아시겠죠") == "저희 의뢰인들이\n후원한 액수는 잘 아시겠죠"
+    assert validate.normalize_punct("24/7 연중무휴 남/여 구분 없음") == "24/7 연중무휴 남/여 구분 없음"
+    assert validate.normalize_punct("뭐라고? / - 아무것도 아냐") == "- 뭐라고?\n- 아무것도 아냐"
+
+    # 2. OST sync: v01 keeps 120000/136000 intact when no clamped/over-end item exists, and v04 realigns +60s Vegas & Kalanick anchor
+    ch_v01 = ChunkObservations(
+        chunk_id="v01", start_ms=0, end_ms=532886,
+        on_screen_text=[
+            OnScreenText(start_ms=68000, end_ms=71000, text="[caption] SHOWTIME PRESENTS"),
+            OnScreenText(start_ms=120000, end_ms=125000, text="[title] SUPER PUMPED: THE BATTLE FOR UBER"),
+            OnScreenText(start_ms=136000, end_ms=138500, text="[caption] 2014"),
+        ],
+    )
+    norm_v01 = translate._normalize_chunk_ost_mmss(ch_v01.on_screen_text, ch_v01.start_ms, ch_v01.end_ms)
+    assert [o.start_ms for o in norm_v01] == [68000, 120000, 136000]
+
+    cues_v04 = [
+        _cue("c0621", 1846000, 1850000, "Wait, hold on to the bed."),
+        _cue("c0642", 1900000, 1902358, "It was you."),
+        _cue("c0644", 1919375, 1921000, "Hey, Travis."),
+        _cue("c0713", 2066397, 2070902, "Now, if I want them to stay quiet about something,"),
+        _cue("c0744", 2149063, 2153359, "Instead it's time for a lesson from Prof. Kalanick."),
+    ]
+    ch_v04 = ChunkObservations(
+        chunk_id="v04", start_ms=1702116, end_ms=2289787,
+        on_screen_text=[
+            OnScreenText(start_ms=1847000, end_ms=1849000, text="[sign] WELCOME TO Fabulous LAS VEGAS NEVADA"),
+            OnScreenText(start_ms=2068000, end_ms=2073500, text="[caption] PROF KALANICK"),
+        ],
+    )
+    realigned = translate.realign_ost_to_anchors_and_gaps([ch_v04], cues_v04)[0]
+    assert realigned.on_screen_text[0].start_ms == 1907000
+    assert 2149000 <= realigned.on_screen_text[1].start_ms <= 2155000
+
+    # 3. Recap bead alignment: short cue ("They're defecting."), 2:1 merge, and clause trim
+    ep1_cues = [
+        _cue("c0143", 100000, 103000, "Look, Bill, something is going to pop in the space."),
+        _cue("c0358", 200000, 201500, "I think..."),
+        _cue("c0359", 201600, 203500, "you're my new VC."),
+        _cue("c0690", 300000, 302000, "They're defecting."),
+    ]
+    ep1_ko = {
+        "c0143": "빌, 이 분야에서\n뭐 하나 터지긴 할 겁니다",
+        "c0358": "제 생각엔...",
+        "c0359": "제 새 투자자시네요",
+        "c0690": "다 이탈 중이야",
+    }
+    b1 = series_state.commit_bible(
+        None,
+        series_state.EpisodeCoord(series_id="sp", season=1, episode=1, video_id="sp-s01e01"),
+        ContextMap(synopsis="test", tone_baseline="drama", characters=[]),
+        RegisterMap(edges=[]),
+        ep1_cues,
+        ep1_ko,
+    )
+    ep2_cues = [
+        _cue("c0006", 14000, 15500, "Something is going to pop in this space."),
+        _cue("c0007", 15600, 17500, "I think you're my new VC."),
+        _cue("c0012", 27000, 28500, "They're defecting."),
+    ]
+    pins2 = series_state.pin_cues(ep2_cues, b1)
+    assert pins2["c0006"].tm_ko == "빌, 이 분야에서\n뭐 하나 터지긴 할 겁니다"
+    assert pins2["c0007"].tm_ko == "제 생각엔...\n제 새 투자자시네요"
+    assert pins2["c0012"].tm_ko == "다 이탈 중이야"

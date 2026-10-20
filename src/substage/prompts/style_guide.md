@@ -2,7 +2,7 @@
 
 The house standard for Korean video subtitles, modeled on a leading Korean broadcast subtitler and validated on 17 of his videos. It applies to any video and genre. A subtitle renders what the speaker *does* with the line, in the voice a Korean speaker would use in that situation, in as few characters as the meaning allows. It is not a gloss of the English.
 
-Examples: `EN | 직역 (bad) | 좋은 예`; " / " is a line break, or a cue break where the English has one too. Names in examples are placeholders. Learn the technique, never the wording.
+Examples: `EN | 직역 (bad) | 좋은 예`; " / " in table examples is display notation for a line break (`\n`), or a cue break where the English has one too. NEVER output literal " / " inside Korean subtitle strings. Use a real newline (`\n`) for two-line subtitles, and only use "/" without spaces for fixed tokens like 24/7, km/h, or 남/여. Names in examples are placeholders. Learn the technique, never the wording.
 
 ## Decision procedure (every line)
 

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from .models import Cue, CueEdit, VideoInfo, OutEvent, TranslatedCue
 from .store import save_model
 from .subs import write_srt
+from .validate import strip_clause_slashes
 
 
 class SidecarCue(TranslatedCue):
@@ -45,7 +46,10 @@ def emit(
     srt_path = ws.path(f"{video.video_id}.ko.srt")
     sidecar_path = ws.path(f"{video.video_id}.ko.json")
 
-    shown = [e for e in events if e.ko.strip()]
+    shown = [
+        e.model_copy(update={"ko": strip_clause_slashes(e.ko)})
+        for e in events if e.ko.strip()
+    ]
     rows: list[SidecarCue] = []
     for cue in cues:
         m = meta.get(cue.id)

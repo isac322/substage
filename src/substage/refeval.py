@@ -2407,6 +2407,8 @@ def evaluate_series_consistency(
     # Normalize each episode's aligned (Cue, ko_text) pairs
     ep_aligned: list[tuple[str, list[tuple[Cue, str]], ContextMap | None, RegisterMap | None, Mapping[str, tuple[str, str]]]] = []
     pragmatic_results: list[dict[str, Any]] = []
+    slash_defects: list[dict[str, Any]] = []
+    total_lines = 0
     for ep in episodes:
         ep_id = str(ep["ep_id"])
         cues: list[Cue] = list(ep["cues"])
@@ -2415,9 +2417,11 @@ def evaluate_series_consistency(
         rm: RegisterMap | None = ep.get("register_map")
         pbc: Mapping[str, tuple[str, str]] = ep.get("pairs_by_cue") or {}
         if isinstance(raw_ko, Mapping):
+            output_lines = [(cid, str(text)) for cid, text in raw_ko.items()]
             pairs = [(c, str(raw_ko.get(c.id, ""))) for c in cues if (c.text or c.raw).strip()]
         else:
             ko_list = list(raw_ko)
+            output_lines = [(str(i), ln.text) for i, ln in enumerate(ko_list, 1)]
             ost_cues = [c for c in cues if c.id.startswith("ost-") and (c.text or c.raw).strip()]
             main_cues = [c for c in cues if not c.id.startswith("ost-") and (c.text or c.raw).strip()]
             pairs = []
@@ -2457,6 +2461,20 @@ def evaluate_series_consistency(
                             ko_joined = "\n".join(ln.text for ln in g.official)
                             for c in g.en:
                                 pairs.append((c, ko_joined))
+        aligned_ids = {c.id for c, _ in pairs}
+        pairs.extend(
+            (c, "") for c in cues if c.id not in aligned_ids and (c.text or c.raw).strip()
+        )
+        pairs.sort(key=lambda pair: (pair[0].start_ms, pair[0].id))
+        for location, text in output_lines:
+            for line in text.splitlines():
+                total_lines += 1
+                if re.search(r"\s+/\s+", line):
+                    slash_defects.append({
+                        "axis": "slash_separator_artifact",
+                        "ep": f"{ep_id}:{location}",
+                        "ko": line,
+                    })
         ep_aligned.append((ep_id, pairs, cm, rm, pbc))
         if any(key in ep for key in ("register_map", "observations", "scenes")):
             pragmatic_results.append(evaluate_pragmatic_address(
@@ -2495,7 +2513,7 @@ def evaluate_series_consistency(
     ltcr_num = 0.0
     ltcr_den = 0
     entropies: list[float] = []
-    defects: list[dict[str, Any]] = []
+    defects: list[dict[str, Any]] = list(slash_defects)
 
     for en_key, ko_forms in sorted(concepts.items()):
         counts: Counter[str] = Counter()
@@ -2612,57 +2630,135 @@ def evaluate_series_consistency(
     axis2_register = 1.0 - (dyad_flips / dyad_transitions) if dyad_transitions > 0 else 1.0
 
     # 3. Axis 3: Recap & High-Information Callback Consistency (1 - mean_NED)
-    prior_utts: dict[str, tuple[str, str, str, str | None]] = {}
+    # Retain source components so a recap split can reuse the displayed prior beads.
+    prior_utts: dict[str, tuple[str, str, str, str | None, set[str], tuple[str, ...]]] = {}
     recap_neds: list[float] = []
     recap_flips = 0
+
+    def match_prior(text: str, *, fuzzy: bool) -> str | None:
+        norm = _norm_en_utterance(text)
+        if norm in prior_utts:
+            return norm
+        if not fuzzy:
+            return None
+        toks = set(_content_tokens(text))
+        best_norm = None
+        best_score = (0.0, 0.0, 0)
+        for prev_norm, (_, _, _, _, prev_toks, _) in prior_utts.items():
+            shared = len(toks & prev_toks)
+            osc = shared / min(len(toks), len(prev_toks)) if toks and prev_toks else 0.0
+            substring = (
+                min(len(norm), len(prev_norm)) >= 12
+                and (norm in prev_norm or prev_norm in norm)
+            )
+            if not (substring or (shared >= 3 and osc >= 0.75)):
+                continue
+            score = (osc, shared / len(toks | prev_toks), -abs(len(norm) - len(prev_norm)))
+            if score > best_score:
+                best_norm, best_score = prev_norm, score
+        return best_norm
+
     for ep_id, pairs, _cm, _rm, _pbc in ep_aligned:
-        seen_in_ep: list[tuple[str, str, str, str, str | None]] = []
-        for c, ko_txt in pairs:
-            if c.lyric or re.search(
+        dialogue = [
+            (c, ko_txt) for c, ko_txt in pairs
+            if not c.lyric and not re.search(
                 r"\b(?:theme\s+song|music|song|noise)\s+(?:playing|continues|stops)\b",
                 c.text.lower(),
-            ):
+            )
+        ]
+        split_targets: dict[str, tuple[str, str]] = {}
+        main_dialogue = [(c, ko_txt) for c, ko_txt in dialogue if not c.id.startswith("ost-")]
+        for (c0, _), (c1, _) in zip(main_dialogue, main_dialogue[1:]):
+            if c0.start_ms > 95_000 or c1.start_ms > 95_000:
                 continue
+            lines_en = [ln.strip() for ln in c0.text.splitlines() if ln.strip()]
+            if len(lines_en) == 2 and all(re.match(r"^[-–—]", ln) for ln in lines_en):
+                norm_b = match_prior(lines_en[-1] + " " + c1.text, fuzzy=True)
+                first_norm = _norm_en_utterance(lines_en[0])
+                norm_a = first_norm if first_norm in prior_utts else next(
+                    (norm for norm in prior_utts if len(first_norm) >= 6 and norm.startswith(first_norm + " ")),
+                    None,
+                )
+                if norm_a is not None and norm_b is not None:
+                    ko_a = prior_utts[norm_a][1].splitlines()[0]
+                    ko_b = prior_utts[norm_b][1]
+                    split_targets[c0.id] = (norm_a, ko_a + "\n- " + ko_b.splitlines()[0].lstrip("- "))
+                    split_targets[c1.id] = (norm_b, ko_b)
+                    continue
+            if c0.id in split_targets or c1.id in split_targets:
+                continue
+            if _norm_en_utterance(c0.text) in prior_utts or _norm_en_utterance(c1.text) in prior_utts:
+                continue
+            norm = match_prior(c0.text + " " + c1.text, fuzzy=True)
+            if norm is None:
+                continue
+            _, prev_raw_ko, _, _, _, components = prior_utts[norm]
+            ko_parts = list(components) if len(components) == 2 else prev_raw_ko.splitlines()
+            if len(ko_parts) == 2:
+                ko0, ko1 = ko_parts
+            else:
+                ko0 = ko1 = prev_raw_ko
+            split_targets[c0.id] = (norm, ko0)
+            split_targets[c1.id] = (norm, ko1)
+
+        for c, ko_txt in dialogue:
             en_norm = _norm_en_utterance(c.text)
             toks = _content_tokens(c.text)
             is_recap = c.start_ms <= 95_000
-            if len(en_norm) < 15 or len(toks) < (3 if is_recap else 4):
+            if len(en_norm) < (6 if is_recap else 15) or len(toks) < (1 if is_recap else 4):
                 continue
+            target = split_targets.get(c.id)
+            prev_norm = target[0] if target is not None else match_prior(c.text, fuzzy=is_recap)
+            if prev_norm is None:
+                continue
+            prev_ep, prev_raw_ko, prev_clean, prev_lvl, _, _ = prior_utts[prev_norm]
+            if target is not None:
+                prev_raw_ko = target[1]
+                prev_clean = _norm_recap_ko(prev_raw_ko)
+                prev_lvls = [binary(lv) for lv in addressed_levels(prev_raw_ko) if binary(lv)]
+                prev_lvl = prev_lvls[-1] if prev_lvls else None
             ko_clean = _norm_recap_ko(ko_txt)
-            if not ko_clean:
-                continue
             lvls = [binary(lv) for lv in addressed_levels(ko_txt) if binary(lv)]
             b_lvl = lvls[-1] if lvls else None
-            if en_norm in prior_utts and (is_recap or len(set(toks)) >= 4):
-                prev_ep, prev_raw_ko, prev_clean, prev_lvl = prior_utts[en_norm]
-                prev_sub_cleans = [_norm_recap_ko(ln) for ln in prev_raw_ko.splitlines() if _norm_recap_ko(ln)]
-                curr_sub_cleans = [_norm_recap_ko(ln) for ln in ko_txt.splitlines() if _norm_recap_ko(ln)]
-                if (
-                    ko_clean in prev_sub_cleans
-                    or prev_clean in curr_sub_cleans
-                    or (min(len(prev_clean), len(ko_clean)) >= 8 and (prev_clean in ko_clean or ko_clean in prev_clean))
-                ):
-                    ned = 0.0
-                else:
-                    dist = _levenshtein(prev_clean, ko_clean)
-                    ned = dist / max(len(prev_clean), len(ko_clean), 1)
-                recap_neds.append(ned)
-                if prev_lvl and b_lvl and prev_lvl != b_lvl:
-                    recap_flips += 1
-                if ned > 0.15 or (prev_lvl and b_lvl and prev_lvl != b_lvl):
-                    defects.append({
-                        "axis": "recap_or_callback_drift",
-                        "en": c.text,
-                        "from_ep": prev_ep,
-                        "to_ep": f"{ep_id}:{c.id}",
-                        "ko_prev": prev_raw_ko,
-                        "ko_curr": ko_txt,
-                        "ned": round(ned, 4),
-                    })
-            seen_in_ep.append((en_norm, f"{ep_id}:{c.id}", ko_txt, ko_clean, b_lvl))
-        for en_norm, loc, ko_txt, ko_clean, b_lvl in seen_in_ep:
-            prior_utts.setdefault(en_norm, (loc, ko_txt, ko_clean, b_lvl))
+            prev_sub_cleans = [_norm_recap_ko(ln) for ln in prev_raw_ko.splitlines() if _norm_recap_ko(ln)]
+            curr_sub_cleans = [_norm_recap_ko(ln) for ln in ko_txt.splitlines() if _norm_recap_ko(ln)]
+            if ko_clean in prev_sub_cleans or prev_clean in curr_sub_cleans:
+                ned = 0.0
+            else:
+                ned = _levenshtein(prev_clean, ko_clean) / max(len(prev_clean), len(ko_clean), 1)
+            recap_neds.append(ned)
+            if prev_lvl and b_lvl and prev_lvl != b_lvl:
+                recap_flips += 1
+            if ned > 0.15 or (prev_lvl and b_lvl and prev_lvl != b_lvl):
+                defects.append({
+                    "axis": "recap_or_callback_drift",
+                    "en": c.text,
+                    "from_ep": prev_ep,
+                    "to_ep": f"{ep_id}:{c.id}",
+                    "ko_prev": prev_raw_ko,
+                    "ko_curr": ko_txt,
+                    "ned": round(ned, 4),
+                })
 
+        source_spans: list[tuple[str, str, int, str, tuple[str, ...]]] = [
+            (c.id, c.text, c.start_ms, ko_txt, ()) for c, ko_txt in dialogue
+        ]
+        for (c0, ko0), (c1, ko1) in zip(main_dialogue, main_dialogue[1:]):
+            if 0 <= c1.start_ms - c0.end_ms <= 2000:
+                source_spans.append((
+                    f"{c0.id}+{c1.id}", c0.text + " " + c1.text, c0.start_ms,
+                    ko0 if ko0 == ko1 else ko0 + "\n" + ko1, (ko0, ko1),
+                ))
+        for cid, text, _start_ms, ko_txt, components in source_spans:
+            norm = _norm_en_utterance(text)
+            toks = set(_content_tokens(text))
+            clean = _norm_recap_ko(ko_txt)
+            if len(norm) < 6 or not toks or not clean:
+                continue
+            lvls = [binary(lv) for lv in addressed_levels(ko_txt) if binary(lv)]
+            prior_utts.setdefault(
+                norm, (f"{ep_id}:{cid}", ko_txt, clean, lvls[-1] if lvls else None, toks, components),
+            )
     axis3_recap = 1.0 - (sum(recap_neds) / len(recap_neds)) if recap_neds else 1.0
 
     # 4. Axis 4: Locked Term Compliance (1 - LTV)
@@ -2720,6 +2816,7 @@ def evaluate_series_consistency(
             "causal_spoiler_free": round(axis5_spoiler, 4),
             "pragmatic_address_para": round(para, 4),
             "relationship_graph_gra": round(gra, 4),
+            "slash_clean_rate": round(1.0 - len(slash_defects) / max(total_lines, 1), 4),
         },
         "counts": {
             "episodes": len(ep_aligned),

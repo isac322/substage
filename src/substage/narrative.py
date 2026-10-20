@@ -160,18 +160,14 @@ def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
             and (it.end_ms // 1000) % 100 < 60
         )
 
-    high = [
-        t for t in non_empty
-        if t.covered_by_cue is None and 100_000 <= t.start_ms < 600_000 and t.start_ms != end_ms
-    ]
-    has_clamped_or_over = end_ms > 0 and any(
-        (t.start_ms == end_ms and t.end_ms == end_ms) or t.start_ms > end_ms for t in non_empty
+    # In-range clock values are ambiguous: require another span at or beyond
+    # the clip boundary before interpreting a first-chunk batch as MMSS.
+    has_clamped_or_over_end = end_ms > 0 and any(
+        t.start_ms > end_ms or t.end_ms > end_ms + 1000
+        or (t.start_ms >= end_ms - 500 and t.end_ms >= end_ms)
+        for t in non_empty
     )
-    mmss_cands = [t for t in high if _is_mmss_cand(t)]
-    batch_mmss = start_ms == 0 and (
-        (has_clamped_or_over and len(mmss_cands) >= 1)
-        or (len(high) >= 2 and len(mmss_cands) == len(high))
-    )
+    batch_mmss = start_ms == 0 and has_clamped_or_over_end
     kept = []
     for t in non_empty:
         if end_ms > 0 and t.start_ms == end_ms and t.end_ms == end_ms:

@@ -877,10 +877,14 @@ def pin_cues(
     tm_by_norm: dict[str, TMRecord] = {}
     tm_by_toks: list[tuple[set[str], TMRecord]] = []
     for r in (bible.tm if bible is not None else ()):
-        if r.en_norm and r.ko.strip():
-            tm_by_norm.setdefault(r.en_norm, r)
-            if len(r.content_tokens) >= 3:
+        if r.ko.strip():
+            if len(r.en_norm) >= 6:
+                tm_by_norm.setdefault(r.en_norm, r)
+            if len(r.content_tokens) >= 1:
                 tm_by_toks.append((set(r.content_tokens), r))
+    tm_by_id = {
+        (r.ep_coord, r.cue_id): r for r in (bible.tm if bible is not None else ())
+    }
     in_recap_window = False
     recap_cutoff_ms = 95_000
     for c in cues:
@@ -889,34 +893,92 @@ def pin_cues(
             recap_cutoff_ms = max(recap_cutoff_ms, min(120_000, c.end_ms + 75_000))
             break
 
+    def is_recap_cue(cue: Cue) -> bool:
+        return cue.start_ms <= (recap_cutoff_ms if in_recap_window else 75_000)
+
+    def find_recap_tm(text: str, *, split: bool = False) -> TMRecord | None:
+        norm = _norm_en_utterance(text)
+        if len(norm) >= 6 and norm in tm_by_norm:
+            return tm_by_norm[norm]
+        toks = set(_content_tokens(text))
+        best: TMRecord | None = None
+        best_score = (0.0, 0.0, 0)
+        for r_toks, r in tm_by_toks:
+            shared = len(toks & r_toks)
+            osc = shared / min(len(toks), len(r_toks)) if toks and r_toks else 0.0
+            substring = (
+                not split and min(len(norm), len(r.en_norm)) >= 12
+                and (norm in r.en_norm or r.en_norm in norm)
+            )
+            overlap = osc >= 0.75 and (
+                shared >= 3 or (not split and shared >= 2 and len(norm) >= 15)
+            )
+            if not (substring or overlap):
+                continue
+            score = (osc, shared / len(toks | r_toks), -abs(len(norm) - len(r.en_norm)))
+            if score > best_score:
+                best, best_score = r, score
+        return best
+
+    matches: dict[str, tuple[TMRecord, str]] = {}
+    for c in cues:
+        norm = _norm_en_utterance(c.text)
+        if len(norm) >= (6 if is_recap_cue(c) else 10) and norm in tm_by_norm:
+            if is_recap_cue(c) or c.id.startswith("ost-") or len(_content_tokens(c.text)) >= 3:
+                r = tm_by_norm[norm]
+                matches[c.id] = (r, r.ko)
+
+    dialogue = [c for c in cues if not c.id.startswith("ost-") and not c.lyric and c.text.strip()]
+    for c0, c1 in zip(dialogue, dialogue[1:]):
+        if not (is_recap_cue(c0) and is_recap_cue(c1)):
+            continue
+        lines_en = [ln.strip() for ln in c0.text.splitlines() if ln.strip()]
+        if len(lines_en) == 2 and all(re.match(r"^[-–—]", ln) for ln in lines_en):
+            r_b = find_recap_tm(lines_en[-1] + " " + c1.text, split=True)
+            first_norm = _norm_en_utterance(lines_en[0])
+            r_a = tm_by_norm.get(first_norm)
+            if r_a is None and len(first_norm) >= 6:
+                r_a = next(
+                    (r for r in tm_by_norm.values() if r.en_norm.startswith(first_norm + " ")),
+                    None,
+                )
+            if r_a is not None and r_b is not None:
+                first_ko = r_a.ko.splitlines()[0]
+                second_ko = r_b.ko.splitlines()[0].lstrip("- ")
+                matches[c0.id] = (r_a, first_ko + "\n- " + second_ko)
+                matches[c1.id] = (r_b, r_b.ko)
+                continue
+        if c0.id in matches or c1.id in matches:
+            continue
+        t0_set = set(_content_tokens(c0.text))
+        t1_set = set(_content_tokens(c1.text))
+        r = find_recap_tm(c0.text + " " + c1.text, split=True)
+        if r is None or not (t0_set & set(r.content_tokens)) or not (t1_set & set(r.content_tokens)):
+            continue
+        ko_lines = r.ko.splitlines()
+        ids = r.cue_id.split("+")
+        if len(ko_lines) == 2:
+            originals = [tm_by_id.get((r.ep_coord, cid)) for cid in ids]
+            if len(originals) == 2 and all(originals):
+                ko0, ko1 = (original.ko for original in originals if original is not None)
+            else:
+                ko0, ko1 = ko_lines
+        else:
+            ko0 = ko1 = r.ko
+        matches[c0.id] = (r, ko0)
+        matches[c1.id] = (r, ko1)
+
     pins: dict[str, CuePin] = {}
     for c in cues:
         if not c.text.strip():
             continue
-        is_recap = c.start_ms <= recap_cutoff_ms and (
-            in_recap_window or c.start_ms <= 65_000
-        )
-        en_norm = _norm_en_utterance(c.text)
-        c_toks = _content_tokens(c.text)
-        c_tok_set = set(c_toks)
-
-        matched_tm: TMRecord | None = None
-        if en_norm and len(en_norm) >= 10 and en_norm in tm_by_norm:
-            cand = tm_by_norm[en_norm]
-            if is_recap or c.id.startswith("ost-") or len(c_toks) >= 3:
-                matched_tm = cand
-        if matched_tm is None and is_recap and len(c_tok_set) >= 3:
-            best_j = 0.0
-            for r_toks, r in tm_by_toks:
-                inter = len(c_tok_set & r_toks)
-                if inter < 3:
-                    continue
-                union = len(c_tok_set | r_toks)
-                j = inter / union if union else 0.0
-                if j >= 0.80 and j > best_j:
-                    best_j = j
-                    matched_tm = r
-
+        is_recap = is_recap_cue(c)
+        if c.id not in matches and is_recap:
+            r = find_recap_tm(c.text)
+            if r is not None:
+                matches[c.id] = (r, r.ko)
+        match = matches.get(c.id)
+        matched_tm = match[0] if match is not None else None
         en_lower = c.text.lower()
         req_names: dict[str, str] = {}
         for ent in (bible.entities.values() if bible is not None else ()):
@@ -955,7 +1017,7 @@ def pin_cues(
             pins[c.id] = CuePin(
                 cue_id=c.id,
                 is_recap=is_recap,
-                tm_ko=matched_tm.ko if matched_tm else None,
+                tm_ko=match[1] if match is not None else None,
                 tm_level=matched_tm.speech_level if matched_tm else None,
                 tm_source_ep=matched_tm.ep_coord if matched_tm else None,
                 required_names=req_names,
@@ -1022,7 +1084,7 @@ def enforce_series_pins(
     for cid, pin in pins.items():
         curr = out.get(cid, "")
         cue = cues_by_id.get(cid)
-        if cue is None or not curr.strip():
+        if cue is None or (not curr.strip() and not (pin.is_recap and pin.tm_ko)):
             continue
 
         # 1. Opening recap, recurring OST title/sign, or exact verbatim callback TM restoration
@@ -1260,6 +1322,7 @@ def commit_bible(
     *,
     timeline: Timeline | None = None,
     pairs_by_cue: Mapping[str, tuple[str, str]] | None = None,
+    events: Sequence[Any] = (),
 ) -> SeriesBible:
     """Pure left-fold transition `B_t = Φ(B_{t-1}, E_t)`."""
     ep = ep_coord.pair
@@ -1409,17 +1472,24 @@ def commit_bible(
 
     # 4. Fold Episodic Translation Memory (TM)
     existing_tm_keys = {(tuple(r.ep_coord), r.cue_id) for r in b.tm}
+    ev_by_cids = {
+        tuple(getattr(ev, "cue_ids", ()) or ()):
+        str(getattr(ev, "ko", "")).removeprefix("{\\an8}")
+        for ev in events
+    }
+    displayed_ko = {
+        c.id: _strip_recap_ko_header(ev_by_cids.get((c.id,), ko.get(c.id, "")))
+        for c in cues
+    }
     for c in cues:
         if c.lyric:
             continue
-        ko_txt = _strip_recap_ko_header(ko.get(c.id, ""))
+        ko_txt = displayed_ko[c.id]
         if not ko_txt or not re.search(r"[가-힣]", ko_txt):
             continue
         en_norm = _norm_en_utterance(c.text)
         c_toks = _content_tokens(c.text)
-        min_toks = 2 if c.id.startswith("ost-") else 3
-        min_len = 8 if c.id.startswith("ost-") else 12
-        if len(c_toks) < min_toks or len(en_norm) < min_len:
+        if len(c_toks) < 1 or len(en_norm) < 6:
             continue
         if (ep, c.id) in existing_tm_keys:
             continue
@@ -1438,6 +1508,35 @@ def commit_bible(
                 addressee=pair[1] if pair else None,
                 speech_level=lvls[-1] if lvls else None,
                 content_tokens=c_toks,
+            )
+        )
+
+    dialogue = [c for c in cues if not c.id.startswith("ost-") and not c.lyric and c.text.strip()]
+    for c0, c1 in zip(dialogue, dialogue[1:]):
+        if not 0 <= c1.start_ms - c0.end_ms <= 2000 or (ep[1] >= 2 and c0.start_ms <= 70_000):
+            continue
+        cue_id = f"{c0.id}+{c1.id}"
+        if (ep, cue_id) in existing_tm_keys:
+            continue
+        ko0, ko1 = displayed_ko[c0.id], displayed_ko[c1.id]
+        if not ko0 or not ko1:
+            continue
+        ko_txt = _strip_recap_ko_header(
+            ev_by_cids.get((c0.id, c1.id), ko0 if ko0 == ko1 else ko0 + "\n" + ko1)
+        )
+        if not ko_txt.strip() or not re.search(r"[가-힣]", ko_txt):
+            continue
+        en_raw = c0.text + " " + c1.text
+        b.tm.append(
+            TMRecord(
+                ep_coord=ep,
+                video_id=ep_coord.video_id,
+                cue_id=cue_id,
+                start_ms=c0.start_ms,
+                en_norm=_norm_en_utterance(en_raw),
+                en_raw=en_raw,
+                ko=ko_txt,
+                content_tokens=_content_tokens(en_raw),
             )
         )
 

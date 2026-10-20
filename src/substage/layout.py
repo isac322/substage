@@ -52,7 +52,7 @@ from .models import (
 from .style import style_guide
 from .validate import (
     LYRIC_MARK, _DASHES, _dual_line, _speakers, cps_chars, normalize_punct, reconcile_lineage,
-    render_retained, rewrap,
+    render_retained, rewrap, strip_clause_slashes,
 )
 
 # Settings fields that change the layout (part of the stage's checkpoint key).
@@ -185,7 +185,10 @@ def _retime(events: list[_Ev], settings) -> None:
 
 
 def _flat(text: str) -> str:
-    return " ".join(line.strip().lstrip(_DASHES).strip() for line in text.splitlines() if line.strip())
+    return " ".join(
+        line.strip().lstrip(_DASHES).strip()
+        for line in strip_clause_slashes(text).splitlines() if line.strip()
+    )
 
 
 def _fits(ko: str, cpl: int) -> bool:

@@ -1755,6 +1755,7 @@ def run(
             ko,
             timeline=timeline,
             pairs_by_cue=pairs_by_cue,
+            events=events,
         )
         if bible_file is not None:
             series_state.save_bible(committed_bible, path=bible_file)

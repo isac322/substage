@@ -43,6 +43,7 @@ from .config import Settings, Workspace, narrative_context, narrative_text
 from .gemini import Clip, GeminiBlocked, GeminiClient, UploadedFile
 from .llm import LLMClient, make_client, text_client
 from .models import (
+    ChunkObservations,
     Cue,
     CueObservation,
     VideoInfo,
@@ -2447,18 +2448,13 @@ def _normalize_chunk_ost_mmss(items: list[OnScreenText], start_ms: int, end_ms: 
             and (it.end_ms // 1000) % 100 < 60
         )
 
-    high = [
-        it for it in items
-        if it.covered_by_cue is None and 100_000 <= it.start_ms < 600_000 and it.start_ms != end_ms
-    ]
-    has_clamped_or_over = end_ms > 0 and any(
-        (it.start_ms == end_ms and it.end_ms == end_ms) or it.start_ms > end_ms for it in items
+    # MMSS-shaped values alone are also valid millisecond timestamps.
+    has_clamped_or_over_end = end_ms > 0 and any(
+        it.start_ms > end_ms or it.end_ms > end_ms + 1000
+        or (it.start_ms >= end_ms - 500 and it.end_ms >= end_ms)
+        for it in items
     )
-    mmss_cands = [it for it in high if _is_mmss_cand(it)]
-    batch_mmss = start_ms == 0 and (
-        (has_clamped_or_over and len(mmss_cands) >= 1)
-        or (len(high) >= 2 and len(mmss_cands) == len(high))
-    )
+    batch_mmss = start_ms == 0 and has_clamped_or_over_end
     out: list[OnScreenText] = []
     for it in items:
         s, e = it.start_ms, it.end_ms
@@ -2473,6 +2469,93 @@ def _normalize_chunk_ost_mmss(items: list[OnScreenText], start_ms: int, end_ms: 
         if (s, e) != (it.start_ms, it.end_ms):
             it = it.model_copy(update={"start_ms": s, "end_ms": max(e, s)})
         out.append(it)
+    return out
+
+
+def realign_ost_to_anchors_and_gaps(
+    observations: Sequence[ChunkObservations], cues: Sequence[Cue]
+) -> list[ChunkObservations]:
+    """Repair drift only when dialogue anchors or a one-minute gap carry agree."""
+    ignored = {
+        "welcome", "from", "with", "that", "this", "your", "have", "into",
+        "over", "showtime", "presents", "uber", "core", "value", "values",
+    }
+    dialogue = sorted(
+        (c for c in cues if c.source != "ost" and c.text.strip()),
+        key=lambda c: (c.start_ms, c.end_ms),
+    )
+    out: list[ChunkObservations] = []
+    for ch in observations:
+        chunk_cues = [
+            c for c in dialogue if c.start_ms < ch.end_ms and c.end_ms > ch.start_ms
+        ]
+        if not chunk_cues:
+            out.append(ch)
+            continue
+        cue_words = [set(re.findall(r"[a-z]+", c.text.lower())) for c in chunk_cues]
+        cue_phrases = [" ".join(re.findall(r"[a-z]+", c.text.lower())) for c in chunk_cues]
+        gaps: list[tuple[int, int]] = []
+        previous_end = ch.start_ms
+        for c in chunk_cues:
+            if c.start_ms - previous_end >= 4500:
+                gaps.append((previous_end, c.start_ms))
+            previous_end = max(previous_end, c.end_ms)
+        if ch.end_ms - previous_end >= 4500:
+            gaps.append((previous_end, ch.end_ms))
+        items: list[OnScreenText] = []
+        for o in ch.on_screen_text:
+            kind, clean_text = _split_kind(o.text)
+            tokens = re.findall(r"[A-Za-z]+", clean_text)
+            words = {t.lower() for t in tokens if len(t) >= 4 and t.lower() not in ignored}
+            if not tokens or o.covered_by_cue is not None:
+                items.append(o)
+                continue
+            unrelated = any(
+                c.start_ms <= o.end_ms + 2000 and c.end_ms >= o.start_ms - 2000
+                and not words.intersection(cw)
+                for c, cw in zip(chunk_cues, cue_words)
+            )
+            proper = {
+                t.lower() for t in tokens
+                if t[0].isupper() and t.lower() in words
+                and sum(t.lower() in cw for cw in cue_words) == 1
+            }
+            phrase = " ".join(t.lower() for t in tokens)
+            matches = [
+                c for c, cw, cp in zip(chunk_cues, cue_words, cue_phrases)
+                if f" {phrase} " in f" {cp} " or proper.intersection(cw)
+            ]
+            anchors = [
+                c for c in matches if abs(c.start_ms - o.start_ms) > 25_000
+            ]
+            start, end = o.start_ms, o.end_ms
+            if unrelated and anchors and not any(
+                abs(c.start_ms - o.start_ms) <= 15_000 for c in matches
+            ):
+                anchor = min(anchors, key=lambda c: abs(c.start_ms - o.start_ms))
+                duration = min(max(o.end_ms - o.start_ms, 2000), 4500)
+                if ch.end_ms - ch.start_ms >= duration:
+                    start = min(max(anchor.end_ms - 1350, ch.start_ms), ch.end_ms - duration)
+                    end = start + duration
+            elif kind in {"sign", "title", "caption"} and (
+                unrelated or not any(a <= o.start_ms < b for a, b in gaps)
+            ) and any(
+                b - a >= 5000 and a <= o.start_ms + 60_000 < b for a, b in gaps
+            ) and o.end_ms + 60_000 <= ch.end_ms:
+                start, end = o.start_ms + 60_000, o.end_ms + 60_000
+            if (start, end) != (o.start_ms, o.end_ms):
+                offset = start - o.start_ms
+                beats = [
+                    b.model_copy(update={
+                        "start_ms": max(start, b.start_ms + offset),
+                        "end_ms": min(end, b.end_ms + offset),
+                    })
+                    for b in o.beats
+                    if min(end, b.end_ms + offset) > max(start, b.start_ms + offset)
+                ]
+                o = o.model_copy(update={"start_ms": start, "end_ms": end, "beats": beats})
+            items.append(o)
+        out.append(ch.model_copy(update={"on_screen_text": items}))
     return out
 
 
@@ -2583,13 +2666,21 @@ def ost_cues(
     """New cues for on-screen text (and unsubtitled audible words) that no
     existing English cue carries."""
     items: list[OnScreenText] = []
+    chunks: list[ChunkObservations] = []
     for o in observations or []:
         if isinstance(o, OnScreenText):
             items.append(o)
         elif hasattr(o, "on_screen_text"):
             c_start = getattr(o, "start_ms", 0) or 0
             c_end = getattr(o, "end_ms", 0) or 0
-            items.extend(_normalize_chunk_ost_mmss(list(o.on_screen_text), c_start, c_end))
+            chunks.append(ChunkObservations(
+                chunk_id=getattr(o, "chunk_id", ""),
+                start_ms=c_start,
+                end_ms=c_end,
+                on_screen_text=_normalize_chunk_ost_mmss(list(o.on_screen_text), c_start, c_end),
+            ))
+    for ch in realign_ost_to_anchors_and_gaps(chunks, cues):
+        items.extend(ch.on_screen_text)
     by_id = {c.id: c for c in cues}
     new: list[Cue] = []
     for kind, ost in _dedupe_ost(items):

@@ -335,6 +335,19 @@ def _strip_terminal(line: str) -> str:
     return line
 
 
+_CLAUSE_SLASH = re.compile(r"(?<=\S)\s+/\s+(?=\S)")
+
+
+def strip_clause_slashes(text: str) -> str:
+    """Replace spaced clause separators, preserving unspaced fixed tokens."""
+    text = re.sub(r"\s+/\s*\n\s*", "\n", text)
+    text = re.sub(r"\n\s*/\s+", "\n", text)
+    text = re.sub(r"^\s*/\s+|\s+/\s*$", "", text)
+    if "\n" not in text and len(text.strip()) > 14:
+        text = _CLAUSE_SLASH.sub("\n", text, count=1)
+    return _CLAUSE_SLASH.sub(" ", text)
+
+
 def normalize_punct(ko: str) -> str:
     """'…'/'..' -> '...'; '<제목>' and curly/double quotes -> straight single
     quotes; strip terminal '.'/',' on every line (keep '?', '!', '...');
@@ -346,7 +359,7 @@ def normalize_punct(ko: str) -> str:
     else:
         # a lone dashed turn is not a dual-speaker cue: drop the stray dash
         lines = [line.strip().lstrip(_DASHES).lstrip() if line.strip() else line for line in lines]
-    return "\n".join(_strip_terminal(line) for line in lines)
+    return strip_clause_slashes("\n".join(_strip_terminal(line) for line in lines))
 
 
 LYRIC_MARK = "♪ "
@@ -467,7 +480,7 @@ def lineage_issues(lineage: SemanticLineage, *, events: list[OutEvent] | None = 
 
 def check_output_events(events: list[OutEvent], settings) -> list[ValidationIssue]:
     """Check the actual rendered timing/text, not only pre-layout cue proxies."""
-    return [
+    issues = [
         issue
         for event in events
         for issue in check(
@@ -476,6 +489,16 @@ def check_output_events(events: list[OutEvent], settings) -> list[ValidationIssu
             event.ko, settings, retained_fragments=event.fragments if event.fragments else None,
         )
     ]
+    issues.extend(
+        ValidationIssue(
+            cue_id=event.cue_ids[0] if event.cue_ids else f"event@{event.start_ms}",
+            rule="slash_separator",
+            detail="spaced '/' separator must be a real newline or space",
+        )
+        for event in events
+        if re.search(r"(?<=\S)\s+/\s+(?=\S)|(?:\s+/\s*$)|(?:^\s*/\s+)", event.ko, re.M)
+    )
+    return issues
 
 
 def finish(
