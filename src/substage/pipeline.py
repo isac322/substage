@@ -1653,14 +1653,22 @@ def run(
         ),
     )
     events = layout_result.items
-    if series_pins:
+    if series_pins or register_map is not None:
         events = series_state.enforce_event_pins(
             events, cues, ko, active_bible, series_pins, context_map=context_map,
             register_map=register_map, observations=observations, scenes=scenes,
         )
         for ev in events:
+            clean_ev = ev.ko.removeprefix("{\\an8}")
             if len(ev.cue_ids) == 1 and ev.cue_ids[0] in ko:
-                ko[ev.cue_ids[0]] = ev.ko.removeprefix("{\\an8}")
+                ko[ev.cue_ids[0]] = clean_ev
+            elif len(ev.cue_ids) == 2 and all(cid in ko for cid in ev.cue_ids):
+                c0_id, c1_id = ev.cue_ids
+                c0_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", ko[c0_id])
+                ev_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", clean_ev)
+                if c0_alnum and c0_alnum not in ev_alnum:
+                    ko[c0_id] = clean_ev
+                    ko[c1_id] = clean_ev
     if lineage is not None:
         semantic_trace.append({
             "stage": "s5c-layout", "kind": "actual-display-events",
