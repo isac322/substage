@@ -605,7 +605,7 @@ def reconcile_characters(
             merged_aliases = list(
                 dict.fromkeys(
                     a
-                    for a in [*ent.aliases, *ch.aliases, ch.en_name, ent.en_name, ent.ko_short, ent.ko_last]
+                    for a in [*ent.aliases, *ch.aliases, ch.id, ch.en_name, ent.en_name, ent.ko_short, ent.ko_last]
                     if a and a not in (ent.char_id, ent.ko_name)
                 )
             )
@@ -730,11 +730,26 @@ def lock_edges(
     if bible is None or not bible.dyads:
         return register_map
 
-    cues_by_id = {c.id: c for c in cues}
-    edges_by_pair: dict[tuple[str, str], RegisterEdge] = {
-        (e.speaker, e.addressee): e for e in register_map.edges
-    }
+    def _remap_actor(actor_id: str) -> str:
+        if actor_id in bible.entities or actor_id in ("group", "narration", "system_ai") or actor_id.startswith("ep:"):
+            return actor_id
+        low = actor_id.lower()
+        matches = [
+            ent.char_id
+            for ent in bible.entities.values()
+            if low in {t.lower() for t in [ent.en_name, *ent.en_name.split(), *ent.aliases]}
+        ]
+        return matches[0] if len(matches) == 1 else actor_id
 
+    cues_by_id = {c.id: c for c in cues}
+    edges_by_pair: dict[tuple[str, str], RegisterEdge] = {}
+    for raw_e in register_map.edges:
+        spk = _remap_actor(raw_e.speaker)
+        adr = _remap_actor(raw_e.addressee)
+        if spk == adr:
+            continue
+        e = raw_e.model_copy(update={"speaker": spk, "addressee": adr}) if (spk != raw_e.speaker or adr != raw_e.addressee) else raw_e
+        edges_by_pair[(spk, adr)] = e
     # Verify any proposed binary flip against locked dyads
     flip_candidates: list[tuple[tuple[str, str], RegisterEdge, DyadRecord]] = []
     for pair, edge in list(edges_by_pair.items()):
