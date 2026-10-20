@@ -2515,15 +2515,10 @@ def realign_ost_to_anchors_and_gaps(
                 and not words.intersection(cw)
                 for c, cw in zip(chunk_cues, cue_words)
             )
-            proper = {
-                t.lower() for t in tokens
-                if t[0].isupper() and t.lower() in words
-                and sum(t.lower() in cw for cw in cue_words) == 1
-            }
             phrase = " ".join(t.lower() for t in tokens)
             matches = [
-                c for c, cw, cp in zip(chunk_cues, cue_words, cue_phrases)
-                if f" {phrase} " in f" {cp} " or proper.intersection(cw)
+                c for c, cp in zip(chunk_cues, cue_phrases)
+                if len(tokens) >= 2 and len(phrase) >= 8 and f" {phrase} " in f" {cp} "
             ]
             anchors = [
                 c for c in matches if abs(c.start_ms - o.start_ms) > 25_000
@@ -2537,11 +2532,16 @@ def realign_ost_to_anchors_and_gaps(
                 if ch.end_ms - ch.start_ms >= duration:
                     start = min(max(anchor.end_ms - 1350, ch.start_ms), ch.end_ms - duration)
                     end = start + duration
-            elif kind in {"sign", "title", "caption"} and (
-                unrelated or not any(a <= o.start_ms < b for a, b in gaps)
-            ) and any(
-                b - a >= 5000 and a <= o.start_ms + 60_000 < b for a, b in gaps
-            ) and o.end_ms + 60_000 <= ch.end_ms:
+            elif (
+                ch.start_ms > 0
+                and kind in {"sign", "title", "caption"}
+                and not any(0 <= o.start_ms - a <= 10_000 for a, _ in gaps)
+                and any(
+                    b - a >= 5000 and 0 <= (o.start_ms + 60_000) - a <= 10_000
+                    for a, b in gaps
+                )
+                and o.end_ms + 60_000 <= ch.end_ms
+            ):
                 start, end = o.start_ms + 60_000, o.end_ms + 60_000
             if (start, end) != (o.start_ms, o.end_ms):
                 offset = start - o.start_ms
