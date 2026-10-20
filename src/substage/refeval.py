@@ -2635,25 +2635,32 @@ def evaluate_series_consistency(
     recap_neds: list[float] = []
     recap_flips = 0
 
-    def match_prior(text: str, *, fuzzy: bool) -> str | None:
+    def match_prior(text: str, *, fuzzy: bool, split: bool = False) -> str | None:
         norm = _norm_en_utterance(text)
         if norm in prior_utts:
             return norm
         if not fuzzy:
             return None
         toks = set(_content_tokens(text))
+        if not toks:
+            return None
         best_norm = None
         best_score = (0.0, 0.0, 0)
         for prev_norm, (_, _, _, _, prev_toks, _) in prior_utts.items():
             shared = len(toks & prev_toks)
-            osc = shared / min(len(toks), len(prev_toks)) if toks and prev_toks else 0.0
-            substring = (
-                min(len(norm), len(prev_norm)) >= 12
-                and (norm in prev_norm or prev_norm in norm)
-            )
-            if not (substring or (shared >= 3 and osc >= 0.75)):
+            if shared == 0:
                 continue
-            score = (osc, shared / len(toks | prev_toks), -abs(len(norm) - len(prev_norm)))
+            recap_cov = shared / len(toks)
+            jaccard = shared / len(toks | prev_toks)
+            if split:
+                if not (shared >= 3 and jaccard >= 0.65 and recap_cov >= 0.75):
+                    continue
+            else:
+                substring = len(norm) >= 12 and len(prev_norm) >= 12 and norm in prev_norm and recap_cov >= 0.75
+                overlap = recap_cov >= 0.75 and jaccard >= 0.60 and (shared >= 3 or (shared >= 2 and len(norm) >= 15))
+                if not (substring or overlap):
+                    continue
+            score = (jaccard, recap_cov, -abs(len(norm) - len(prev_norm)))
             if score > best_score:
                 best_norm, best_score = prev_norm, score
         return best_norm
@@ -2672,8 +2679,8 @@ def evaluate_series_consistency(
             if c0.start_ms > 95_000 or c1.start_ms > 95_000:
                 continue
             lines_en = [ln.strip() for ln in c0.text.splitlines() if ln.strip()]
-            if len(lines_en) == 2 and all(re.match(r"^[-–—]", ln) for ln in lines_en):
-                norm_b = match_prior(lines_en[-1] + " " + c1.text, fuzzy=True)
+            if len(lines_en) == 2 and all(re.match(r"^[-–—]", ln) for ln in lines_en) and not c1.text.lstrip().startswith("-"):
+                norm_b = match_prior(lines_en[-1] + " " + c1.text, fuzzy=True, split=True)
                 first_norm = _norm_en_utterance(lines_en[0])
                 norm_a = first_norm if first_norm in prior_utts else next(
                     (norm for norm in prior_utts if len(first_norm) >= 6 and norm.startswith(first_norm + " ")),
@@ -2682,17 +2689,24 @@ def evaluate_series_consistency(
                 if norm_a is not None and norm_b is not None:
                     ko_a = prior_utts[norm_a][1].splitlines()[0]
                     ko_b = prior_utts[norm_b][1]
-                    split_targets[c0.id] = (norm_a, ko_a + "\n- " + ko_b.splitlines()[0].lstrip("- "))
-                    split_targets[c1.id] = (norm_b, ko_b)
+                    rb_lines = [ln for ln in ko_b.splitlines() if ln.strip()]
+                    second_ko = rb_lines[0].lstrip("- ") if rb_lines else ko_b.lstrip("- ")
+                    rem_ko = rb_lines[-1] if len(rb_lines) > 1 else ko_b
+                    split_targets[c0.id] = (norm_a, ko_a + "\n- " + second_ko)
+                    split_targets[c1.id] = (norm_b, rem_ko)
                     continue
-            if c0.id in split_targets or c1.id in split_targets:
+            if c0.id in split_targets or c1.id in split_targets or c1.text.lstrip().startswith("-"):
                 continue
             if _norm_en_utterance(c0.text) in prior_utts or _norm_en_utterance(c1.text) in prior_utts:
                 continue
-            norm = match_prior(c0.text + " " + c1.text, fuzzy=True)
+            t0_set = set(_content_tokens(c0.text))
+            t1_set = set(_content_tokens(c1.text))
+            norm = match_prior(c0.text + " " + c1.text, fuzzy=True, split=True)
             if norm is None:
                 continue
-            _, prev_raw_ko, _, _, _, components = prior_utts[norm]
+            _, prev_raw_ko, _, _, prev_toks, components = prior_utts[norm]
+            if not (t0_set & prev_toks) or not (t1_set & prev_toks):
+                continue
             ko_parts = list(components) if len(components) == 2 else prev_raw_ko.splitlines()
             if len(ko_parts) == 2:
                 ko0, ko1 = ko_parts
@@ -2722,7 +2736,11 @@ def evaluate_series_consistency(
             b_lvl = lvls[-1] if lvls else None
             prev_sub_cleans = [_norm_recap_ko(ln) for ln in prev_raw_ko.splitlines() if _norm_recap_ko(ln)]
             curr_sub_cleans = [_norm_recap_ko(ln) for ln in ko_txt.splitlines() if _norm_recap_ko(ln)]
-            if ko_clean in prev_sub_cleans or prev_clean in curr_sub_cleans:
+            if (
+                ko_clean in prev_sub_cleans
+                or prev_clean in curr_sub_cleans
+                or (min(len(prev_clean), len(ko_clean)) >= 4 and (prev_clean in ko_clean or ko_clean in prev_clean))
+            ):
                 ned = 0.0
             else:
                 ned = _levenshtein(prev_clean, ko_clean) / max(len(prev_clean), len(ko_clean), 1)

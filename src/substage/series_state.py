@@ -901,21 +901,25 @@ def pin_cues(
         if len(norm) >= 6 and norm in tm_by_norm:
             return tm_by_norm[norm]
         toks = set(_content_tokens(text))
+        if not toks:
+            return None
         best: TMRecord | None = None
         best_score = (0.0, 0.0, 0)
         for r_toks, r in tm_by_toks:
             shared = len(toks & r_toks)
-            osc = shared / min(len(toks), len(r_toks)) if toks and r_toks else 0.0
-            substring = (
-                not split and min(len(norm), len(r.en_norm)) >= 12
-                and (norm in r.en_norm or r.en_norm in norm)
-            )
-            overlap = osc >= 0.75 and (
-                shared >= 3 or (not split and shared >= 2 and len(norm) >= 15)
-            )
-            if not (substring or overlap):
+            if shared == 0:
                 continue
-            score = (osc, shared / len(toks | r_toks), -abs(len(norm) - len(r.en_norm)))
+            recap_cov = shared / len(toks)
+            jaccard = shared / len(toks | r_toks)
+            if split:
+                if not (shared >= 3 and jaccard >= 0.65 and recap_cov >= 0.75):
+                    continue
+            else:
+                substring = len(norm) >= 12 and len(r.en_norm) >= 12 and norm in r.en_norm and recap_cov >= 0.75
+                overlap = recap_cov >= 0.75 and jaccard >= 0.60 and (shared >= 3 or (shared >= 2 and len(norm) >= 15))
+                if not (substring or overlap):
+                    continue
+            score = (jaccard, recap_cov, -abs(len(norm) - len(r.en_norm)))
             if score > best_score:
                 best, best_score = r, score
         return best
@@ -933,7 +937,7 @@ def pin_cues(
         if not (is_recap_cue(c0) and is_recap_cue(c1)):
             continue
         lines_en = [ln.strip() for ln in c0.text.splitlines() if ln.strip()]
-        if len(lines_en) == 2 and all(re.match(r"^[-–—]", ln) for ln in lines_en):
+        if len(lines_en) == 2 and all(re.match(r"^[-–—]", ln) for ln in lines_en) and not c1.text.lstrip().startswith("-"):
             r_b = find_recap_tm(lines_en[-1] + " " + c1.text, split=True)
             first_norm = _norm_en_utterance(lines_en[0])
             r_a = tm_by_norm.get(first_norm)
@@ -944,11 +948,13 @@ def pin_cues(
                 )
             if r_a is not None and r_b is not None:
                 first_ko = r_a.ko.splitlines()[0]
-                second_ko = r_b.ko.splitlines()[0].lstrip("- ")
+                rb_lines = [ln for ln in r_b.ko.splitlines() if ln.strip()]
+                second_ko = rb_lines[0].lstrip("- ") if rb_lines else r_b.ko.lstrip("- ")
+                rem_ko = rb_lines[-1] if len(rb_lines) > 1 else r_b.ko
                 matches[c0.id] = (r_a, first_ko + "\n- " + second_ko)
-                matches[c1.id] = (r_b, r_b.ko)
+                matches[c1.id] = (r_b, rem_ko)
                 continue
-        if c0.id in matches or c1.id in matches:
+        if c0.id in matches or c1.id in matches or c1.text.lstrip().startswith("-"):
             continue
         t0_set = set(_content_tokens(c0.text))
         t1_set = set(_content_tokens(c1.text))
