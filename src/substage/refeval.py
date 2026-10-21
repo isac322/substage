@@ -513,14 +513,15 @@ def evaluate_ost_and_sync(
         )
 
     def quoted(event: Any) -> bool:
-        text = str(value(event, "ko", value(event, "text", "")))
-        lines = re.sub(r"\{[^}]*\}", "", text).replace(r"\N", "\n").strip().splitlines()
+        text = re.sub(r"\{[^}]*\}", "", str(value(event, "ko", value(event, "text", "")))).replace(r"\N", "\n").strip()
+        lines = text.splitlines()
         pairs = {"'": "'", '"': '"', "‘": "’", "“": "”", "[": "]"}
+        if len(text) >= 2 and pairs.get(text[0]) == text[-1]:
+            return True
         return bool(lines) and all(
             len(line.strip()) >= 2 and pairs.get(line.strip()[0]) == line.strip()[-1]
             for line in lines
         )
-
     def at_top(event: Any) -> bool:
         position = value(event, "position", value(event, "pos"))
         if position is not None:
@@ -2477,7 +2478,14 @@ def evaluate_pragmatic_address(
                     edge
                     and pair[1] != "group"
                     and edge.relation != "partner"
-                    and (edge.relation in _PARA_UPWARD_KIN_RELATIONS or edge.apparent_generation == "addressee_older")
+                    and (
+                        edge.relation in _PARA_UPWARD_KIN_RELATIONS
+                        or (
+                            edge.apparent_generation == "addressee_older"
+                            and edge.step not in (4, 10)
+                            and edge.relation not in ("child", "younger_kin", "ward", "protege", "subordinate", "peer")
+                        )
+                    )
                 ) or ko_is_polite:
                     bad = "upward_ner"
             elif _PARA_DANGSIN_RE.search(ko_txt) and is_no_dangsin:
@@ -3166,9 +3174,6 @@ def evaluate_media_quality(
     else:
         srt = Path(srt_path)
     srt_lines = load_ko(srt) if _decode(srt).strip() else []
-    events = _quality_display_events(srt, srt_lines)
-    ost_ev = [event for event in events if event["ost"]]
-    dlg_ev = [event for event in events if not event["ost"]]
     cues = sorted(
         load_models(paths["cues.json"], Cue) if paths["cues.json"] else [],
         key=lambda cue: (cue.start_ms, cue.end_ms),
@@ -3177,6 +3182,17 @@ def evaluate_media_quality(
         cue for cue in cues
         if cue.source != "ost" and not cue.id.startswith("ost-") and not cue.lyric and cue.text.strip()
     ]
+    ost_cues_list = [cue for cue in cues if cue.source == "ost" or cue.id.startswith("ost-")]
+    events = _quality_display_events(srt, srt_lines)
+    if spoken:
+        for ev in events:
+            if ev["position"] != "an8" and ev["ost"]:
+                ov_ost_cue = any(min(ev["end_ms"], oc.end_ms) - max(ev["start_ms"], oc.start_ms) >= 150 for oc in ost_cues_list)
+                ov_spk_cue = any(min(ev["end_ms"], sc.end_ms) - max(ev["start_ms"], sc.start_ms) >= 150 for sc in spoken)
+                if ov_spk_cue and not ov_ost_cue:
+                    ev["ost"] = False
+    ost_ev = [event for event in events if event["ost"]]
+    dlg_ev = [event for event in events if not event["ost"]]
     scenes = load_models(paths["scenes.json"], Scene) if paths["scenes.json"] else []
     observations: list[ChunkObservations | CueObservation] = []
     if paths["observations.json"]:
