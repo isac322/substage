@@ -3111,7 +3111,7 @@ def _quality_number_signature(text: str) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
-def _quality_similar(left: str, right: str, minimum: int) -> bool:
+def _quality_similar(left: str, right: str, minimum: int, *, overlapping: bool = True) -> bool:
     left_numbers, right_numbers = _quality_number_signature(left), _quality_number_signature(right)
     if left_numbers and right_numbers and left_numbers != right_numbers:
         return False
@@ -3120,7 +3120,9 @@ def _quality_similar(left: str, right: str, minimum: int) -> bool:
     if min(len(aa), len(bb)) < minimum:
         return False
     if aa in bb or bb in aa:
-        return True
+        if overlapping or min(len(aa), len(bb)) / max(len(aa), len(bb), 1) >= 0.55:
+            return True
+    stop_pronouns = {"당신", "너", "나", "내", "우리", "그", "이", "저"} if not overlapping else set()
     def tokens(text: str) -> set[str]:
         result = set()
         for token in text.split():
@@ -3128,13 +3130,12 @@ def _quality_similar(left: str, right: str, minimum: int) -> bool:
                 if len(token) > len(suffix) and token.endswith(suffix):
                     token = token[:-len(suffix)]
                     break
-            if len(token) >= 2:
+            if len(token) >= 2 and token not in stop_pronouns:
                 result.add(token)
         return result
 
     ta, tb = tokens(a), tokens(b)
     return len(ta & tb) >= 2 and len(ta & tb) / max(min(len(ta), len(tb)), 1) >= 0.65
-
 
 def evaluate_media_quality(
     video_id: str, *, ws_dir: Path | str | None = None,
@@ -3225,7 +3226,18 @@ def evaluate_media_quality(
     translations = load_models(paths["translations.json"], SceneTranslation) if paths["translations.json"] else []
     translated = {line.cue_id: line for scene in translations for line in scene.cues}
     by_cue, by_event = _quality_align(spoken, dlg_ev)
-    ko_by_cue = {cid: "\n".join(event["text"] for event in matches) for cid, matches in by_cue.items()}
+    cue_by_id = {cue.id: cue for cue in spoken}
+    ko_by_cue = {
+        cid: (
+            max(
+                matches,
+                key=lambda ev: min(cue_by_id[cid].end_ms, ev["end_ms"]) - max(cue_by_id[cid].start_ms, ev["start_ms"]),
+            )["text"]
+            if matches
+            else (translated[cid].ko if cid in translated else "")
+        )
+        for cid, matches in by_cue.items()
+    }
     defects: list[dict[str, Any]] = []
 
     def defect(stage: str, kind: str, event: Mapping[str, Any], **extra: Any) -> None:
@@ -3289,7 +3301,8 @@ def evaluate_media_quality(
     for event in ost_ev:
         recent_ost = [previous for previous in recent_ost if event["start_ms"] - previous["end_ms"] <= 12_000]
         for previous in recent_ost:
-            if _quality_similar(previous["text"], event["text"], 4):
+            ov_ost = min(previous["end_ms"], event["end_ms"]) > max(previous["start_ms"], event["start_ms"])
+            if _quality_similar(previous["text"], event["text"], 4, overlapping=ov_ost):
                 collision("ost_duplicate_translations", previous, event)
         recent_ost.append(event)
     bottom = [event for event in events if event["position"] == "an2" and not event["ost"]]
@@ -3317,6 +3330,8 @@ def evaluate_media_quality(
         ):
             collision("ost_dialogue_redundancies", event, other)
     for previous, event in zip(bottom, bottom[1:]):
+        if "♪" in previous["text"] or "♪" in event["text"]:
+            continue
         norm = "".join(_norm_off_surface(previous["text"]).split())
         if len(norm) < 6 or norm != "".join(_norm_off_surface(event["text"]).split()):
             continue
@@ -3367,7 +3382,7 @@ def evaluate_media_quality(
         edge = table.edge(*pair) if table is not None else None
         expected = table.level_at(*pair, cue.id) if table is not None else None
         event = {"start_ms": cue.start_ms, "end_ms": cue.end_ms, "text": text}
-        if edge and edge.relation == "stranger_civil" and edge.step == 9 and register_mod.binary(expected) == "J" and levels[0] == "B":
+        if pair[1] != "group" and edge and edge.relation == "stranger_civil" and edge.step == 9 and register_mod.binary(expected) == "J" and levels[0] == "B":
             stranger_banmal_count += 1
             defect("register/translate", "stranger_banmal", event, cue_id=cue.id, pair=list(pair))
         if pair[1] != "group" and cue.id in scene_of:
@@ -3410,7 +3425,6 @@ def evaluate_media_quality(
                             "scene_id": scene.id, "cue_id": cid, "pair": key,
                             "expected": expected, "text": entry.level_at(cid, cue_order),
                         })
-                        break
     register_score = max(
         0.0, 100.0 - 5.0 * alias_collisions - 2.0 * stranger_banmal_count
         - 1.5 * scene_oscillations - 0.5 * snap_disagree,
@@ -3436,10 +3450,21 @@ def evaluate_media_quality(
     if ost_res["sync_err_ms"] is not None and ost_res["sync_err_ms"] > QUALITY_TARGETS["sync_err_ms_max"]:
         defects.append({"stage": "sync", "kind": "sync_error", "sync_err_ms": ost_res["sync_err_ms"]})
 
-    missing = [cue for cue in spoken if not by_cue[cue.id]]
+    _sdh_re = re.compile(
+        r"\b(music|sings|singing|plays|indistinctly|applause|laughter|groans|sighs|chuckles|screams|cheering)\b",
+        re.I,
+    )
+    missing = [
+        cue for cue in spoken
+        if not by_cue[cue.id]
+        and not (cue.id in translated and not translated[cue.id].ko.strip())
+        and not (cue.id in translated and translated[cue.id].ko.strip())
+        and not _sdh_re.search(cue.text)
+        and not re.fullmatch(r"[\s\-–—\[\]()♪♫.,?!'\"]+", cue.text)
+    ]
     raw_music_count = english_only_count = 0
     for event in events:
-        if "♪" in event["text"]:
+        if "♪" in event["text"] and not event["text"].lstrip().startswith("♪"):
             raw_music_count += 1
             defect("translate", "raw_music_symbol", event)
         if not event["ost"] and re.search(r"[A-Za-z]", event["text"]) and not re.search(r"[가-힣]", event["text"]):
