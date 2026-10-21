@@ -3203,7 +3203,24 @@ def evaluate_media_quality(
     register_map = load_model(paths["register.yaml"], RegisterMap) if paths["register.yaml"] else None
     if register_map is not None:
         register_map = register_mod.canonicalize_register_map(register_map, context_map)
-    snapshots = load_models(paths["snapshots.json"], Snapshot) if paths["snapshots.json"] else []
+    snap_path = (
+        (paths["register.yaml"].parent / "snapshots.json")
+        if paths["register.yaml"] and (paths["register.yaml"].parent / "snapshots.json").is_file()
+        else paths["snapshots.json"]
+    )
+    snapshots: list[Snapshot] = []
+    if snap_path and snap_path.is_file():
+        from .models import SceneRegister
+        for raw_snap in json.loads(snap_path.read_text(encoding="utf-8")):
+            if isinstance(raw_snap, dict) and isinstance(raw_snap.get("registers"), dict):
+                raw_snap = {
+                    **raw_snap,
+                    "registers": {
+                        rk: ({"level": rv} if isinstance(rv, str) else rv)
+                        for rk, rv in raw_snap["registers"].items()
+                    },
+                }
+            snapshots.append(Snapshot.model_validate(raw_snap))
     translations = load_models(paths["translations.json"], SceneTranslation) if paths["translations.json"] else []
     translated = {line.cue_id: line for scene in translations for line in scene.cues}
     by_cue, by_event = _quality_align(spoken, dlg_ev)
@@ -3392,6 +3409,7 @@ def evaluate_media_quality(
                             "scene_id": scene.id, "cue_id": cid, "pair": key,
                             "expected": expected, "text": entry.level_at(cid, cue_order),
                         })
+                        break
     register_score = max(
         0.0, 100.0 - 5.0 * alias_collisions - 2.0 * stranger_banmal_count
         - 1.5 * scene_oscillations - 0.5 * snap_disagree,
