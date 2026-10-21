@@ -46,6 +46,7 @@ _JONG_L = 8  # ㄹ
 # Published Sejong EF suffixes for 하십시오체 (both compatibility jamo and Hangul jongseong U+11B8)
 _HASIPSIO_EF_SUFFIXES = (
     "습니다", "습니까", "십시오", "십시다", "사옵니다", "옵소서", "올시다",
+    "답니다", "랍니다", "답니까", "랍니까", "습디다", "습디까", "더이다",
     "\u11b8니다", "\u11b8니까", "\u11b8시오", "\u11b8시다",
     "ㅂ니다", "ㅂ니까", "ㅂ시오", "ㅂ시다", "소서", "옵니다",
 )
