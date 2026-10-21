@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 import pysubs2
+import pytest
 
 from substage import emit as emit_mod
 from substage import layout as lay
@@ -621,3 +622,231 @@ def test_one_millisecond_ost_dialogue_overlap_keeps_full_ost_on_top():
     ost = next(e for e in run(cues, {"ost-1": "첫 화면", "c1": "말하는 중"}) if e.channel == "ost")
     assert ost.position == "an8"
     assert ost.end_ms == 1800
+
+
+# ---------------------------------------------------------------- duplicate displays
+
+
+def test_dedupe_normalization_ignores_ass_tags_punctuation_and_case():
+    assert lay._norm_ko_dedupe(r"{\an8}'JFK 택시 파업!'") == "jfk택시파업"
+    assert lay._ko_tokens_dedupe(r"{\an8}'JFK 택시 파업!'") == {"jfk", "택시", "파업"}
+
+
+@pytest.mark.parametrize("start", [1_040_000, 1_061_000])  # 17:20 and 17:41
+def test_full_tweet_duplicate_yields_to_overlapping_ost_beats(start):
+    cues = [
+        cue("c1", start, start + 6000, "This is unrelated dialogue."),
+        cue("ost-full", start, start + 4000, "Taxi drivers strike. Uber prices surge.", source="ost"),
+        cue("ost-beat1", start, start + 1800, "Taxi drivers strike.", source="ost"),
+        cue("ost-beat2", start + 2000, start + 4000, "Uber prices surge.", source="ost"),
+    ]
+    events = run(cues, {
+        "c1": "지금 어디 가는 거야",
+        "ost-full": "택시 기사 파업\n우버 요금 폭등",
+        "ost-beat1": "택시 기사 파업",
+        "ost-beat2": "우버 요금 폭등",
+    })
+    ost = [e for e in events if e.channel == "ost"]
+    assert [e.cue_ids for e in ost] == [["ost-beat1"], ["ost-beat2"]]
+    assert all(e.position == "an8" for e in ost)
+    assert all(a.end_ms + S.min_gap_ms <= b.start_ms for a, b in zip(ost, ost[1:]))
+
+
+@pytest.mark.parametrize("gap", [500, 5000, 12_000])
+def test_nearby_ost_translations_share_one_display_without_bridging_long_gaps(gap):
+    cues = [
+        cue("ost-1", 0, 1500, "Taxi drivers on strike", source="ost"),
+        cue("ost-2", 1500 + gap, 3000 + gap, "Taxi drivers strike today", source="ost"),
+    ]
+    events = run(cues, {"ost-1": "택시 기사 파업", "ost-2": "택시 기사 오늘 파업"})
+    assert len(events) == 1
+    assert events[0].cue_ids == ["ost-1", "ost-2"]
+    assert "오늘" in events[0].ko
+    if gap > 2000:
+        assert events[0].end_ms < cues[1].start_ms
+    else:
+        assert events[0].end_ms >= cues[1].end_ms
+
+
+def test_ost_repeated_after_dedupe_window_stays_separate():
+    cues = [
+        cue("ost-1", 0, 1500, "Taxi drivers on strike", source="ost"),
+        cue("ost-2", 13_501, 15_000, "Taxi drivers on strike", source="ost"),
+    ]
+    assert len(run(cues, {"ost-1": "택시 기사 파업", "ost-2": "택시 기사 파업"})) == 2
+
+
+def test_coextensive_identical_ost_is_not_displayed_over_single_dialogue():
+    cues = [
+        cue("ost-1", 0, 2000, "ERIC HIMPTON HOLDER JR.", source="ost"),
+        cue("c1", 200, 2200, "Eric Himpton Holder, Jr."),
+    ]
+    events = run(cues, {"ost-1": "'에릭 힘턴 홀더 주니어'", "c1": "에릭 힘턴 홀더 주니어"})
+    assert len(events) == 1
+    assert events[0].channel == "dialogue"
+    assert events[0].cue_ids == ["c1"]
+
+
+@pytest.mark.parametrize("spoken", [
+    "지금 택시 기사 파업 중이래",
+    "택시 기사 파업 소식이야",
+])
+def test_non_identical_or_multi_cue_ost_and_dialogue_stay_split_top_and_bottom(spoken):
+    cues = [
+        cue("ost-1", 0, 2000, "TAXI DRIVERS STRIKE", source="ost"),
+        cue("c1", 100, 2200, "Taxi drivers are on strike."),
+    ]
+    events = run(cues, {"ost-1": "택시 기사 파업", "c1": spoken})
+    assert len(events) == 2
+    assert [e.position for e in events] == ["an8", "an2"]
+
+@pytest.mark.parametrize("later_ko", ["우리가 지금 가야 한다고", "우리가 지금 가야 한다고 했어"])
+def test_adjacent_dialogue_echo_keeps_one_translation_and_both_cue_ids(later_ko):
+    cues = [
+        cue("c1", 0, 1800, "I told you we should leave."),
+        cue("c2", 2300, 4100, "That is what I said."),
+    ]
+    events = run(cues, {"c1": "우리가 지금 가야 한다고", "c2": later_ko})
+    assert len(events) == 1
+    assert events[0].cue_ids == ["c1", "c2"]
+    assert events[0].ko.replace("\n", " ") == later_ko
+    assert events[0].start_ms == 0 and events[0].end_ms >= 4100
+
+
+def test_intentional_english_repetition_is_not_a_translation_echo():
+    cues = [
+        cue("c1", 0, 1800, "We have to leave now."),
+        cue("c2", 2300, 4100, "We have to leave now!"),
+    ]
+    events = run(cues, {"c1": "우리가 지금 떠나야 한다고", "c2": "우리가 지금 떠나야 한다고"})
+    assert len(events) == 2
+
+
+def test_dialogue_echo_guard_preserves_scene_changes_and_real_pauses():
+    cues = [
+        cue("c1", 0, 1800, "We have to leave."),
+        cue("c2", 2300, 4100, "That is what I said."),
+    ]
+    ko = {"c1": "우리가 지금 떠나야 한다고", "c2": "우리가 지금 떠나야 한다고"}
+    assert len(run(cues, ko, scene_of={"c1": "s1", "c2": "s2"})) == 2
+    cues[1] = cues[1].model_copy(update={"start_ms": 4000, "end_ms": 5800})
+    assert len(run(cues, ko)) == 2
+
+
+@pytest.mark.parametrize("with_ost", [False, True])
+def test_rapid_dialogue_events_never_overlap_on_bottom_channel(with_ost):
+    cues = [
+        cue("c1", 0, 800, "First."),
+        cue("c2", 50, 900, "Second."),
+        cue("c3", 100, 1000, "Third."),
+    ]
+    ko = {"c1": "처음이야", "c2": "아니잖아", "c3": "알았어"}
+    if with_ost:
+        cues.append(cue("ost-1", 0, 1200, "NOTICE", source="ost"))
+        ko["ost-1"] = "긴급 공지"
+    events = run(cues, ko, scene_of={c.id: c.id for c in cues})
+    assert len([e for e in events if e.channel == "dialogue"]) == 3
+    for pos in ("an2", "an8"):
+        lane = sorted((e for e in events if e.position == pos), key=lambda e: e.start_ms)
+        assert all(a.end_ms + S.min_gap_ms <= b.start_ms for a, b in zip(lane, lane[1:]))
+    assert all(e.end_ms > e.start_ms for e in events)
+
+
+@pytest.mark.parametrize("with_dialogue", [False, True])
+def test_simultaneous_multiline_ost_events_never_overlap_in_either_position(with_dialogue):
+    cues = [
+        cue("ost-1", 0, 1800, "FIRST CARD", source="ost"),
+        cue("ost-2", 50, 2000, "SECOND CARD", source="ost"),
+        cue("ost-3", 100, 2200, "THIRD CARD", source="ost"),
+    ]
+    ko = {
+        "ost-1": "택시 기사\n파업 시작",
+        "ost-2": "우버 요금\n폭등 사태",
+        "ost-3": "대중 교통\n긴급 대책",
+    }
+    if with_dialogue:
+        cues.append(cue("c1", 0, 3000, "Unrelated dialogue."))
+        ko["c1"] = "다른 얘기를 해 보자"
+    events = run(cues, ko)
+    ost = [e for e in events if e.channel == "ost"]
+    assert len(ost) == 3
+    assert all(e.position == ("an8" if with_dialogue else "an2") for e in ost)
+    assert all(a.end_ms + S.min_gap_ms <= b.start_ms for a, b in zip(ost, ost[1:]))
+    assert all(e.end_ms - e.start_ms >= S.short_min_ms for e in ost)
+
+
+def test_source_ost_matching_keeps_numbers_and_prefers_complete_text():
+    from substage.models import OnScreenText
+    from substage.translate import _dedupe_ost, _same_text
+
+    assert _same_text("JFK Taxi Strike", "JFK Taxi Strike / Uber Surge")
+    assert not _same_text("Uber Surge 4x", "Uber Surge 5x")
+    assert not _same_text("JFK Taxi Strike", "JFK Taxi Strike / Uber Surge 4x")
+    items = [
+        OnScreenText(start_ms=0, end_ms=1500, text="[headline] JFK Taxi Strike"),
+        OnScreenText(start_ms=1000, end_ms=2500, text="[headline] JFK Taxi Strike / Uber Surge"),
+    ]
+    [(kind, merged)] = _dedupe_ost(items)
+    assert kind == "headline" and merged.text == "JFK Taxi Strike / Uber Surge"
+    assert (merged.start_ms, merged.end_ms) == (0, 2500)
+
+
+def test_source_full_tweet_yields_to_frame_exact_overlapping_beats():
+    from substage.translate import dedupe_ost_shadows
+
+    cues = [
+        cue("ost-full", 1_040_000, 1_044_000, "Taxi drivers strike. Uber prices surge.", source="ost"),
+        cue("ost-beat1", 1_040_001, 1_041_801, "Taxi drivers strike.", source="ost"),
+        cue("ost-beat2", 1_042_001, 1_044_001, "Uber prices surge.", source="ost"),
+    ]
+    assert [c.id for c in dedupe_ost_shadows(cues)] == ["ost-beat1", "ost-beat2"]
+
+
+def test_source_nearby_ost_duplicates_merge_spans_and_preserve_frame_exact_identity():
+    from substage.translate import dedupe_ost_shadows
+
+    coarse = cue("ost-coarse", 0, 2000, "Taxi drivers strike", source="ost")
+    exact = cue("ost-exact", 1001, 3001, "Taxi drivers strike today", source="ost")
+    [merged] = dedupe_ost_shadows([coarse, exact])
+    assert merged.id == "ost-exact" and merged.text == exact.text
+    assert (merged.start_ms, merged.end_ms) == (0, 3001)
+    assert (exact.start_ms, exact.end_ms) == (1001, 3001)
+
+
+@pytest.mark.parametrize("kind", ["headline", "callout"])
+@pytest.mark.parametrize("linked", [None, "c1"])
+def test_source_ost_read_aloud_across_dialogue_cues_is_removed(kind, linked):
+    from substage.models import OnScreenText
+    from substage.translate import ost_cues
+
+    spoken = [
+        cue("c1", 0, 1500, "Taxi drivers strike."),
+        cue("c2", 1500, 3000, "Uber prices surge."),
+    ]
+    observation = OnScreenText(
+        start_ms=0, end_ms=3000, text=f"[{kind}] Taxi drivers strike. Uber prices surge.",
+        covered_by_cue=linked,
+    )
+    assert ost_cues([observation], spoken, []) == []
+
+
+def test_dialogue_echo_dedupe_preserves_both_semantic_source_references():
+    from substage.validate import lineage_issues
+
+    cues = [
+        cue("c1", 0, 1800, "I said we should leave."),
+        cue("c2", 2300, 4100, "That is what I told you."),
+    ]
+    text = "우리가 지금 떠나야 한다고"
+    fragments = {
+        c.id: [RetainedFragment(text=text, refs=[f"{c.id}:t1:a1"], speaker="a")]
+        for c in cues
+    }
+    lineage = _lineage(cues, fragments)
+    for act in lineage.source.acts:
+        act.essential = True
+    events = lay.layout(cues, {c.id: text for c in cues}, {c.id: "s1" for c in cues}, {}, S,
+                        lineage=lineage)
+    assert len(events) == 1
+    assert events[0].fragments[0].refs == ["c1:t1:a1", "c2:t1:a1"]
+    assert lineage_issues(lineage, events=events) == []

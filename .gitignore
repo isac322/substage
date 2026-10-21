@@ -21,3 +21,9 @@ wheels/
 /scripts/run_arm.sh
 /scripts/sync_omp_creds.py
 /tests/test_heldout_register.py
+
+# Never commit official or generated subtitle tracks
+*.srt
+*.smi
+*.vtt
+*.ass

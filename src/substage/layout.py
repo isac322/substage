@@ -159,10 +159,7 @@ def _ost_chains(ost: list[_Ev]) -> list[list[_Ev]]:
 def _retime(events: list[_Ev], settings) -> None:
     dlg = [e for e in events if e.channel != "ost"]
     ost = [e for e in events if e.channel == "ost"]
-    if not ost:
-        for i, ev in enumerate(events):
-            ev.end = _fit(ev, events[i + 1].start if i + 1 < len(events) else None, settings)
-        return
+    # Dialogue-only layouts need the same final collision guard as OST layouts.
     # Retime dialogue events strictly against the next dialogue event on the bottom channel.
     for i, ev in enumerate(dlg):
         nxt_dlg = dlg[i + 1].start if i + 1 < len(dlg) else None
@@ -219,6 +216,53 @@ def _retime(events: list[_Ev], settings) -> None:
                 b.end = max(b.end, b.start + settings.short_min_ms)
                 # A shifted event can move past another pending top event.
                 top_ost.sort(key=lambda ev: ev.start)
+    # fit_end deliberately preserves short cues rather than creating invalid
+    # durations. Resolve those remaining collisions on the actual display lane.
+    for pos in ("an2", "an8"):
+        pos_evs = sorted(
+            (e for e in events if e.position == pos), key=lambda e: (e.start, e.end)
+        )
+        i = 0
+        had_overlap = any(x.end > y.start for x, y in zip(pos_evs, pos_evs[1:]))
+        if not had_overlap:
+            continue
+        i = 0
+        while i + 1 < len(pos_evs):
+            a, b = pos_evs[i : i + 2]
+            if a.end + settings.min_gap_ms <= b.start:
+                i += 1
+                continue
+            if b.start - a.start >= settings.short_min_ms + settings.min_gap_ms:
+                a.end = b.start - settings.min_gap_ms
+                i += 1
+                continue
+            if (
+                a.channel == b.channel == "ost"
+                and "\n" not in a.ko.strip() and "\n" not in b.ko.strip()
+                and _fits(f"{a.ko.strip()}\n{b.ko.strip()}", settings.cpl_limit)
+            ):
+                a.ko = f"{a.ko.strip()}\n{b.ko.strip()}"
+                a.end = max(a.end, b.end)
+                a.en_end = max(a.en_end, b.en_end)
+                a.cue_ids = list(dict.fromkeys([*a.cue_ids, *b.cue_ids]))
+                a.turns.extend(b.turns)
+                a.scene_last = b.scene_last
+                a.en_text = f"{a.en_text}\n{b.en_text}"
+                a.tags = list(dict.fromkeys([*a.tags, *b.tags, "merge"]))
+                a.semantic = a.semantic or b.semantic
+                a.fixed = a.fixed or b.fixed
+                a.lyric = a.lyric or b.lyric
+                a.omissions.extend(b.omissions)
+                a.attribution_passes.extend(b.attribution_passes)
+                events.remove(b)
+                pos_evs.pop(i + 1)
+                continue
+            a.end = max(a.start + settings.short_min_ms, min(a.end, a.start + max(settings.short_min_ms, (max(a.end, b.end) - a.start) // 2)))
+            b.start = a.end + settings.min_gap_ms
+            b.end = max(b.end, b.start + settings.short_min_ms)
+            pos_evs[i + 1 :] = sorted(pos_evs[i + 1 :], key=lambda e: (e.start, e.end))
+            if a.end + settings.min_gap_ms <= pos_evs[i + 1].start:
+                i += 1
     events.sort(key=lambda ev: ev.start)
 
 
@@ -235,6 +279,14 @@ def _flat(text: str) -> str:
 def _fits(ko: str, cpl: int) -> bool:
     lines = ko.split("\n")
     return len(lines) <= 2 and all(len(line) <= cpl for line in lines)
+
+
+def _norm_ko_dedupe(text: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]", "", re.sub(r"\{[^}]*\}", "", text).lower())
+
+
+def _ko_tokens_dedupe(text: str) -> set[str]:
+    return set(re.findall(r"[0-9a-z가-힣]+", re.sub(r"\{[^}]*\}", "", text).lower()))
 
 
 def _render(turns: list[_Turn], cpl: int, one_line: int) -> str | None:
@@ -575,6 +627,137 @@ def _merge_all(events: list[_Ev], settings) -> list[_Ev]:
     return out
 
 
+def _dedupe_events(events: list[_Ev], settings) -> list[_Ev]:
+    """Remove repeated translations before timing can extend their collisions."""
+    out = sorted(events, key=lambda e: (e.start, e.en_end))
+
+    def absorb(a: _Ev, b: _Ev, *, join_span: bool) -> None:
+        fragments = [fragment for ev in (a, b) for turn in ev.turns for fragment in turn.fragments]
+        longer = b if len(_norm_ko_dedupe(b.ko)) > len(_norm_ko_dedupe(a.ko)) else a
+        wrapped = rewrap(longer.ko, settings.cpl_limit, settings.cpl_one_line)
+        if _fits(wrapped, settings.cpl_limit):
+            a.ko = wrapped
+            a.turns = list(longer.turns)
+        elif not _fits(a.ko, settings.cpl_limit) and _fits(b.ko, settings.cpl_limit):
+            a.ko = b.ko
+            a.turns = list(b.turns)
+        # A single retained translation can carry both source acts; dropping
+        # the duplicate display must not drop its semantic ancestry.
+        retained = [fragment for turn in a.turns for fragment in turn.fragments]
+        if len(retained) == 1:
+            fragment = retained[0]
+            updated = fragment.model_copy(update={
+                "refs": list(dict.fromkeys(ref for item in fragments for ref in item.refs))
+            })
+            a.turns = [
+                replace(turn, fragments=(updated,)) if turn.fragments else turn
+                for turn in a.turns
+            ]
+        if join_span:
+            a.start = min(a.start, b.start)
+            a.en_end = max(a.en_end, b.en_end)
+        a.cue_ids = list(dict.fromkeys([*a.cue_ids, *b.cue_ids]))
+        a.scene_last = b.scene_last
+        a.en_text = f"{a.en_text}\n{b.en_text}"
+        a.tags = list(dict.fromkeys([*a.tags, *b.tags, "dedupe"]))
+        a.semantic = a.semantic or b.semantic
+        a.fixed = a.fixed or b.fixed
+        a.lyric = a.lyric or b.lyric
+        a.omissions.extend(b.omissions)
+        a.attribution_passes.extend(b.attribution_passes)
+
+    dialogue = [e for e in out if e.channel == "dialogue"]
+    i = 0
+    while i + 1 < len(dialogue):
+        a, b = dialogue[i : i + 2]
+        ka, kb = _norm_ko_dedupe(a.ko), _norm_ko_dedupe(b.ko)
+        if (
+            not a.fixed and not b.fixed and a.scene_last == b.scene_first
+            and b.start - a.en_end <= 2000
+            and _norm_ko_dedupe(a.en_text) != _norm_ko_dedupe(b.en_text)
+            and min(len(ka), len(kb)) >= 6
+            and (ka == kb or ka in kb or kb in ka)
+        ):
+            absorb(a, b, join_span=True)
+            out.remove(b)
+            dialogue.pop(i + 1)
+        else:
+            i += 1
+
+    ost = [e for e in out if e.channel == "ost"]
+    # Prefer timed beats to a second translation of the complete screen card.
+    aggregates: set[int] = set()
+    for a in ost:
+        ta = _ko_tokens_dedupe(a.ko)
+        beats_ov = [
+            b for b in ost if b is not a
+            and min(a.en_end, b.en_end) > max(a.start, b.start)
+            and len(_norm_ko_dedupe(b.ko)) < len(_norm_ko_dedupe(a.ko))
+        ]
+        if len(ta) >= 2 and len(beats_ov) >= 2:
+            covered = set().union(*(_ko_tokens_dedupe(b.ko) for b in beats_ov))
+            if len(ta & covered) / len(ta) >= 0.65:
+                aggregates.add(id(a))
+    out = [e for e in out if id(e) not in aggregates]
+    ost = [e for e in ost if id(e) not in aggregates]
+    i = 0
+    while i < len(ost):
+        a = ost[i]
+        j = i + 1
+        while j < len(ost):
+            b = ost[j]
+            if b.start - a.en_end > 12_000:
+                break
+            ka, kb = _norm_ko_dedupe(a.ko), _norm_ko_dedupe(b.ko)
+            ta, tb = _ko_tokens_dedupe(a.ko), _ko_tokens_dedupe(b.ko)
+            # Shared boilerplate must not collapse distinct numbered cards.
+            numbers = r"\d+|\b(?:첫|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\b"
+            same_numbers = re.findall(numbers, a.ko) == re.findall(numbers, b.ko)
+            duplicate = ka and kb and (
+                ka == kb
+                or (min(len(ka), len(kb)) >= 4 and (ka in kb or kb in ka))
+                or (
+                    same_numbers and min(len(ta), len(tb)) >= 2
+                    and len(ta & tb) / min(len(ta), len(tb)) >= 0.65
+                )
+            )
+            if duplicate:
+                absorb(a, b, join_span=b.start - a.en_end <= 2000)
+                out.remove(b)
+                ost.pop(j)
+            else:
+                j += 1
+        i += 1
+    redundant: set[int] = set()
+    for a in ost:
+        ka = _norm_ko_dedupe(a.ko)
+        if not ka:
+            continue
+        ov_dlg = [
+            d for d in dialogue
+            if min(a.en_end, d.en_end) - max(a.start, d.start) > 150
+            or (abs(a.start - d.start) <= 1500 and abs(a.en_end - d.en_end) <= 1500)
+        ]
+        if len(ov_dlg) != 1:
+            continue
+        d = ov_dlg[0]
+        ov_ost = [
+            x for x in ost
+            if min(x.en_end, d.en_end) - max(x.start, d.start) > 150
+            or (abs(x.start - d.start) <= 1500 and abs(x.en_end - d.en_end) <= 1500)
+        ]
+        if (
+            len(ov_ost) == 1
+            and abs(a.start - d.start) <= 1500
+            and abs(a.en_end - d.en_end) <= 1500
+            and ka == _norm_ko_dedupe(d.ko)
+        ):
+            redundant.add(id(a))
+    return sorted(
+        (e for e in out if id(e) not in redundant), key=lambda e: (e.start, e.en_end)
+    )
+
+
 # ---------------------------------------------------------------- condense
 
 
@@ -748,6 +931,7 @@ def layout(
             if event.lyric and event.ko:
                 event.ko = LYRIC_MARK + event.ko
     events = _merge_all(_split_all(initial, settings), settings)
+    events = _dedupe_events(events, settings)
     _retime(events, settings)
     if gc is not None:
         _condense(gc, events, settings, gate, lineage=lineage, cues=cues)

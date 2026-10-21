@@ -1,5 +1,5 @@
 """Console entry point: `substage run VIDEO ...`, `substage cost VIDEO_ID`, the
-evaluation commands `substage refeval` / `substage ablate`, and the translator
+evaluation commands `substage quality` / `substage refeval` / `substage ablate`, and the translator
 memory corpus `substage memory add|stats`."""
 
 from __future__ import annotations
@@ -71,6 +71,34 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     print(f"substage: wrote {out}")
     return 0
+
+
+def _cmd_quality(args: argparse.Namespace) -> int:
+    """Report deterministic quality; references never determine the pass gate."""
+    import json
+
+    from . import refeval
+
+    kwargs = {"ws_dir": args.ws_dir, "srt_path": args.srt, "ref_path": args.ref}
+    if len(args.video_ids) == 1:
+        report = refeval.evaluate_media_quality(args.video_ids[0], **kwargs)
+    else:
+        report = refeval.evaluate_corpus_quality([
+            {"video_id": video_id, **kwargs} for video_id in args.video_ids
+        ])
+    markdown = refeval.render_quality_md(report)
+    serialized = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    if args.out:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "quality.json").write_text(serialized, encoding="utf-8")
+        (out / "quality.md").write_text(markdown, encoding="utf-8")
+    print(serialized if args.json else markdown, end="")
+    if args.fail_under is None:
+        return 0
+    if args.fail_under == 0:
+        return 0 if report["passes_targets"] else 1
+    return int(report["quality_score"] < args.fail_under)
 
 
 def _cmd_refeval(args: argparse.Namespace) -> int:
@@ -244,6 +272,16 @@ def main(argv: list[str] | None = None) -> int:
     cost_p = sub.add_parser("cost", help="show the recorded token/cost table for a video")
     cost_p.add_argument("video_id")
     cost_p.set_defaults(func=lambda a: _cmd_cost(a.video_id))
+
+    quality_p = sub.add_parser("quality", help="audit subtitle quality without an official Korean reference")
+    quality_p.add_argument("video_ids", nargs="+", metavar="VIDEO_ID")
+    quality_p.add_argument("--ws-dir", help="workspace artifact directory")
+    quality_p.add_argument("--srt", help="generated Korean subtitle path")
+    quality_p.add_argument("--ref", help="optional local reference; never required for target gating")
+    quality_p.add_argument("--out", help="write quality.json and quality.md into this directory")
+    quality_p.add_argument("--json", action="store_true", help="print JSON instead of Markdown")
+    quality_p.add_argument("--fail-under", type=float, metavar="SCORE", help="exit 1 below SCORE; 0 checks all pass targets")
+    quality_p.set_defaults(func=_cmd_quality)
 
     ref_p = sub.add_parser("refeval", help="score arms against the official Korean subtitles (gold)")
     ref_p.add_argument("video_id", help="base workspace (cues/scenes/video map come from here)")

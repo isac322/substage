@@ -3010,3 +3010,532 @@ def evaluate_series_consistency(
         "concepts": concept_metrics,
         "defects": defects,
     }
+
+
+# ---------------------------------------------------------------- reference-free quality
+
+QUALITY_TARGETS: dict[str, float | int] = {
+    "format_score_min": 99.0,
+    "collision_free_score_min": 100.0,
+    "register_score_min": 97.0,
+    "pragmatic_score_min": 99.0,
+    "ost_pos_min": 100.0,
+    "completeness_score_min": 98.0,
+    "sync_err_ms_max": 150.0,
+    "quality_score_min": 97.5,
+}
+
+
+def _quality_dirs(video_id: str, ws_dir: Path | str | None) -> list[Path]:
+    base = Path(ws_dir) if ws_dir is not None else workspace(video_id).data_dir
+    stem = base.name.split("__", 1)[0]
+    variants = [base.parent / f"{stem}__{arm}" for arm in ("flash38", "v8", "final")]
+    candidates = [base, *variants, base.parent / stem] if ws_dir is not None else [*variants, base]
+    return list(dict.fromkeys(candidates))
+
+
+def _quality_display_events(path: Path, lines: Sequence[Line]) -> list[dict[str, Any]]:
+    """Recover positions separately: load_ko intentionally returns plain text."""
+    from collections import defaultdict, deque
+
+    if not lines:
+        return []
+    raw_by_span: dict[tuple[int, int], Any] = defaultdict(deque)
+    if path.suffix.lower() not in (".smi", ".sami"):
+        subs = pysubs2.SSAFile.from_string(_decode(path))
+        for event in subs.events:
+            if not event.is_comment and event.end > event.start and event.plaintext.strip():
+                style = subs.styles.get(event.style)
+                alignment = int(style.alignment) if style is not None else 2
+                raw_by_span[(int(event.start), int(event.end))].append((event.text, alignment))
+    events = []
+    for line in lines:
+        raw, alignment = line.text, 2
+        if raw_by_span[(line.start_ms, line.end_ms)]:
+            raw, alignment = raw_by_span[(line.start_ms, line.end_ms)].popleft()
+        positions = re.findall(r"\\an([1-9])\b", raw)
+        position = f"an{positions[-1] if positions else alignment}"
+        text = re.sub(r"\{[^}]*\}", "", line.text).strip()
+        parts = text.splitlines()
+        quoted = bool(parts) and all(
+            len(part.strip()) >= 2
+            and {"'": "'", "‘": "’", "[": "]"}.get(part.strip()[0]) == part.strip()[-1]
+            for part in parts
+        )
+        events.append({
+            "idx": line.idx, "start_ms": line.start_ms, "end_ms": line.end_ms,
+            "text": text, "position": position, "ost": position == "an8" or quoted,
+        })
+    return events
+
+
+def _quality_align(
+    cues: Sequence[Cue], events: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, list[Mapping[str, Any]]], dict[int, list[Cue]]]:
+    """Sweep time-ordered tracks, retaining split and merged cue associations."""
+    by_cue: dict[str, list[Mapping[str, Any]]] = {cue.id: [] for cue in cues}
+    by_event: dict[int, list[Cue]] = {int(event["idx"]): [] for event in events}
+    left = 0
+    for cue in cues:
+        while left < len(events) and events[left]["end_ms"] <= cue.start_ms:
+            left += 1
+        right = left
+        while right < len(events) and events[right]["start_ms"] < cue.end_ms:
+            event = events[right]
+            if event["end_ms"] > cue.start_ms:
+                by_cue[cue.id].append(event)
+                by_event[int(event["idx"])].append(cue)
+            right += 1
+    return by_cue, by_event
+
+
+def _quality_number_signature(text: str) -> tuple[str, ...]:
+    ordinals = {
+        "첫": "1", "한": "1", "하나": "1", "두": "2", "둘": "2",
+        "세": "3", "셋": "3", "네": "4", "넷": "4", "다섯": "5",
+        "여섯": "6", "일곱": "7", "여덟": "8", "아홉": "9", "열": "10",
+    }
+    values = re.findall(r"\d+(?:[.,]\d+)*", text)
+    for match in re.finditer(
+        r"(?<![가-힣])(첫|한|하나|두|둘|세|셋|네|넷|다섯|여섯|일곱|여덟|아홉|열)\s*(?:번째|째|번)", text,
+    ):
+        values.append(ordinals[match[1]])
+    return tuple(sorted(values))
+
+
+def _quality_similar(left: str, right: str, minimum: int) -> bool:
+    left_numbers, right_numbers = _quality_number_signature(left), _quality_number_signature(right)
+    if left_numbers and right_numbers and left_numbers != right_numbers:
+        return False
+    a, b = _norm_off_surface(left), _norm_off_surface(right)
+    aa, bb = "".join(a.split()), "".join(b.split())
+    if min(len(aa), len(bb)) < minimum:
+        return False
+    if aa in bb or bb in aa:
+        return True
+    def tokens(text: str) -> set[str]:
+        result = set()
+        for token in text.split():
+            for suffix in sorted(_OFF_SIM_JOSA_EOMI, key=len, reverse=True):
+                if len(token) > len(suffix) and token.endswith(suffix):
+                    token = token[:-len(suffix)]
+                    break
+            if len(token) >= 2:
+                result.add(token)
+        return result
+
+    ta, tb = tokens(a), tokens(b)
+    return len(ta & tb) >= 2 and len(ta & tb) / max(min(len(ta), len(tb)), 1) >= 0.65
+
+
+def evaluate_media_quality(
+    video_id: str, *, ws_dir: Path | str | None = None,
+    srt_path: Path | str | None = None, ref_path: Path | str | None = None,
+    sync_delta_ms: float | None = None, settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Audit displayed subtitles without an official translation or model calls.
+
+    Completeness measures time coverage and untranslated output, not an LLM
+    judgment of semantic fidelity. Missing narrative artifacts are disclosed.
+    """
+    from . import register as register_mod
+    from .models import SceneTranslation, Snapshot
+
+    settings = settings or load_settings()
+    dirs = _quality_dirs(video_id, ws_dir)
+    artifact_names = (
+        "cues.json", "scenes.json", "observations.json", "context_map.yaml",
+        "register.yaml", "snapshots.json", "translations.json",
+    )
+    paths = {
+        name: next((directory / name for directory in dirs if (directory / name).is_file()), None)
+        for name in artifact_names
+    }
+    if srt_path is None:
+        candidates = []
+        for directory in dirs:
+            candidates.extend((directory / f"{video_id}.ko.srt", directory / f"{directory.name}.ko.srt"))
+            candidates.extend(sorted(directory.glob("*.ko.srt")))
+        srt = next((
+            path for path in candidates
+            if path.is_file() and "official" not in path.name.lower()
+            and (ref_path is None or path.resolve() != Path(ref_path).resolve())
+        ), None)
+        if srt is None:
+            raise FileNotFoundError(f"no generated Korean subtitle for {video_id}; supply srt_path")
+    else:
+        srt = Path(srt_path)
+    srt_lines = load_ko(srt) if _decode(srt).strip() else []
+    events = _quality_display_events(srt, srt_lines)
+    ost_ev = [event for event in events if event["ost"]]
+    dlg_ev = [event for event in events if not event["ost"]]
+    cues = sorted(
+        load_models(paths["cues.json"], Cue) if paths["cues.json"] else [],
+        key=lambda cue: (cue.start_ms, cue.end_ms),
+    )
+    spoken = [
+        cue for cue in cues
+        if cue.source != "ost" and not cue.id.startswith("ost-") and not cue.lyric and cue.text.strip()
+    ]
+    scenes = load_models(paths["scenes.json"], Scene) if paths["scenes.json"] else []
+    observations: list[ChunkObservations | CueObservation] = []
+    if paths["observations.json"]:
+        for item in json.loads(paths["observations.json"].read_text(encoding="utf-8")):
+            model = ChunkObservations if "cues" in item else CueObservation
+            observations.append(model.model_validate(item))
+    context_map = load_model(paths["context_map.yaml"], ContextMap) if paths["context_map.yaml"] else None
+    register_map = load_model(paths["register.yaml"], RegisterMap) if paths["register.yaml"] else None
+    if register_map is not None:
+        register_map = register_mod.canonicalize_register_map(register_map, context_map)
+    snapshots = load_models(paths["snapshots.json"], Snapshot) if paths["snapshots.json"] else []
+    translations = load_models(paths["translations.json"], SceneTranslation) if paths["translations.json"] else []
+    translated = {line.cue_id: line for scene in translations for line in scene.cues}
+    by_cue, by_event = _quality_align(spoken, dlg_ev)
+    ko_by_cue = {cid: "\n".join(event["text"] for event in matches) for cid, matches in by_cue.items()}
+    defects: list[dict[str, Any]] = []
+
+    def defect(stage: str, kind: str, event: Mapping[str, Any], **extra: Any) -> None:
+        defects.append({
+            "stage": stage, "kind": kind, "start_ms": event["start_ms"],
+            "end_ms": event["end_ms"], "text": event["text"], **extra,
+        })
+
+    cpl_over = cps_over = slash_count = over_two_lines_count = 0
+    for event in events:
+        text = event["text"]
+        for kind, bad in (
+            ("cpl_over", any(len(part) > settings.cpl_limit for part in text.splitlines())),
+            ("cps_over", cps_chars(text) / max((event["end_ms"] - event["start_ms"]) / 1000, 0.001) > settings.cps_max),
+            ("slash_separator", " / " in text),
+            ("over_two_lines", len(text.splitlines()) > 2),
+        ):
+            if bad:
+                defect("layout/format", kind, event)
+            if kind == "cpl_over":
+                cpl_over += bad
+            elif kind == "cps_over":
+                cps_over += bad
+            elif kind == "slash_separator":
+                slash_count += text.count(" / ")
+            else:
+                over_two_lines_count += bad
+    count = max(len(events), 1)
+    cps_over_rate = cps_over / count
+    format_score = max(
+        0.0, 100.0 * (1.0 - (cpl_over + slash_count + over_two_lines_count) / count - 0.5 * cps_over_rate),
+    )
+
+    collision_counts = {
+        "same_channel_overlaps": 0, "ost_duplicate_translations": 0,
+        "ost_dialogue_redundancies": 0, "adjacent_dialogue_echoes": 0,
+    }
+
+    def collision(kind: str, first: Mapping[str, Any], second: Mapping[str, Any]) -> None:
+        collision_counts[kind] += 1
+        defect(
+            "layout/ost", {
+                "same_channel_overlaps": "same_channel_time_overlap",
+                "ost_duplicate_translations": "ost_duplicate_translations",
+                "ost_dialogue_redundancies": "ost_dialogue_redundancy",
+                "adjacent_dialogue_echoes": "adjacent_dialogue_echo",
+            }[kind], first,
+            other_start_ms=second["start_ms"], other_end_ms=second["end_ms"],
+            other_text=second["text"], channel=first["position"],
+        )
+
+    active: list[Mapping[str, Any]] = []
+    for event in events:
+        active = [previous for previous in active if previous["end_ms"] - event["start_ms"] > 50]
+        for previous in active:
+            if previous["position"] == event["position"] and event["position"] in ("an8", "an2"):
+                if min(previous["end_ms"], event["end_ms"]) - max(previous["start_ms"], event["start_ms"]) > 50:
+                    collision("same_channel_overlaps", previous, event)
+        active.append(event)
+    recent_ost: list[Mapping[str, Any]] = []
+    for event in ost_ev:
+        recent_ost = [previous for previous in recent_ost if event["start_ms"] - previous["end_ms"] <= 12_000]
+        for previous in recent_ost:
+            if _quality_similar(previous["text"], event["text"], 4):
+                collision("ost_duplicate_translations", previous, event)
+        recent_ost.append(event)
+    bottom = [event for event in events if event["position"] == "an2" and not event["ost"]]
+    an8_ost = [event for event in ost_ev if event["position"] == "an8"]
+    for event in an8_ost:
+        ov_bottom = [
+            other for other in bottom
+            if min(event["end_ms"], other["end_ms"]) - max(event["start_ms"], other["start_ms"]) > 150
+        ]
+        if len(ov_bottom) != 1:
+            continue
+        other = ov_bottom[0]
+        ov_top = [
+            top_ev for top_ev in an8_ost
+            if min(top_ev["end_ms"], other["end_ms"]) - max(top_ev["start_ms"], other["start_ms"]) > 150
+        ]
+        norm_top = "".join(_norm_off_surface(event["text"]).split())
+        norm_bot = "".join(_norm_off_surface(other["text"]).split())
+        if (
+            len(ov_top) == 1
+            and abs(event["start_ms"] - other["start_ms"]) <= 1500
+            and abs(event["end_ms"] - other["end_ms"]) <= 1500
+            and len(norm_top) >= 2
+            and norm_top == norm_bot
+        ):
+            collision("ost_dialogue_redundancies", event, other)
+    for previous, event in zip(bottom, bottom[1:]):
+        norm = "".join(_norm_off_surface(previous["text"]).split())
+        if len(norm) < 6 or norm != "".join(_norm_off_surface(event["text"]).split()):
+            continue
+        if event["start_ms"] - previous["end_ms"] > 2000:
+            continue
+        en_previous = by_event.get(previous["idx"], [])
+        en_current = by_event.get(event["idx"], [])
+        source_a = re.sub(r"\W+", "", " ".join(cue.text for cue in en_previous)).casefold()
+        source_b = re.sub(r"\W+", "", " ".join(cue.text for cue in en_current)).casefold()
+        if not (source_a and source_a == source_b):
+            collision("adjacent_dialogue_echoes", previous, event)
+    collision_free_score = max(0.0, 100.0 - 2.5 * sum(collision_counts.values()))
+
+    alias_collisions = stranger_banmal_count = scene_oscillations = snap_disagree = 0
+    if context_map is not None:
+        token_owners: dict[str, set[str]] = {}
+        for character in context_map.characters:
+            for form in (character.id, character.en_name, character.ko_name, *character.aliases):
+                for token in _norm_off_surface(form).casefold().split():
+                    token_owners.setdefault(token, set()).add(character.id)
+        for character in context_map.characters:
+            for alias in dict.fromkeys(character.aliases):
+                tokens = _norm_off_surface(alias).casefold().split()
+                if len(tokens) == 1 and token_owners.get(tokens[0], set()) - {character.id}:
+                    alias_collisions += 1
+                    defects.append({
+                        "stage": "context_map", "kind": "alias_collision",
+                        "character": character.id, "text": alias,
+                        "other_characters": sorted(token_owners[tokens[0]] - {character.id}),
+                    })
+    pairs = register_mod.cue_pairs(context_map, spoken, observations) if context_map is not None else {}
+    resolver = register_mod.name_resolver(context_map) if context_map is not None else lambda value: value
+    for cid, line in translated.items():
+        if cid not in pairs and line.speaker and line.addressee:
+            spk, adr = resolver(line.speaker), resolver(line.addressee)
+            if spk and adr and spk != adr:
+                pairs[cid] = (spk, adr)
+    cue_order = {cue.id: index for index, cue in enumerate(cues)}
+    table = register_mod.RegisterTable(register_map, list(cue_order)) if register_map is not None else None
+    scene_of = {cid: scene.id for scene in scenes for cid in scene.cue_ids}
+    levels_by_scene: dict[tuple[str, str, str], list[tuple[Cue, str]]] = {}
+    for cue in spoken:
+        pair = pairs.get(cue.id)
+        text = ko_by_cue.get(cue.id, "")
+        levels = [register_mod.binary(level) for level in addressed_levels(text) if register_mod.binary(level)]
+        if not pair or len(levels) != 1 or any(part.lstrip().startswith(DASHES) for part in text.splitlines()):
+            continue
+        edge = table.edge(*pair) if table is not None else None
+        expected = table.level_at(*pair, cue.id) if table is not None else None
+        event = {"start_ms": cue.start_ms, "end_ms": cue.end_ms, "text": text}
+        if edge and edge.relation == "stranger_civil" and edge.step == 9 and register_mod.binary(expected) == "J" and levels[0] == "B":
+            stranger_banmal_count += 1
+            defect("register/translate", "stranger_banmal", event, cue_id=cue.id, pair=list(pair))
+        if pair[1] != "group" and cue.id in scene_of:
+            levels_by_scene.setdefault((scene_of[cue.id], *pair), []).append((cue, levels[0]))
+    for (scene_id, spk, adr), entries in levels_by_scene.items():
+        if len(entries) < 3:
+            continue
+        edge = table.edge(spk, adr) if table is not None else None
+        if edge and any(
+            table.in_shift(spk, adr, cue.id)
+            or shift.at_cue == cue.id or shift.until_cue == cue.id
+            for cue, _ in entries for shift in edge.shifts
+        ):
+            continue
+        counts = Counter(level for _, level in entries)
+        minority = min(counts, key=counts.get)
+        if len(counts) == 2 and counts[minority] / len(entries) <= 0.35:
+            for cue, level in entries:
+                if level == minority:
+                    scene_oscillations += 1
+                    defect("register/translate", "scene_oscillation", {
+                        "start_ms": cue.start_ms, "end_ms": cue.end_ms, "text": ko_by_cue[cue.id],
+                    }, cue_id=cue.id, scene_id=scene_id, pair=[spk, adr])
+    scenes_by_id = {scene.id: scene for scene in scenes}
+    if table is not None:
+        for snapshot in snapshots:
+            scene = scenes_by_id.get(snapshot.scene_id)
+            if scene is None:
+                continue
+            for key, entry in snapshot.registers.items():
+                if ">" not in key:
+                    continue
+                spk, adr = key.split(">", 1)
+                for cid in scene.cue_ids:
+                    expected = table.level_at(spk, adr, cid)
+                    if expected is not None and entry.level_at(cid, cue_order) != expected:
+                        snap_disagree += 1
+                        defects.append({
+                            "stage": "snapshots", "kind": "snapshot_register_disagreement",
+                            "scene_id": scene.id, "cue_id": cid, "pair": key,
+                            "expected": expected, "text": entry.level_at(cid, cue_order),
+                        })
+    register_score = max(
+        0.0, 100.0 - 5.0 * alias_collisions - 2.0 * stranger_banmal_count
+        - 1.5 * scene_oscillations - 0.5 * snap_disagree,
+    )
+    para_res = evaluate_pragmatic_address(
+        spoken, ko_by_cue, context_map=context_map, register_map=register_map,
+        observations=observations, scenes=scenes, ep_id=video_id,
+    )
+    pragmatic_score = round(100.0 * para_res["para"], 2)
+    defects.extend({"stage": "pragmatic/address", **violation} for violation in para_res["violations"])
+    ost_res = evaluate_ost_and_sync(ost_ev, dlg_ev, sync_delta_ms=sync_delta_ms)
+    ost_score = (ost_res["ost_pos"] + ost_res["ost_emp"]) / 2
+    for event in ost_ev:
+        single = evaluate_ost_and_sync([event], dlg_ev)
+        if single["ost_emp"] < 100:
+            defect("layout/ost", "ost_unquoted", event)
+    if ost_res["ost_pos"] < 100:
+        defects.append({
+            "stage": "layout/ost", "kind": "ost_position",
+            "text": "Place entire OST chains at the top only while dialogue overlaps.",
+            "ost_pos": ost_res["ost_pos"],
+        })
+    if ost_res["sync_err_ms"] is not None and ost_res["sync_err_ms"] > QUALITY_TARGETS["sync_err_ms_max"]:
+        defects.append({"stage": "sync", "kind": "sync_error", "sync_err_ms": ost_res["sync_err_ms"]})
+
+    missing = [cue for cue in spoken if not by_cue[cue.id]]
+    raw_music_count = english_only_count = 0
+    for event in events:
+        if "♪" in event["text"]:
+            raw_music_count += 1
+            defect("translate", "raw_music_symbol", event)
+        if not event["ost"] and re.search(r"[A-Za-z]", event["text"]) and not re.search(r"[가-힣]", event["text"]):
+            english_only_count += 1
+            defect("translate", "untranslated_english", event)
+    for cue in missing:
+        defect("translate", "missing_dialogue", {
+            "start_ms": cue.start_ms, "end_ms": cue.end_ms, "text": cue.text,
+        }, cue_id=cue.id)
+    coverage = (len(spoken) - len(missing)) / len(spoken) if spoken else float(bool(events))
+    completeness_score = max(0.0, 100.0 * (coverage - (raw_music_count + english_only_count) / count))
+    if not events:
+        defect("emit", "empty_subtitles", {"start_ms": 0, "end_ms": 0, "text": ""})
+    scores = {
+        "format_score": round(format_score, 2), "collision_free_score": collision_free_score,
+        "register_score": register_score, "pragmatic_score": pragmatic_score,
+        "ost_score": round(ost_score, 2), "completeness_score": round(completeness_score, 2),
+    }
+    quality_score = round(
+        0.25 * format_score + 0.25 * collision_free_score + 0.20 * register_score
+        + 0.15 * pragmatic_score + 0.10 * ost_score + 0.05 * completeness_score, 2,
+    )
+    report: dict[str, Any] = {
+        "video_id": video_id, "ws_dir": str(dirs[0]), "srt_path": str(srt),
+        **scores, **ost_res, "quality_score": quality_score,
+        "passes_targets": (
+            quality_score >= QUALITY_TARGETS["quality_score_min"] and collision_free_score == 100.0
+            and stranger_banmal_count == alias_collisions == snap_disagree == 0 and ost_res["ost_pos"] == 100.0
+        ),
+        "targets": dict(QUALITY_TARGETS),
+        "counts": {
+            "subtitle_events": len(events), "spoken_cues": len(spoken), "missing_dialogue": len(missing),
+            "raw_music_count": raw_music_count, "english_only_count": english_only_count,
+            "cpl_over": cpl_over, "slash_count": slash_count, "over_two_lines_count": over_two_lines_count,
+            **collision_counts, "alias_collisions": alias_collisions, "snap_disagree": snap_disagree,
+            "stranger_banmal_count": stranger_banmal_count, "scene_oscillations": scene_oscillations,
+        },
+        "cpl_over_rate": cpl_over / count, "cps_over_rate": cps_over_rate, "coverage": round(coverage, 4),
+        "artifact_paths": {name: str(path) if path is not None else None for name, path in paths.items()},
+        "unassessed": [name for name, path in paths.items() if path is None],
+        "pragmatic_eval": para_res, "actionable_defects": defects,
+    }
+    if ref_path is not None and Path(ref_path).is_file():
+        gold = load_ko(Path(ref_path))
+        groups = align(cues, gold, {"quality": srt_lines})
+        metrics = arm_metrics(groups, "quality", settings)
+        report["reference_eval"] = {
+            "path": str(ref_path), "chrF++": metrics["chrf"],
+            "coverage": metrics["coverage"], "level_agreement": metrics["speech_level_agreement"],
+            "dash_agreement": metrics["dash_agreement"],
+        }
+    return report
+
+
+def evaluate_corpus_quality(
+    items: Sequence[str | Mapping[str, Any]], *, settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Evaluate every media independently; a corpus passes only if all pass."""
+    if not items:
+        raise ValueError("quality evaluation requires at least one media item")
+    settings = settings or load_settings()
+    reports = []
+    for item in items:
+        config = {"video_id": item} if isinstance(item, str) else dict(item)
+        reports.append(evaluate_media_quality(**config, settings=settings))
+    score_keys = (
+        "format_score", "collision_free_score", "register_score", "pragmatic_score",
+        "ost_score", "completeness_score", "quality_score",
+    )
+    summary = {
+        key: round(sum(report[key] for report in reports) / len(reports), 2)
+        for key in score_keys
+    }
+    summary.update({
+        "media_count": len(reports), "passed_count": sum(report["passes_targets"] for report in reports),
+        "passes_targets": all(report["passes_targets"] for report in reports),
+        "defect_count": sum(len(report["actionable_defects"]) for report in reports),
+    })
+    return {
+        "media": reports, "summary": summary, "quality_score": summary["quality_score"],
+        "passes_targets": summary["passes_targets"], "targets": dict(QUALITY_TARGETS),
+    }
+
+
+def render_quality_md(report: Mapping[str, Any]) -> str:
+    """Render reference-free scores and the defects needed for the next cycle."""
+    def cell(value: Any) -> str:
+        return str(value).replace("|", r"\|").replace("\n", "<br>")
+
+    if "media" in report:
+        summary = report["summary"]
+        out = [
+            "# Subtitle corpus quality", "",
+            f"Quality: **{summary['quality_score']:.2f}/100**; targets: **{'PASS' if report['passes_targets'] else 'FAIL'}**.",
+            "", "| Media | Quality | Targets | Defects |", "| --- | ---: | --- | ---: |",
+        ]
+        out.extend(
+            f"| {cell(media['video_id'])} | {media['quality_score']:.2f} | "
+            f"{'PASS' if media['passes_targets'] else 'FAIL'} | {len(media['actionable_defects'])} |"
+            for media in report["media"]
+        )
+        out.extend(["", *[render_quality_md(media).replace("# Subtitle quality:", "## Subtitle quality:", 1) for media in report["media"]]])
+        return "\n".join(out).rstrip() + "\n"
+    out = [
+        f"# Subtitle quality: {cell(report['video_id'])}", "",
+        "Reference-free evaluation; official Korean subtitles are optional.",
+        "Completeness checks coverage and untranslated output, not semantic fidelity.", "",
+        f"Quality: **{report['quality_score']:.2f}/100**; targets: **{'PASS' if report['passes_targets'] else 'FAIL'}**.",
+        "", "| Axis | Score / 100 |", "| --- | ---: |",
+    ]
+    for name, key in (
+        ("NETFLIX-FMT", "format_score"), ("ZERO-DUPLICATE-COLLISION", "collision_free_score"),
+        ("REGISTER-CONSISTENCY", "register_score"), ("PRAGMATIC-ADDRESS", "pragmatic_score"),
+        ("OST-QUALITY", "ost_score"), ("SEMANTIC-COMPLETENESS", "completeness_score"),
+    ):
+        out.append(f"| {name} | {report[key]:.2f} |")
+    out.extend([
+        "", f"OST position: {report['ost_pos']:.2f}%; emphasis: {report['ost_emp']:.2f}%.",
+        f"Sync error: {report['sync_err_ms'] if report['sync_err_ms'] is not None else 'unassessed'} ms.",
+    ])
+    if report.get("unassessed"):
+        out.extend(["", "Missing artifacts (related checks are unassessed): " + ", ".join(f"`{name}`" for name in report["unassessed"]) + "."])
+    out.extend(["", "## Actionable defects", ""])
+    if not report["actionable_defects"]:
+        out.append("No detected defects.")
+    for defect in report["actionable_defects"]:
+        location = mmss(defect["start_ms"]) if "start_ms" in defect else str(defect.get("cue_id", defect.get("scene_id", "")))
+        text = defect.get("text", defect.get("ko", defect.get("en", "")))
+        other = f" / {cell(defect['other_text'])}" if "other_text" in defect else ""
+        out.append(f"- `{cell(defect['stage'])}` / `{cell(defect['kind'])}` {location}: {cell(text)}{other}")
+    if report.get("reference_eval"):
+        out.extend(["", "## Optional reference agreement", "", "Reference agreement does not affect target gating."])
+        out.extend(f"- {cell(key)}: {cell(value)}" for key, value in report["reference_eval"].items())
+    return "\n".join(out).rstrip() + "\n"

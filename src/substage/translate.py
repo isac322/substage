@@ -2402,6 +2402,8 @@ def _same_text(a: str, b: str) -> bool:
         return True
     if re.findall(r"\d+", a) != re.findall(r"\d+", b):
         return False
+    if min(len(na), len(nb)) >= 6 and (na in nb or nb in na):
+        return True
     return SequenceMatcher(None, na, nb).ratio() >= 0.85
 
 def _carried_by(text: str, cue_texts: list[str]) -> bool:
@@ -2562,7 +2564,7 @@ def _dedupe_ost(items: list[OnScreenText]) -> list[tuple[str | None, OnScreenTex
                     OnScreenText(
                         start_ms=min(m.start_ms, cur.start_ms),
                         end_ms=max(m.end_ms, cur.end_ms),
-                        text=m.text,
+                        text=cur.text if len(_norm_text(cur.text)) > len(_norm_text(m.text)) else m.text,
                         plot_critical=m.plot_critical or cur.plot_critical,
                         covered_by_cue=m.covered_by_cue or cur.covered_by_cue,
                         beats=m.beats or cur.beats,
@@ -2714,12 +2716,49 @@ def _is_half_sec_cue(c: Cue) -> bool:
 
 
 def dedupe_ost_shadows(ost_list: list[Cue], spoken_cues: Sequence[Cue] = ()) -> list[Cue]:
-    """Drop coarse VLM timestamp-drift shadow duplicates within a 360s window
-    while preserving frame-exact occurrences and genuine cross-scene repeats."""
+    """Prefer visual beats to full-text duplicates, then remove nearby and
+    coarse timestamp-drift shadows without losing distant exact appearances."""
     if len(ost_list) <= 1:
         return list(ost_list)
-    kept: list[Cue] = []
+    # Remove an unsplit observation before pairwise matching can consume its
+    # individual beats. Strictly shorter contributors prevent duplicate cycles.
+    candidates = []
     for a in ost_list:
+        overlapping = [
+            b.text for b in ost_list
+            if b.id != a.id and len(_norm_text(b.text)) < len(_norm_text(a.text))
+            and min(a.end_ms, b.end_ms) - max(a.start_ms, b.start_ms) > 0
+        ]
+        if len(overlapping) >= 2 and _carried_by(a.text, overlapping):
+            continue
+        candidates.append(a)
+    nearby: list[Cue] = []
+    for cur in sorted(candidates, key=lambda c: (c.start_ms, c.end_ms)):
+        i = 0
+        while i < len(nearby):
+            prev = nearby[i]
+            gap = max(prev.start_ms, cur.start_ms) - min(prev.end_ms, cur.end_ms)
+            if gap > 12_000 or not (
+                _same_text(prev.text, cur.text)
+                or _carried_by(prev.text, [cur.text])
+                or _carried_by(cur.text, [prev.text])
+            ):
+                i += 1
+                continue
+            preferred = max(
+                (prev, cur), key=lambda c: (_is_frame_exact_cue(c), len(c.text))
+            )
+            if gap < 0:
+                preferred = preferred.model_copy(update={
+                    "start_ms": min(prev.start_ms, cur.start_ms),
+                    "end_ms": max(prev.end_ms, cur.end_ms),
+                })
+            cur = preferred
+            nearby.pop(i)
+            i = 0
+        nearby.append(cur)
+    kept: list[Cue] = []
+    for a in sorted(nearby, key=lambda c: (c.start_ms, c.end_ms)):
         if _is_frame_exact_cue(a):
             kept.append(a)
             continue
@@ -2728,7 +2767,7 @@ def dedupe_ost_shadows(ost_list: list[Cue], spoken_cues: Sequence[Cue] = ()) -> 
             for sc in spoken_cues
         )
         drop = False
-        for b in ost_list:
+        for b in nearby:
             if b.id == a.id or not _same_text(a.text, b.text):
                 continue
             gap = abs(a.start_ms - b.start_ms)

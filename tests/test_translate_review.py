@@ -2338,3 +2338,347 @@ def test_detect_pragmatic_risk_cues_and_scene_situation_card():
     assert risks["c1456"] == "visual_action_deixis"
     assert risks["c0376"] == "idiom_or_slang"
     assert risks["c0403"] == "conversational_implicature"
+
+
+# ---------------------------------------------------------------- reference-free quality
+
+
+def _write_quality_track(tmp_path, events, cues=None, video_id="sample"):
+    """Write real SRT tags, so tests exercise the plain-text loader boundary."""
+    from substage.store import save_model
+
+    def timestamp(ms):
+        seconds, millis = divmod(ms, 1000)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours:02}:{minutes:02}:{seconds:02},{millis:03}"
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / f"{video_id}.ko.srt"
+    path.write_text("\n\n".join(
+        f"{index}\n{timestamp(start)} --> {timestamp(end)}\n{text}"
+        for index, (start, end, text) in enumerate(events, 1)
+    ) + "\n", encoding="utf-8")
+    if cues is not None:
+        save_model(tmp_path / "cues.json", cues)
+    return path
+
+
+def test_quality_reference_free_perfect_and_optional_reference(tmp_path):
+    from substage import refeval
+
+    srt = _write_quality_track(
+        tmp_path, [(1000, 4000, "안녕하세요.")],
+        [cue("c1", 1000, 4000, "Hello.")],
+    )
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["quality_score"] == 100.0
+    assert report["passes_targets"] is True
+    assert report["actionable_defects"] == []
+    assert "reference_eval" not in report
+    assert report["counts"]["spoken_cues"] == 1
+    assert report["coverage"] == 1.0
+    assert report["ost_pos"] == 100.0
+    assert "context_map.yaml" in report["unassessed"]
+    markdown = refeval.render_quality_md(report)
+    assert "Reference-free" in markdown and "**PASS**" in markdown
+    assert all(axis in markdown for axis in (
+        "NETFLIX-FMT", "ZERO-DUPLICATE-COLLISION", "REGISTER-CONSISTENCY",
+        "PRAGMATIC-ADDRESS", "OST-QUALITY", "SEMANTIC-COMPLETENESS",
+    ))
+    reference = tmp_path / "official.ko.srt"
+    reference.write_text(srt.read_text(encoding="utf-8").replace("안녕하세요.", "잘 가요."), encoding="utf-8")
+    with_ref = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, ref_path=reference, settings=Settings())
+    assert set(with_ref["reference_eval"]) == {"path", "chrF++", "coverage", "level_agreement", "dash_agreement"}
+    assert with_ref["reference_eval"]["chrF++"] < 100.0
+    assert with_ref["quality_score"] == report["quality_score"]
+    assert with_ref["passes_targets"] is True
+    missing_ref = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, ref_path=tmp_path / "absent.srt", settings=Settings())
+    assert "reference_eval" not in missing_ref
+
+
+def test_quality_detects_1720_double_top_and_dialogue_redundancy(tmp_path):
+    from substage import refeval
+
+    srt = _write_quality_track(tmp_path, [
+        (1_040_000, 1_044_000, r"{\an8}'우주의 새로운 영웅'"),
+        (1_041_000, 1_045_000, r"{\an8}'새로운 영웅 등장'"),
+        (1_041_000, 1_045_000, "그 마이크가 바로 트위터다"),
+        (1_211_700, 1_214_800, r"{\an8}'에릭 힘턴 홀더 주니어'"),
+        (1_211_944, 1_215_448, "에릭 힘턴 홀더 주니어"),
+    ], [
+        cue("c1", 1_041_000, 1_045_000, "That microphone is Twitter."),
+        cue("c2", 1_211_944, 1_215_448, "Eric Himpton Holder, Jr."),
+    ])
+    assert all(r"{\an8}" not in line.text for line in refeval.load_ko(srt))
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["same_channel_overlaps"] == 1
+    assert report["counts"]["ost_duplicate_translations"] == 1
+    assert report["counts"]["ost_dialogue_redundancies"] == 1
+    assert report["collision_free_score"] == 92.5
+    assert report["ost_pos"] == report["ost_emp"] == 100.0
+    assert report["passes_targets"] is False
+    collisions = [item for item in report["actionable_defects"] if item["stage"] == "layout/ost"]
+    assert len(collisions) == 3
+    assert all(item["start_ms"] >= 1_040_000 and item["other_text"] for item in collisions)
+    assert "17:20" in refeval.render_quality_md(report)
+
+
+@pytest.mark.parametrize("overlap,expected", [(49, 0), (50, 0), (51, 1)])
+def test_quality_same_channel_requires_strict_50ms_overlap(tmp_path, overlap, expected):
+    from substage import refeval
+
+    _write_quality_track(tmp_path, [
+        (1000, 4000, "첫 대사입니다."),
+        (4000 - overlap, 7000, "다른 대사입니다."),
+    ])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["same_channel_overlaps"] == expected
+
+
+def test_quality_counts_all_nested_same_channel_pairs(tmp_path):
+    from substage import refeval
+
+    _write_quality_track(tmp_path, [
+        (1000, 9000, "긴 대사입니다."), (2000, 7000, "중간 대사입니다."), (3000, 5000, "짧은 대사입니다."),
+    ])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["same_channel_overlaps"] == 3
+
+
+@pytest.mark.parametrize("first,second", [
+    ("세 번째 기사", "네 번째 기사"),
+    ("제3의 새로운 기사", "제4의 새로운 기사"),
+    ("12번 출입구 폐쇄", "13번 출입구 폐쇄"),
+])
+def test_quality_ost_distinct_ordinals_and_digits_are_not_duplicates(tmp_path, first, second):
+    from substage import refeval
+
+    _write_quality_track(tmp_path, [
+        (1000, 4000, f"'{first}'"), (5000, 8000, f"'{second}'"),
+    ])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["ost_duplicate_translations"] == 0
+    assert report["collision_free_score"] == 100.0
+
+
+@pytest.mark.parametrize("second_start,expected", [(16_000, 1), (16_001, 0)])
+def test_quality_ost_duplicate_window_includes_12000ms_gap(tmp_path, second_start, expected):
+    from substage import refeval
+
+    _write_quality_track(tmp_path, [
+        (1000, 4000, "'긴급 출입 통제'"), (second_start, second_start + 3000, "'긴급 출입 통제 중'"),
+    ])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["ost_duplicate_translations"] == expected
+
+
+@pytest.mark.parametrize("english,expected", [
+    (("I will leave now.", "I will leave now."), 0),
+    (("I will leave now.", "Don't wait for me."), 1),
+])
+def test_quality_dialogue_echo_respects_intentional_source_repetition(tmp_path, english, expected):
+    from substage import refeval
+
+    _write_quality_track(tmp_path, [
+        (1000, 4000, "이제 떠날 거예요."), (5000, 8000, "이제 떠날 거예요."),
+    ], [cue("c1", 1000, 4000, english[0]), cue("c2", 5000, 8000, english[1])])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["adjacent_dialogue_echoes"] == expected
+
+
+def test_quality_format_completeness_and_empty_tracks(tmp_path):
+    from substage import refeval
+
+    srt = _write_quality_track(tmp_path, [
+        (1000, 2000, "아주 긴 자막입니다 " * 4 + " / 뒤\n둘째\n셋째♪"),
+        (3000, 5000, "Untranslated."),
+    ], [
+        cue("c1", 1000, 2000, "A long subtitle."),
+        cue("c2", 3000, 5000, "This is untranslated."),
+        cue("c3", 6000, 8000, "Missing."),
+    ])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["format_score"] == 0.0
+    assert report["counts"]["cpl_over"] == report["counts"]["slash_count"] == report["counts"]["over_two_lines_count"] == 1
+    assert report["counts"]["missing_dialogue"] == report["counts"]["raw_music_count"] == report["counts"]["english_only_count"] == 1
+    assert report["completeness_score"] == 0.0
+    assert report["passes_targets"] is False
+    srt.write_text("", encoding="utf-8")
+    empty = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert empty["completeness_score"] == 0.0
+    assert empty["passes_targets"] is False
+    assert any(item["kind"] == "empty_subtitles" for item in empty["actionable_defects"])
+
+
+def _write_quality_register_artifacts(tmp_path, *, shifted=False, collision=False):
+    from substage.models import RegisterEdge, RegisterMap
+    from substage.store import save_model
+
+    cues = [
+        cue("c1", 1000, 4000, "Please leave."),
+        cue("c2", 5000, 8000, "Go now."),
+        cue("c3", 9000, 12000, "Come back."),
+    ]
+    _write_quality_track(tmp_path, [
+        (1000, 4000, "먼저 가세요."), (5000, 8000, "빨리 가."), (9000, 12000, "다시 오세요."),
+    ], cues)
+    characters = [
+        Character(id="alex", en_name="Alex Stone", ko_name="알렉스", persona="adult",
+                  aliases=["Stone"] if collision else [], voice=VoiceCard(idiolect="polite")),
+        Character(id="bob", en_name="Bob Stone", ko_name="밥", persona="adult", voice=VoiceCard(idiolect="polite")),
+    ]
+    save_model(tmp_path / "context_map.yaml", ContextMap(synopsis="test", tone_baseline="neutral", characters=characters))
+    shifts = [RegisterShift(at_cue="c2", until_cue="c3", level="hae", reason="relationship_change")] if shifted else []
+    edge = RegisterEdge(
+        speaker="alex", addressee="bob", relation="stranger_civil", apparent_generation="same",
+        history="none", stance="civil", step=9, level="haeyo", shifts=shifts,
+    )
+    save_model(tmp_path / "register.yaml", RegisterMap(edges=[edge]))
+    save_model(tmp_path / "scenes.json", [Scene(id="s1", start_ms=1000, end_ms=12000, cue_ids=[c.id for c in cues])])
+    save_model(tmp_path / "observations.json", [
+        CueObservation(cue_id=c.id, speaker="Alex Stone", addressee="Bob Stone") for c in cues
+    ])
+    save_model(tmp_path / "snapshots.json", [
+        Snapshot(scene_id="s1", registers={"alex>bob": SceneRegister(level="haeyo" if shifted else "hae", shifts=shifts)}),
+    ])
+    return cues
+
+
+def test_quality_register_alias_snapshot_stranger_and_scene_defects(tmp_path):
+    from substage import refeval
+
+    _write_quality_register_artifacts(tmp_path, collision=True)
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["alias_collisions"] == 1
+    assert report["counts"]["stranger_banmal_count"] == 1
+    assert report["counts"]["scene_oscillations"] == 1
+    assert report["counts"]["snap_disagree"] == 3
+    assert report["register_score"] == 90.0
+    assert report["passes_targets"] is False
+    assert {item["kind"] for item in report["actionable_defects"]} >= {
+        "alias_collision", "stranger_banmal", "scene_oscillation", "snapshot_register_disagreement",
+    }
+
+
+def test_quality_honors_register_shifts_and_translation_pair_metadata(tmp_path):
+    from substage import refeval
+    from substage.store import save_model
+
+    cues = _write_quality_register_artifacts(tmp_path, shifted=True)
+    save_model(tmp_path / "observations.json", [])
+    save_model(tmp_path / "translations.json", [
+        SceneTranslation(scene_id="s1", mode="text", cues=[
+            TranslatedCue(cue_id=c.id, speaker="alex", addressee="bob", ko="old draft") for c in cues
+        ]),
+    ])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["stranger_banmal_count"] == 0
+    assert report["counts"]["scene_oscillations"] == 0
+    assert report["counts"]["snap_disagree"] == 0
+    assert report["register_score"] == 100.0
+    assert report["quality_score"] == 100.0
+
+
+def test_quality_resolves_arm_artifacts_without_official_subtitles(tmp_path, monkeypatch):
+    from substage import refeval
+
+    base = tmp_path / "sample"
+    arm = tmp_path / "sample__flash38"
+    _write_quality_track(base, [(1000, 4000, "원본 초안입니다.")], [cue("c1", 1000, 4000, "Hello.")])
+    _write_quality_track(arm, [(1000, 4000, "안녕하세요.")])
+    monkeypatch.setattr(refeval, "workspace", lambda video_id: SimpleNamespace(data_dir=base))
+    report = refeval.evaluate_media_quality("sample", settings=Settings())
+    assert report["srt_path"] == str(arm / "sample.ko.srt")
+    assert report["artifact_paths"]["cues.json"] == str(base / "cues.json")
+    assert report["quality_score"] == 100.0
+
+
+def test_quality_corpus_markdown_and_gating(tmp_path):
+    from substage import refeval
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    _write_quality_track(first, [(1000, 4000, "안녕하세요.")])
+    _write_quality_track(second, [(1000, 4000, "같은 대사입니다."), (2000, 5000, "다른 대사입니다.")])
+    report = refeval.evaluate_corpus_quality([
+        {"video_id": "first", "ws_dir": first}, {"video_id": "second", "ws_dir": second},
+    ], settings=Settings())
+    assert report["summary"]["media_count"] == 2
+    assert report["summary"]["passed_count"] == 1
+    assert report["quality_score"] > 97.5
+    assert report["passes_targets"] is False
+    assert report["summary"]["quality_score"] == report["quality_score"]
+    markdown = refeval.render_quality_md(report)
+    assert "Subtitle corpus quality" in markdown and "first" in markdown and "second" in markdown
+    assert "**FAIL**" in markdown
+    with pytest.raises(ValueError, match="at least one"):
+        refeval.evaluate_corpus_quality([], settings=Settings())
+
+
+def test_quality_cli_json_markdown_output_and_fail_thresholds(tmp_path, capsys):
+    import json
+
+    from substage import cli
+
+    path = _write_quality_track(tmp_path, [(1000, 4000, "안녕하세요.")])
+    out = tmp_path / "report"
+    args = ["quality", "sample", "--ws-dir", str(tmp_path), "--srt", str(path)]
+    assert cli.main([*args, "--out", str(out), "--json", "--fail-under", "100"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["quality_score"] == 100.0
+    assert json.loads((out / "quality.json").read_text(encoding="utf-8")) == report
+    assert "Subtitle quality" in (out / "quality.md").read_text(encoding="utf-8")
+    assert cli.main([*args, "--fail-under", "0"]) == 0
+    assert "**PASS**" in capsys.readouterr().out
+    _write_quality_track(tmp_path, [(1000, 4000, "첫 대사입니다."), (2000, 5000, "다른 대사입니다.")])
+    assert cli.main([*args, "--fail-under", "0"]) == 1
+    capsys.readouterr()
+    assert cli.main([*args, "--fail-under", "100"]) == 1
+    capsys.readouterr()
+    assert cli.main(args) == 0
+    capsys.readouterr()
+
+
+def test_quality_cli_multiple_media_uses_corpus_report(tmp_path, monkeypatch, capsys):
+    import json
+
+    from substage import cli, refeval
+
+    for video_id in ("first", "second"):
+        _write_quality_track(tmp_path / video_id, [(1000, 4000, "안녕하세요.")], video_id=video_id)
+    monkeypatch.setattr(refeval, "workspace", lambda video_id: SimpleNamespace(data_dir=tmp_path / video_id))
+    assert cli.main(["quality", "first", "second", "--json", "--fail-under", "0"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["media_count"] == 2
+    assert report["passes_targets"] is True
+
+
+def test_quality_pragmatic_address_and_sync_defects_are_actionable(tmp_path):
+    from substage import refeval
+    from substage.store import load_model, save_model
+    from substage.models import RegisterMap
+
+    _write_quality_register_artifacts(tmp_path, shifted=True)
+    rmap = load_model(tmp_path / "register.yaml", RegisterMap)
+    edge = rmap.edges[0].model_copy(update={
+        "relation": "own_parent", "apparent_generation": "addressee_older",
+        "history": "raised_by_addressee", "step": 8, "shifts": [],
+    })
+    save_model(tmp_path / "register.yaml", RegisterMap(edges=[edge]))
+    _write_quality_track(tmp_path, [(1000, 4000, "당신은 가세요.")], [cue("c1", 1000, 4000, "You should leave.")])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, sync_delta_ms=0.0, settings=Settings())
+    assert report["pragmatic_score"] == 0.0
+    assert report["sync_err_ms"] == 248.0
+    assert any(item["kind"] == "civil_dangsin" and item["stage"] == "pragmatic/address" for item in report["actionable_defects"])
+    assert any(item["kind"] == "sync_error" for item in report["actionable_defects"])
+
+
+def test_quality_overlapping_dialogue_echo_is_distinct_from_time_collision(tmp_path):
+    from substage import refeval
+
+    _write_quality_track(tmp_path, [
+        (1000, 4000, "이제 떠날 거예요."), (3000, 6000, "이제 떠날 거예요."),
+    ], [cue("c1", 1000, 3000, "I will leave now."), cue("c2", 4000, 6000, "Don't wait for me.")])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["same_channel_overlaps"] == 1
+    assert report["counts"]["adjacent_dialogue_echoes"] == 1
