@@ -143,6 +143,19 @@ def _fit(ev: _Ev, next_start: int | None, settings) -> int:
     return fit_end(ev.start, ev.en_end, cps_chars(ev.ko), next_start, settings)
 
 
+def _ost_chains(ost: list[_Ev]) -> list[list[_Ev]]:
+    """Keep nearby or overlapping screen-text beats in one position."""
+    chains: list[list[_Ev]] = []
+    chain_end = 0
+    for ev in ost:
+        if not chains or ev.start - chain_end > 400:
+            chains.append([])
+            chain_end = max(ev.end, ev.en_end)
+        chains[-1].append(ev)
+        chain_end = max(chain_end, ev.end, ev.en_end)
+    return chains
+
+
 def _retime(events: list[_Ev], settings) -> None:
     dlg = [e for e in events if e.channel != "ost"]
     ost = [e for e in events if e.channel == "ost"]
@@ -154,33 +167,57 @@ def _retime(events: list[_Ev], settings) -> None:
     for i, ev in enumerate(dlg):
         nxt_dlg = dlg[i + 1].start if i + 1 < len(dlg) else None
         ev.end = _fit(ev, nxt_dlg, settings)
-    # Retime OST events on the top channel; only snap a pure tail-bleed (<= 350 ms) into a
-    # dialogue event when the OST does not overlap any other dialogue event.
+    # Fit OST against its own channel, never hide a brief dialogue overlap.
     for i, ev in enumerate(ost):
-        body_overlaps = [
-            d for d in dlg
-            if min(ev.en_end, d.end) - max(ev.start, d.start) > 350
-        ]
-        snap_limit: int | None = None
-        if not body_overlaps:
-            for d in dlg:
-                if ev.start < d.start - 200 and 0 < ev.en_end - d.start <= 350:
-                    ev.en_end = max(ev.start + settings.short_min_ms, d.start - settings.min_gap_ms)
-                    snap_limit = d.start
-                    break
         nxt_ost = ost[i + 1].start if i + 1 < len(ost) else None
-        nxt = min(x for x in (nxt_ost, snap_limit) if x is not None) if (nxt_ost is not None or snap_limit is not None) else None
-        ev.end = _fit(ev, nxt, settings)
-        overlaps_dlg = any(
-            min(ev.end, d.end) - max(ev.start, d.start) > 0
-            or (snap_limit is None and min(ev.en_end, d.en_end) - max(ev.start, d.start) > 0)
+        ev.end = _fit(ev, nxt_ost, settings)
+    for chain in _ost_chains(ost):
+        cs = min(e.start for e in chain)
+        ce = max(max(e.end, e.en_end) for e in chain)
+        top = any(
+            min(ce, d.end) - max(cs, d.start) > 0
+            or min(ce, d.en_end) - max(cs, d.start) > 0
             for d in dlg
         )
-        ev.position = "an8" if overlaps_dlg else "an2"
-        if overlaps_dlg:
-            s_ko = ev.ko.strip()
-            if s_ko and not (len(s_ko) >= 2 and s_ko[0] in "'\"“”‘’[" and s_ko[-1] in "'\"“”‘’]"):
-                ev.ko = f"'{s_ko}'"
+        for ev in chain:
+            ev.position = "an8" if top else "an2"
+            if top:
+                s_ko = ev.ko.strip()
+                if s_ko and not (len(s_ko) >= 2 and s_ko[0] in "'\"“”‘’[" and s_ko[-1] in "'\"“”‘’]"):
+                    ev.ko = f"'{s_ko}'"
+    # One top-channel display at a time: combine readable pairs, else sequence.
+    top_ost = [ev for ev in ost if ev.position == "an8"]
+    i = 0
+    while i + 1 < len(top_ost):
+        a, b = top_ost[i : i + 2]
+        if min(a.end, b.end) - max(a.start, b.start) <= 0:
+            i += 1
+            continue
+        combined = f"{a.ko.strip()}\n{b.ko.strip()}"
+        if "\n" not in a.ko.strip() and "\n" not in b.ko.strip() and _fits(combined, settings.cpl_limit):
+            a.ko = combined
+            a.end = max(a.end, b.end)
+            a.en_end = max(a.en_end, b.en_end)
+            a.cue_ids = list(dict.fromkeys([*a.cue_ids, *b.cue_ids]))
+            a.turns.extend(b.turns)
+            a.scene_last = b.scene_last
+            a.en_text = f"{a.en_text}\n{b.en_text}"
+            a.tags = list(dict.fromkeys([*a.tags, *b.tags, "merge"]))
+            a.semantic = a.semantic or b.semantic
+            a.fixed = a.fixed or b.fixed
+            a.lyric = a.lyric or b.lyric
+            a.omissions.extend(b.omissions)
+            a.attribution_passes.extend(b.attribution_passes)
+            events.remove(b)
+            top_ost.pop(i + 1)
+        else:
+            b.start = max(b.start, a.end + settings.min_gap_ms)
+            b.end = max(b.end, b.start + settings.short_min_ms)
+            # A shifted event can move past another pending top event.
+            top_ost.sort(key=lambda ev: ev.start)
+    events.sort(key=lambda ev: ev.start)
+
+
 # ---------------------------------------------------------------- text
 
 

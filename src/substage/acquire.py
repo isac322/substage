@@ -334,6 +334,16 @@ def _words(text: str) -> list[str]:
     return _norm_words(text)
 
 
+def apply_sync_offset(cues: list[Cue], offset_ms: int) -> list[Cue]:
+    """Shift cue timings, clamping at zero and retaining at least 100 ms."""
+    shifted: list[Cue] = []
+    for cue in cues:
+        start_ms = max(0, cue.start_ms + offset_ms)
+        end_ms = max(start_ms + 100, cue.end_ms + offset_ms)
+        shifted.append(cue.model_copy(update={"start_ms": start_ms, "end_ms": end_ms}))
+    return shifted
+
+
 def _verify_ratio(cues: list[Cue], windows: list[tuple[int, int]], transcripts: list[str]) -> float:
     """Median SequenceMatcher ratio between heard speech and cue text."""
     ratios: list[float] = []

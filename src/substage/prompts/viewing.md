@@ -29,7 +29,9 @@ Also report:
   words the cue list omits. Begin each text with one kind tag, then the exact words:
   [message] one phone text/chat bubble or SMS (report EACH bubble as its own item with its own start_ms/end_ms; never concatenate sequential bubbles into one string)
   [ui] caller ID, phone status ("Do Not Disturb", "No Service"), HUD, or computer/device prompt
-  [note] handwritten note, letter, pamphlet, newspaper headline, magazine/comic cover, calendar, or book cover
+  [note] handwritten note, letter, pamphlet, magazine/comic cover, calendar, or book cover
+  [headline] news/magazine article headline or TV chyron
+  [callout] highlighted article sentence, giant pop-out phrase, or kinetic subtext/thought overlay shown on screen simultaneously with spoken dialogue
   [sign] physical signs, street blades, banners, placards, close-up prop labels (coffee cup name, pizza box, cylinder/bottle label, arcade prize ticket sign, photo label), license plates, or nametags held in the shot
   [caption] location/time cards ("IXTENCO, MEXICO", "VENICE, ITALY", "SIX YEARS LATER") and character lower-thirds
   [title] the video's title card or a chapter card
@@ -38,6 +40,7 @@ Also report:
   [dedication] dedication or memorial card ("For Leah", "In Memoriam")
   [spoken] an audible word or short call that has NO cue in the list (a shouted name, "Hey!")
   [logo] studio/brand logo or watermark   [scroll] a scrolling list of credit names
+  Report [headline] and [callout] even during continuous dialogue; do not omit them because a spoken cue overlaps their on-screen lifetime.
   start_ms/end_ms: absolute video ms ({start_ms} + time into the clip), the span the text is
   readable or the words are heard. Report each bubble, card, or insert appearance separately, even when a close-up prop or street sign is on screen for only 1–2 seconds.
   plot_critical: true for every kind except [logo], [scroll] and out-of-focus background clutter. Any close-up shot whose subject is a readable prop, label, cover, or sign is plot_critical: true.

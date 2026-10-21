@@ -445,15 +445,14 @@ def test_guarded_sound_and_omitted_incidental_lyric_do_not_create_semantic_displ
     assert events == [] and lineage_issues(lineage, events=events) == []
 
 
-def test_dual_channel_ost_and_dialogue_snap_and_an8_positioning(tmp_path):
-    # Case 1: Tail-bleed OST (EARTH-10005 [687000..688400]) before speech onset ([688271..689417])
-    # snaps cleanly before speech onset and stays at an2 without overlapping dialogue.
+def test_co_existence_ost_and_dialogue_preserves_overlap_and_an8_positioning(tmp_path):
+    # Even a 129 ms tail overlap must stay visible on the top channel.
     c_ost = cue("ost-0008", 687000, 688400, "EARTH-10005", source="ost")
     c_dlg = cue("c0177", 688271, 689417, "your locker at work opens.")
     evs = run([c_ost, c_dlg], {"ost-0008": "'지구-10005'", "c0177": "직장 사물함이 열린다고"})
     assert len(evs) == 2
-    assert evs[0].channel == "ost" and evs[0].position == "an2"
-    assert evs[0].end_ms <= 688271 - S.min_gap_ms
+    assert evs[0].channel == "ost" and evs[0].position == "an8"
+    assert evs[0].end_ms >= 688400
     assert evs[1].channel == "dialogue" and evs[1].position == "an2"
     assert evs[1].start_ms == 688271
 
@@ -508,3 +507,87 @@ def test_dual_channel_ost_and_dialogue_snap_and_an8_positioning(tmp_path):
     assert "{\\an8}'공존'" in norm_dest.read_text(encoding="utf-8")
     loaded_norm = load_cue_list(norm_dest)
     assert [x["t"] for x in loaded_norm if x.get("pos") == "top"] == ["'공존'"]
+
+
+def test_ost_chain_position_invariance_no_jump():
+    cues = [
+        cue("ost-1", 0, 1800, "FIRST", source="ost"),
+        cue("ost-2", 2000, 4000, "SECOND", source="ost"),
+        cue("c1", 2500, 4500, "Spoken dialogue."),
+    ]
+    events = run(cues, {"ost-1": "첫 화면", "ost-2": "다음 화면", "c1": "말하는 중"})
+    ost = [e for e in events if e.channel == "ost"]
+    assert len(ost) == 2
+    assert [e.position for e in ost] == ["an8", "an8"]
+    assert all(e.ko.startswith("'") and e.ko.endswith("'") for e in ost)
+    assert events[-1].position == "an2"
+
+
+def test_isolated_ost_chain_stays_bottom_and_does_not_join_after_400ms():
+    cues = [
+        cue("ost-1", 0, 1800, "FIRST", source="ost"),
+        cue("ost-2", 2601, 4000, "SECOND", source="ost"),
+        cue("c1", 2500, 4500, "Spoken dialogue."),
+    ]
+    ost = [e for e in run(cues, {"ost-1": "첫 화면", "ost-2": "다음 화면", "c1": "말하는 중"})
+           if e.channel == "ost"]
+    assert [e.position for e in ost] == ["an2", "an8"]
+
+
+def test_touching_ost_and_dialogue_boundaries_do_not_move_ost_top():
+    cues = [
+        cue("ost-1", 0, 1800, "FIRST", source="ost"),
+        cue("c1", 1800, 4000, "Spoken dialogue."),
+    ]
+    ost = next(e for e in run(cues, {"ost-1": "첫 화면", "c1": "말하는 중"}) if e.channel == "ost")
+    assert ost.position == "an2"
+    assert ost.end_ms == 1800
+
+
+def test_overlapping_top_ost_single_lines_merge_and_keep_source_cues():
+    cues = [
+        cue("ost-1", 0, 2000, "FIRST", source="ost"),
+        cue("ost-2", 100, 2500, "SECOND", source="ost"),
+        cue("c1", 0, 4000, "Spoken dialogue."),
+    ]
+    events = run(cues, {"ost-1": "첫 화면", "ost-2": "다음 화면", "c1": "말하는 중"})
+    ost = [e for e in events if e.channel == "ost"]
+    assert len(ost) == 1
+    assert ost[0].position == "an8"
+    assert ost[0].ko == "'첫 화면'\n'다음 화면'"
+    assert ost[0].cue_ids == ["ost-1", "ost-2"]
+    assert ost[0].start_ms == 0 and ost[0].end_ms >= 2500
+
+
+def test_overlapping_multiline_top_ost_sequences_without_collisions():
+    cues = [
+        cue("ost-1", 0, 2000, "FIRST", source="ost"),
+        cue("ost-2", 100, 2500, "SECOND", source="ost"),
+        cue("ost-3", 200, 3000, "THIRD", source="ost"),
+        cue("c1", 0, 4000, "Spoken dialogue."),
+    ]
+    events = run(
+        cues,
+        {
+            "ost-1": "'첫 줄\n둘째 줄'",
+            "ost-2": "'다음 줄\n이어지는 줄'",
+            "ost-3": "'마지막 줄\n끝 줄'",
+            "c1": "말하는 중",
+        },
+    )
+    ost = [e for e in events if e.channel == "ost"]
+    assert len(ost) == 3
+    assert all(e.position == "an8" for e in ost)
+    assert all(a.end_ms <= b.start_ms for a, b in zip(ost, ost[1:]))
+    assert all(e.end_ms - e.start_ms >= S.short_min_ms for e in ost)
+    assert events == sorted(events, key=lambda e: e.start_ms)
+
+
+def test_one_millisecond_ost_dialogue_overlap_keeps_full_ost_on_top():
+    cues = [
+        cue("ost-1", 0, 1800, "FIRST", source="ost"),
+        cue("c1", 1799, 4000, "Spoken dialogue."),
+    ]
+    ost = next(e for e in run(cues, {"ost-1": "첫 화면", "c1": "말하는 중"}) if e.channel == "ost")
+    assert ost.position == "an8"
+    assert ost.end_ms == 1800

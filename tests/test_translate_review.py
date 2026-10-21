@@ -464,6 +464,121 @@ def test_ost_cues_text_overlap_coverage(tmp_path):
     assert translate.ost_cues(obs, cues, []) == []
 
 
+def test_realign_ost_caption_over_dialogue_stays_out_of_later_silent_gap():
+    caption = OnScreenText(
+        start_ms=969_000, end_ms=992_000, text="[caption] UBER HEADQUARTERS",
+    )
+    observations = [ChunkObservations(
+        chunk_id="v03", start_ms=950_000, end_ms=1_080_000, on_screen_text=[caption],
+    )]
+    cues = [
+        cue("c1", 960_000, 1_024_000, "We need to discuss the next meeting."),
+        cue("c2", 1_040_000, 1_050_000, "Everyone is already here."),
+    ]
+    (chunk,) = translate.realign_ost_to_anchors_and_gaps(observations, cues)
+    (retained,) = chunk.on_screen_text
+    assert (retained.start_ms, retained.end_ms) == (969_000, 992_000)
+
+
+def test_realign_ost_keeps_supported_dialogue_anchor_correction():
+    observations = [ChunkObservations(
+        chunk_id="v01", start_ms=0, end_ms=100_000, on_screen_text=[
+            OnScreenText(start_ms=1000, end_ms=3000, text="[sign] Find the hidden door"),
+        ],
+    )]
+    cues = [
+        cue("c1", 1000, 3000, "Everyone is already here."),
+        cue("c2", 50_000, 53_000, "Find the hidden door."),
+    ]
+    (chunk,) = translate.realign_ost_to_anchors_and_gaps(observations, cues)
+    (corrected,) = chunk.on_screen_text
+    assert (corrected.start_ms, corrected.end_ms) == (51_650, 53_650)
+
+
+@pytest.mark.parametrize("kind", ["callout", "headline"])
+@pytest.mark.parametrize("linked", [None, "c1"])
+def test_ost_callout_and_headline_survive_partial_dialogue_coverage(kind, linked):
+    cues = [cue("c1", 1000, 5000, "Travis talks to me. He does not listen to you.")]
+    observations = [OnScreenText(
+        start_ms=1500, end_ms=3500, text=f"[{kind}] Travis talks to me, not you.",
+        covered_by_cue=linked,
+    )]
+    (overlay,) = translate.ost_cues(observations, cues, [])
+    assert overlay.text == "Travis talks to me, not you."
+    assert overlay.ost_kind == kind
+    assert overlay.source == "ost" and overlay.forced
+
+
+@pytest.mark.parametrize("kind", ["callout", "headline"])
+@pytest.mark.parametrize("linked", [None, "c1"])
+def test_ost_callout_and_headline_skip_verbatim_dialogue(kind, linked):
+    cues = [cue("c1", 1000, 5000, "Travis talks to me, not you.")]
+    observations = [OnScreenText(
+        start_ms=1500, end_ms=3500, text=f"[{kind}] TRAVIS TALKS TO ME, NOT YOU!",
+        covered_by_cue=linked,
+    )]
+    assert translate.ost_cues(observations, cues, []) == []
+
+
+@pytest.mark.parametrize("kind", ["callout", "headline"])
+def test_ost_callout_and_headline_are_kept_without_plot_critical_flag(kind):
+    observations = [OnScreenText(start_ms=1000, end_ms=3000, text=f"[{kind}] THE NEXT BIG THING")]
+    assert [c.ost_kind for c in translate.ost_cues(observations, [], [])] == [kind]
+
+
+@pytest.mark.parametrize("offset,expected", [
+    (250, [(350, 550), (1250, 1350)]),
+    (0, [(100, 300), (1000, 1100)]),
+    (-150, [(0, 150), (850, 950)]),
+    (-248, [(0, 100), (752, 852)]),
+    (-500, [(0, 100), (500, 600)]),
+])
+def test_apply_sync_offset_clamps_and_preserves_cue_metadata(offset, expected):
+    from substage.acquire import apply_sync_offset
+
+    cues = [cue("c1", 100, 300, "First", speaker_hint="Travis"), cue("c2", 1000, 1020, "Second")]
+    shifted = apply_sync_offset(cues, offset)
+    assert [(c.start_ms, c.end_ms) for c in shifted] == expected
+    assert [(c.id, c.text, c.raw, c.speaker_hint) for c in shifted] == [
+        (c.id, c.text, c.raw, c.speaker_hint) for c in cues
+    ]
+    assert [(c.start_ms, c.end_ms) for c in cues] == [(100, 300), (1000, 1020)]
+    assert all(original is not changed for original, changed in zip(cues, shifted, strict=True))
+    assert apply_sync_offset([], offset) == []
+
+
+def test_evaluate_ost_and_sync_counts_coverage_emphasis_and_chain_position():
+    from substage.refeval import evaluate_ost_and_sync
+
+    ost = [
+        {"start_ms": 1000, "end_ms": 2000, "text": "'첫 문구'", "pos": "top"},
+        SimpleNamespace(start=2400, end=3000, ko="'둘째 문구'\n'셋째 문구'", position="an8"),
+    ]
+    dialogue = [cue("c1", 2950, 3500)]
+    gold = [{"start_ms": 1200, "end_ms": 1800}, {"start_ms": 5000, "end_ms": 6000}]
+    assert evaluate_ost_and_sync(ost, dialogue, gold_ost=gold, sync_delta_ms=-200.0) == {
+        "ost_cov": 50.0, "ost_emp": 100.0, "ost_pos": 100.0, "sync_err_ms": 48.0,
+    }
+    ost[0].update(text="첫 문구", pos="bottom")
+    scores = evaluate_ost_and_sync(ost, dialogue)
+    assert scores == {"ost_cov": None, "ost_emp": 50.0, "ost_pos": 50.0, "sync_err_ms": None}
+
+
+def test_evaluate_ost_and_sync_uses_strict_overlap_and_ass_tags():
+    from substage.refeval import evaluate_ost_and_sync
+
+    ost = [
+        {"start": 1000, "end": 2000, "text": r"{\an8}'문구'"},
+        {"start": 5000, "end": 6000, "text": r"{\an2}'독립 문구'"},
+    ]
+    scores = evaluate_ost_and_sync(ost, [cue("c1", 1999, 2500), cue("c2", 6000, 7000)])
+    assert scores["ost_pos"] == scores["ost_emp"] == 100.0
+    assert evaluate_ost_and_sync([], [], gold_ost=[], sync_delta_ms=-248.0) == {
+        "ost_cov": 100.0, "ost_emp": 100.0, "ost_pos": 100.0, "sync_err_ms": 0.0,
+    }
+    assert evaluate_ost_and_sync([], [], gold_ost=[{"start_ms": 1, "end_ms": 2}])["ost_cov"] == 0.0
+
+
 def test_ost_cues_sign_without_english_cue_becomes_cue():
     """A tagged sign no cue carries becomes an ost cue; the tag is stripped and
     a dialogue cue overlapping it with other words does not cover it."""

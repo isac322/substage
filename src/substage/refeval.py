@@ -486,6 +486,79 @@ def _rate(num: int, den: int) -> float | None:
     return round(num / den, 4) if den else None
 
 
+def evaluate_ost_and_sync(
+    ost_events: Sequence[Any],
+    dlg_events: Sequence[Any],
+    *,
+    gold_ost: Sequence[Mapping[str, Any]] | None = None,
+    sync_delta_ms: float | None = None,
+    ref_sync_ms: float = -248.0,
+) -> dict[str, Any]:
+    """Score OST coverage, quotation and chain positions on a 0..100 scale.
+
+    Coverage is the share of gold OST spans overlapping a displayed OST event;
+    it is unassessed (None) without gold. Emphasis is the share of OST events
+    with every display line quoted. Position checks entire <=400 ms-gap chains:
+    any positive dialogue overlap requires every chain event at the top.
+    Empty assessed sets score 100. Sync error is absolute milliseconds, or None
+    when no measured offset is supplied.
+    """
+    def value(event: Any, name: str, default: Any = None) -> Any:
+        return event.get(name, default) if isinstance(event, Mapping) else getattr(event, name, default)
+
+    def span(event: Any) -> tuple[int, int]:
+        return (
+            int(value(event, "start_ms", value(event, "start", 0))),
+            int(value(event, "end_ms", value(event, "end", 0))),
+        )
+
+    def quoted(event: Any) -> bool:
+        text = str(value(event, "ko", value(event, "text", "")))
+        lines = re.sub(r"\{[^}]*\}", "", text).replace(r"\N", "\n").strip().splitlines()
+        pairs = {"'": "'", '"': '"', "‘": "’", "“": "”", "[": "]"}
+        return bool(lines) and all(
+            len(line.strip()) >= 2 and pairs.get(line.strip()[0]) == line.strip()[-1]
+            for line in lines
+        )
+
+    def at_top(event: Any) -> bool:
+        position = value(event, "position", value(event, "pos"))
+        if position is not None:
+            return position in {"an8", "top", 8}
+        text = str(value(event, "ko", value(event, "text", "")))
+        return bool(re.search(r"\{[^}]*\\an8\b[^}]*\}", text))
+
+    ordered = sorted(((span(event), event) for event in ost_events), key=lambda item: item[0])
+    dialogue = [span(event) for event in dlg_events]
+    position_ok = 0
+    index = 0
+    while index < len(ordered):
+        chain_end = ordered[index][0][1]
+        following = index + 1
+        while following < len(ordered) and ordered[following][0][0] - chain_end <= 400:
+            chain_end = max(chain_end, ordered[following][0][1])
+            following += 1
+        chain_start = ordered[index][0][0]
+        needs_top = any(min(chain_end, end) > max(chain_start, start) for start, end in dialogue)
+        position_ok += sum(at_top(event) == needs_top for _, event in ordered[index:following])
+        index = following
+
+    coverage = None
+    if gold_ost is not None:
+        covered = sum(
+            any(min(gold_end, end) > max(gold_start, start) for (start, end), _ in ordered)
+            for gold_start, gold_end in map(span, gold_ost)
+        )
+        coverage = round(100 * covered / len(gold_ost), 2) if gold_ost else 100.0
+    count = len(ordered)
+    return {
+        "ost_cov": coverage,
+        "ost_emp": round(100 * sum(quoted(event) for _, event in ordered) / count, 2) if count else 100.0,
+        "ost_pos": round(100 * position_ok / count, 2) if count else 100.0,
+        "sync_err_ms": abs(sync_delta_ms - ref_sync_ms) if sync_delta_ms is not None else None,
+    }
+
+
 def arm_metrics(
     groups: list[Group], arm: str, settings: Settings, *, units: list[list[Group]] | None = None,
 ) -> dict:

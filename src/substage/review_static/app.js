@@ -51,18 +51,40 @@ function isQuotedOstText(txt) {
   return s.length >= 2 && /^["'“”‘’\[].*["'“”‘’\]]$/s.test(s);
 }
 
+function stampCuePositions(cues) {
+  const ost = cues.filter((c) => c.pos === "top" || isQuotedOstText(c.t));
+  const dialogue = cues.filter((c) => !isQuotedOstText(c.t) && c.pos !== "top");
+  let chain = [], cs = 0, ce = 0;
+  const stamp = () => {
+    if (!chain.length) return;
+    const top = chain.some((c) => c.pos === "top") || dialogue.some(
+      (d) => Math.min(ce, d.e) - Math.max(cs, d.s) > 0
+    );
+    for (const c of chain) c.pos = top ? "top" : "bottom";
+  };
+  for (const c of ost) {
+    if (chain.length && c.s - ce > 400) {
+      stamp();
+      chain = [];
+    }
+    if (!chain.length) { cs = c.s; ce = c.e; }
+    else { cs = Math.min(cs, c.s); ce = Math.max(ce, c.e); }
+    chain.push(c);
+  }
+  stamp();
+}
+
 function activeSplitText(cues, t) {
   const act = activeCues(cues, t);
   if (!act.length) return { top: "", bottom: "", all: "" };
-  const hasMulti = act.length >= 2;
   const top = [], bottom = [];
   for (const c of act) {
-    if (c.pos === "top" || (hasMulti && isQuotedOstText(c.t))) top.push(c.t);
+    if (c.pos === "top") top.push(c.t);
     else bottom.push(c.t);
   }
-  const allParts = (top.length && bottom.length)
-    ? [`[상단] ${top.join(" / ")}`, `[하단] ${bottom.join(" / ")}`]
-    : act.map((c) => c.t);
+  const allParts = [];
+  if (top.length) allParts.push(`[상단] ${top.join(" / ")}`);
+  if (bottom.length) allParts.push(top.length ? `[하단] ${bottom.join(" / ")}` : bottom.join("\n"));
   return { top: top.join("\n"), bottom: bottom.join("\n"), all: allParts.join("\n") };
 }
 
@@ -234,6 +256,8 @@ function rebuild() {
   S.metric = S.groups.some((g) => g.chrf && S.arm in g.chrf) ? "chrf" : "dice";
   $("score-head").textContent = S.metric === "chrf" ? "chrF" : "유사도";
   $("thr-label").textContent = S.metric === "chrf" ? "chrF <" : "유사도 <";
+  stampCuePositions(f.official);
+  stampCuePositions(f.candidates[S.arm] || []);
   S.rows = buildRows(f.en, f.official, f.candidates[S.arm] || []);
   attachScores(S.rows);
   attachNotes();
@@ -255,10 +279,7 @@ function buildRows(en, off, ko) {
   const place = (cues, key) => {
     for (const c of cues) {
       let best = null, bestOv = 0;
-      const hasSimultaneousSpoken = isQuotedOstText(c.t) && cues.some(
-        (other) => other !== c && !isQuotedOstText(other.t) && Math.min(other.e, c.e) - Math.max(other.s, c.s) > 100
-      );
-      const isTopCue = c.pos === "top" || hasSimultaneousSpoken;
+      const isTopCue = c.pos === "top";
       if (!isTopCue) {
         const i = lastStartingBefore(base, c.e - 1);
         for (let j = i; j >= 0 && base[j].s > c.s - 60000; j--) {

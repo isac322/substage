@@ -2381,8 +2381,8 @@ def _words(t: str) -> list[str]:
 #: kinds never subtitled: logos/watermarks and scrolling end-credit name lists
 _OST_SKIP_KINDS = frozenset({"logo", "scroll"})
 #: kinds a Korean release subtitles even when the viewing pass left plot_critical unset
-_OST_ALWAYS_KINDS = frozenset({"title", "credit", "gag_credit", "caption", "dedication", "spoken", "message", "ui", "note", "headline"})
-_OST_SIGNAL_KINDS = frozenset({"sign", "message", "ui", "note", "headline", "gag_credit", "caption", "title", "dedication"})
+_OST_ALWAYS_KINDS = frozenset({"title", "credit", "gag_credit", "caption", "dedication", "spoken", "message", "ui", "note", "headline", "callout"})
+_OST_SIGNAL_KINDS = frozenset({"sign", "message", "ui", "note", "headline", "callout", "gag_credit", "caption", "title", "dedication"})
 _AMBIENT_SINGLE_WORDS = frozenset({
     "exit", "stop", "open", "closed", "push", "pull", "men", "women", "restroom", "wc", "in", "out",
 })
@@ -2475,7 +2475,7 @@ def _normalize_chunk_ost_mmss(items: list[OnScreenText], start_ms: int, end_ms: 
 def realign_ost_to_anchors_and_gaps(
     observations: Sequence[ChunkObservations], cues: Sequence[Cue]
 ) -> list[ChunkObservations]:
-    """Repair drift only when dialogue anchors or a one-minute gap carry agree."""
+    """Repair drift only when matching dialogue anchors support a new time."""
     ignored = {
         "welcome", "from", "with", "that", "this", "your", "have", "into",
         "over", "showtime", "presents", "uber", "core", "value", "values",
@@ -2494,17 +2494,9 @@ def realign_ost_to_anchors_and_gaps(
             continue
         cue_words = [set(re.findall(r"[a-z]+", c.text.lower())) for c in chunk_cues]
         cue_phrases = [" ".join(re.findall(r"[a-z]+", c.text.lower())) for c in chunk_cues]
-        gaps: list[tuple[int, int]] = []
-        previous_end = ch.start_ms
-        for c in chunk_cues:
-            if c.start_ms - previous_end >= 4500:
-                gaps.append((previous_end, c.start_ms))
-            previous_end = max(previous_end, c.end_ms)
-        if ch.end_ms - previous_end >= 4500:
-            gaps.append((previous_end, ch.end_ms))
         items: list[OnScreenText] = []
         for o in ch.on_screen_text:
-            kind, clean_text = _split_kind(o.text)
+            _, clean_text = _split_kind(o.text)
             tokens = re.findall(r"[A-Za-z]+", clean_text)
             words = {t.lower() for t in tokens if len(t) >= 4 and t.lower() not in ignored}
             if not tokens or o.covered_by_cue is not None:
@@ -2532,17 +2524,6 @@ def realign_ost_to_anchors_and_gaps(
                 if ch.end_ms - ch.start_ms >= duration:
                     start = min(max(anchor.end_ms - 1350, ch.start_ms), ch.end_ms - duration)
                     end = start + duration
-            elif (
-                ch.start_ms > 0
-                and kind in {"sign", "title", "caption"}
-                and not any(0 <= o.start_ms - a <= 10_000 for a, _ in gaps)
-                and any(
-                    b - a >= 5000 and 0 <= (o.start_ms + 60_000) - a <= 10_000
-                    for a, b in gaps
-                )
-                and o.end_ms + 60_000 <= ch.end_ms
-            ):
-                start, end = o.start_ms + 60_000, o.end_ms + 60_000
             if (start, end) != (o.start_ms, o.end_ms):
                 offset = start - o.start_ms
                 beats = [
@@ -2693,14 +2674,19 @@ def ost_cues(
         if not (ost.plot_critical or kind in _OST_ALWAYS_KINDS or is_signal_sign):
             continue
         linked = by_id.get(ost.covered_by_cue or "")
-        if linked is not None and _carried_by(ost.text, [linked.text]):
+        if kind in {"callout", "headline"}:
+            if linked is not None and _same_text(ost.text, linked.text):
+                continue
+        elif linked is not None and _carried_by(ost.text, [linked.text]):
             continue
-        near = [
-            c.text
-            for c in cues
+        near_cues = [
+            c for c in cues
             if c.start_ms - OST_OVERLAP_MS < ost.end_ms and ost.start_ms < c.end_ms + OST_OVERLAP_MS
         ]
-        if _carried_by(ost.text, near):
+        if kind in {"callout", "headline"}:
+            if any(_same_text(ost.text, c.text) for c in near_cues):
+                continue
+        elif _carried_by(ost.text, [c.text for c in near_cues]):
             continue
         for b_start, b_end, b_text, b_kind in split_ost_beats(kind, ost):
             raw_tag = kind or b_kind

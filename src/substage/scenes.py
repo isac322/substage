@@ -85,7 +85,7 @@ def group_scenes(cues: list[Cue], *, gap_ms: int, max_cues: int) -> list[Scene]:
     return scenes
 
 
-def gap_audit(cues: list[Cue], duration_ms: int, min_gap_ms: int = 60_000) -> list[tuple[int, int]]:
+def gap_audit(cues: list[Cue], duration_ms: int, min_gap_ms: int = 3_000) -> list[tuple[int, int]]:
     """Cue-free intervals >= ``min_gap_ms`` — candidates for un-subtitled on-screen text."""
     gaps: list[tuple[int, int]] = []
     ordered = sorted(cues, key=lambda c: (c.start_ms, c.end_ms))

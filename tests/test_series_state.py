@@ -427,7 +427,7 @@ def test_slash_ost_sync_and_recap_bead_alignment():
         ],
     )
     realigned = translate.realign_ost_to_anchors_and_gaps([ch_v04], cues_v04)[0]
-    assert realigned.on_screen_text[0].start_ms == 1907000
+    assert realigned.on_screen_text[0].start_ms == 1847000
     assert 2149000 <= realigned.on_screen_text[1].start_ms <= 2155000
 
     # 3. Recap bead alignment: short cue ("They're defecting."), 2:1 merge, and clause trim
