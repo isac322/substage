@@ -583,6 +583,36 @@ def test_overlapping_multiline_top_ost_sequences_without_collisions():
     assert events == sorted(events, key=lambda e: e.start_ms)
 
 
+def test_rapid_montage_top_ost_clamps_predecessor_instead_of_cascading_drift():
+    # The first simultaneous pair merges into a two-line card whose extended
+    # tail overlaps the next cut. Later cards must keep their original starts.
+    cues = [
+        cue("ost-1", 0, 900, "FIRST HEADLINE", source="ost"),
+        cue("ost-2", 100, 900, "FIRST CALLOUT", source="ost"),
+        cue("ost-3", 700, 1100, "SECOND HEADLINE", source="ost"),
+        cue("ost-4", 1400, 1800, "THIRD HEADLINE", source="ost"),
+        cue("c1", 0, 3000, "Spoken dialogue."),
+    ]
+    events = run(
+        cues,
+        {
+            "ost-1": "'첫 기사'",
+            "ost-2": "'둘째 기사'",
+            "ost-3": "'세 번째 기사\n추가 내용'",
+            "ost-4": "'네 번째 기사\n추가 내용'",
+            "c1": "말하는 중",
+        },
+    )
+    ost = [e for e in events if e.channel == "ost"]
+    assert [e.cue_ids for e in ost] == [["ost-1", "ost-2"], ["ost-3"], ["ost-4"]]
+    assert [e.start_ms for e in ost] == [0, 700, 1400]
+    assert len(ost[0].ko.splitlines()) == 2
+    assert ost[0].end_ms == ost[1].start_ms - S.min_gap_ms
+    assert all(e.position == "an8" for e in ost)
+    assert all(a.end_ms + S.min_gap_ms <= b.start_ms for a, b in zip(ost, ost[1:]))
+    assert all(e.end_ms - e.start_ms >= S.short_min_ms for e in ost)
+
+
 def test_one_millisecond_ost_dialogue_overlap_keeps_full_ost_on_top():
     cues = [
         cue("ost-1", 0, 1800, "FIRST", source="ost"),

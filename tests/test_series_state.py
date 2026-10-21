@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from substage import memory, narrative, refeval, series_state
 from substage.models import (
     Character,
@@ -214,6 +216,103 @@ def test_reconcile_lock_and_enforce_series_pins():
     ko2_enforced = series_state.enforce_series_pins(ko2_draft, cues2, b1, context_map=cm2)
     assert "망할 기사들이 다 이탈 중이야" in ko2_enforced["c0001"]
     assert ko2_enforced["c0002"] == "당장 레반도프스키를 해고해야 해"
+
+
+@pytest.mark.parametrize(
+    ("new_id", "new_name", "known_id", "known_name", "shared_name"),
+    [
+        ("emil", "Emil Michael", "ovitz", "Michael Ovitz", "Michael"),
+        ("bonnie", "Bonnie Kalanick", "travis", "Travis Kalanick", "Kalanick"),
+        ("bonderman", "David Bonderman", "drummond", "David Drummond", "David"),
+    ],
+)
+@pytest.mark.parametrize("shared_alias", [False, True])
+def test_distinct_full_names_do_not_match_series_entities(
+    new_id, new_name, known_id, known_name, shared_name, shared_alias
+):
+    ent = series_state.EntityRecord(
+        char_id=known_id, en_name=known_name, ko_name="기존 인물",
+        aliases=[shared_name] if shared_alias else [],
+    )
+    bible = series_state.SeriesBible(series_id="test", entities={known_id: ent})
+    newcomer = _char(new_id, new_name, "새 인물")
+    if shared_alias:
+        newcomer = newcomer.model_copy(update={"aliases": [shared_name]})
+
+    assert series_state._match_bible_entity(newcomer, bible) is None
+    context_map = ContextMap(
+        synopsis="s", tone_baseline="t",
+        characters=[newcomer, _char(known_id, known_name, "기존 인물")],
+    )
+    reconciled = series_state.reconcile_characters(context_map, bible)
+    assert {ch.id: ch.ko_name for ch in reconciled.characters} == {
+        new_id: "새 인물", known_id: "기존 인물",
+    }
+
+
+@pytest.mark.parametrize(
+    ("draft_id", "draft_name"),
+    [
+        ("emil", "Emil Michael"),
+        ("draft", "Emil Michael"),
+        ("draft", "Michael Emil"),
+        ("draft", "Emil"),
+        ("draft", "Michael"),
+        ("emil", "Different Fullname"),
+    ],
+)
+def test_series_entity_matching_preserves_full_names_partial_names_and_stable_ids(draft_id, draft_name):
+    ent = series_state.EntityRecord(char_id="emil", en_name="Emil Michael", ko_name="에밀 마이클")
+    bible = series_state.SeriesBible(series_id="test", entities={"emil": ent})
+    assert series_state._match_bible_entity(_char(draft_id, draft_name, "초안"), bible) is ent
+
+
+@pytest.mark.parametrize(
+    ("stored_signature", "draft_signature", "public_edges", "expected_signature"),
+    [
+        ("누가 그랬어?", "누가 그랬어요?", [], "누가 그랬어요?"),
+        ("누가 그랬어?", "기사", [("stranger_civil", "haeyo")], "기사"),
+        ("누가 그랬어?", "기사", [("professional", "hasipsio")], "기사"),
+        ("누가 그랬어?", "기사", [("stranger_civil", "haeyo"), ("professional", "hasipsio")], "기사"),
+        ("누가 그랬어?", "기사", [], "누가 그랬어?"),
+        ("누가 그랬어?", "기사", [("partner", "haeyo")], "누가 그랬어?"),
+        ("누가 그랬어?", "기사", [("stranger_civil", "haeyo"), ("professional", "hae")], "누가 그랬어?"),
+        ("누가 그랬어?", "누가 그랬어?", [("stranger_civil", "haeyo")], "누가 그랬어?"),
+        ("누가 그랬어요?", "누가 그랬어?", [], "누가 그랬어요?"),
+        ("", "누가 그랬어요?", [], "누가 그랬어요?"),
+    ],
+)
+def test_reconcile_voice_signature_does_not_spread_intimate_banmal(
+    stored_signature, draft_signature, public_edges, expected_signature
+):
+    ent = series_state.EntityRecord(
+        char_id="driver", en_name="Alex Rivera", ko_name="알렉스",
+        voice=VoiceCard(idiolect="established", vocabulary=["승객"], signature_ko=stored_signature),
+    )
+    bible = series_state.SeriesBible(
+        series_id="test", entities={"driver": ent},
+        dyads={
+            f"driver>other_{i}": series_state.DyadRecord(
+                speaker="driver", addressee=f"other_{i}", relation=relation, level=level,
+            )
+            for i, (relation, level) in enumerate(public_edges)
+        },
+    )
+    # Unrelated speakers and a spouse's banmal are not evidence of this driver's public register.
+    bible.dyads["someone>driver"] = series_state.DyadRecord(
+        speaker="someone", addressee="driver", relation="stranger_civil", level="hae",
+    )
+    bible.dyads["driver>spouse"] = series_state.DyadRecord(
+        speaker="driver", addressee="spouse", relation="partner", level="hae",
+    )
+    draft = _char("driver", "Alex Rivera", "알렉스")
+    draft = draft.model_copy(update={"voice": VoiceCard(idiolect="draft", signature_ko=draft_signature)})
+    context_map = ContextMap(synopsis="s", tone_baseline="t", characters=[draft])
+
+    voice = series_state.reconcile_characters(context_map, bible).characters[0].voice
+    assert voice.signature_ko == expected_signature
+    assert voice.idiolect == "established"
+    assert voice.vocabulary == ["승객"]
 
 
 def test_streaming_equals_batch_equivalence():

@@ -118,6 +118,26 @@ def test_name_resolver_refuses_ambiguous_partial_names():
     assert rid("Jud Wicks") == "judd"  # first and last name pick one
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Emil Michael", "ep:emilmichael"),
+        ("David Bonderman", "ep:davidbonderman"),
+        ("Bonnie Kalanick", "ep:bonniekalanick"),
+        ("Michael Ovitz", "ovitz"),
+        ("Michael", "ovitz"),
+        ("Kalanick", "travis"),
+    ],
+)
+def test_episode_ids_do_not_collapse_distinct_full_names(name, expected):
+    known = {
+        "michaelovitz": "ovitz", "michael": "ovitz",
+        "daviddrummond": "drummond", "david": "drummond",
+        "traviskalanick": "travis", "kalanick": "travis",
+    }
+    assert register._mint_ep_id(name, known) == expected
+
+
 def test_group_words_map_to_group():
     for word in ("group", "audience", "the audience", "Crowd", "the press", "viewers", "Everyone"):
         assert register.is_group(word), word
@@ -251,6 +271,45 @@ def test_firm_rule():
     assert not register.edge_firm(_edge("a", "b", "haeyo", step=6, stance="open_enmity"), ["c0001", "c0002"])
     assert not register.edge_firm(_edge("a", "b", "hae", step=7, ai_user=True), ["c0001", "c0002"])
     assert register.edge_firm(_edge("a", "b", "hae", step=3), ["c0001", "c0002"])  # step 3 fixes no level
+
+
+@pytest.mark.parametrize("stance", ["civil", "open_enmity", "contempt_from_power"])
+def test_polite_stranger_step_nine_is_firm_with_two_distinct_existing_cues(stance):
+    edge = _edge(
+        "driver", "passenger", "haeyo", step=9, relation="stranger_civil",
+        apparent_generation="same", history="met_as_adults", stance=stance,
+    )
+    assert register._earliest_step(edge) is None
+    assert register.edge_firm(edge, ["c0001", "c0002"])
+    assert _table(edge).is_firm("driver", "passenger", "c0003")
+    assert not register.edge_firm(edge, ["c0001"])
+    duplicate = edge.model_copy(update={"evidence_cues": ["c0001", "c0001", "c9999"]})
+    assert not register.edge_firm(duplicate, ["c0001", "c0002"])
+
+
+@pytest.mark.parametrize("relation", ["peer", "mentor", "professional"])
+def test_step_nine_other_relations_remain_non_firm(relation):
+    edge = _edge(
+        "a", "b", "haeyo", step=9, relation=relation,
+        apparent_generation="same", history="met_as_adults",
+    )
+    assert not register.edge_firm(edge, ["c0001", "c0002"])
+
+
+@pytest.mark.parametrize("relation", ["stranger_civil", "professional"])
+def test_heated_polite_encounters_do_not_become_enemy_edges(relation):
+    edge = _edge(
+        "a", "b", "haeyo", step=9, relation=relation,
+        apparent_generation="same", history="met_as_adults", stance="open_enmity",
+    )
+    assert register._earliest_step(edge) is None
+    assert register._earliest_step(edge.model_copy(update={"relation": "enemy"})) == 2
+    assert register._earliest_step(edge.model_copy(update={"step": 8})) == 2
+    assert register._earliest_step(edge.model_copy(update={"level": "hae"})) == 2
+    assert not register.edge_firm(edge.model_copy(update={"level": "hae"}), ["c0001", "c0002"])
+    assert not register.edge_firm(
+        edge.model_copy(update={"apparent_generation": "addressee_older"}), ["c0001", "c0002"]
+    )
 
 
 def test_table_shifts_and_firmness_by_cue():

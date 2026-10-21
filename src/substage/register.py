@@ -125,7 +125,10 @@ def _earliest_step(edge: RegisterEdge) -> int | None:
     feature names a step."""
     if edge.ai_user or edge.relation == "ai_to_user":
         return 5 if _is_companion_ai(edge) else 1
-    if edge.stance != "civil" or edge.relation == "enemy":
+    polite_encounter = (
+        edge.relation in ("stranger_civil", "professional") and edge.step == 9 and binary(edge.level) == "J"
+    )
+    if edge.relation == "enemy" or (edge.stance != "civil" and not polite_encounter):
         return 2
     if edge.relation == "own_parent":
         return 3 if edge.history == "raised_by_addressee" else 4
@@ -243,12 +246,15 @@ def edge_firm(edge: RegisterEdge, cue_ids: Iterable[str]) -> bool:
     the edge carries that level, no feature points to an earlier step, and it
     cites at least two existing cues."""
     step = edge.step
-    if step not in _STEP_LEVEL:
+    if step in _STEP_LEVEL:
+        want = _STEP_LEVEL[step]
+    elif step == 9 and edge.relation == "stranger_civil" and binary(edge.level) == "J":
+        want = "J"
+    else:
         return False
     earliest = _earliest_step(edge)
     if earliest is not None and earliest < step:
         return False
-    want = _STEP_LEVEL[step]
     if want is not None and binary(edge.level) != want:
         return False
     known = set(cue_ids)
@@ -479,9 +485,14 @@ def _mint_ep_id(raw_name: str | None, known_ids: Mapping[str, str]) -> str | Non
     joined = "".join(toks)
     if joined in _SELF_TOKENS:
         return None
-    for tok in (joined, toks[0], toks[-1]):
-        if tok in known_ids:
-            return known_ids[tok]
+    if joined in known_ids:
+        return known_ids[joined]
+    if len(toks) == 1 and toks[0] in known_ids:
+        return known_ids[toks[0]]
+    if toks[0] in known_ids:
+        cid = known_ids[toks[0]]
+        if not any(k != toks[0] and len(k) > len(toks[0]) and v == cid for k, v in known_ids.items()):
+            return cid
     return f"ep:{joined}"
 
 

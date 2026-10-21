@@ -538,9 +538,20 @@ def _match_bible_entity(ch: Character, bible: SeriesBible) -> EntityRecord | Non
     """Match a newly drafted `Character` to an existing `EntityRecord` in `bible`."""
     if ch.id in bible.entities:
         return bible.entities[ch.id]
+    ch_en_toks = {t for t in _name_tokens(ch.en_name) if len(t) >= 3 and t not in _GENERIC_NAME_WORDS}
     ch_forms = [ch.id, ch.en_name, *ch.aliases]
     ch_norm_forms = {re.sub(r"[^a-z0-9가-힣]+", "", f.lower()) for f in ch_forms if f}
+    eligible_entities: list[EntityRecord] = []
     for ent in bible.entities.values():
+        ent_en_toks = {t for t in _name_tokens(ent.en_name) if len(t) >= 3 and t not in _GENERIC_NAME_WORDS}
+        if (
+            len(ch_en_toks) >= 2
+            and len(ent_en_toks) >= 2
+            and ch_en_toks != ent_en_toks
+            and ch.id != ent.char_id
+        ):
+            continue
+        eligible_entities.append(ent)
         ent_forms = [ent.char_id, ent.en_name, ent.ko_name, *ent.aliases]
         ent_norm = {re.sub(r"[^a-z0-9가-힣]+", "", f.lower()) for f in ent_forms if f}
         if ch_norm_forms & ent_norm:
@@ -555,7 +566,7 @@ def _match_bible_entity(ch: Character, bible: SeriesBible) -> EntityRecord | Non
     if not ch_toks:
         return None
     candidates: list[EntityRecord] = []
-    for ent in bible.entities.values():
+    for ent in eligible_entities:
         ent_toks = set()
         for f in (ent.en_name, ent.char_id, *ent.aliases):
             for t in _name_tokens(f):
@@ -612,12 +623,27 @@ def reconcile_characters(
             voice = ch.voice
             if ent.voice is not None:
                 vocab = list(dict.fromkeys([*(ent.voice.vocabulary or []), *(ch.voice.vocabulary or [])]))[:8]
+                signature = ent.voice.signature_ko or ch.voice.signature_ko
+                stored_banmal = any(binary(lv) == "B" for lv in addressed_levels(ent.voice.signature_ko or ""))
+                if stored_banmal:
+                    current_levels = {binary(lv) for lv in addressed_levels(ch.voice.signature_ko or "")}
+                    public_dyads = [
+                        d for d in bible.dyads.values()
+                        if d.speaker == ent.char_id and d.relation in ("stranger_civil", "professional")
+                    ]
+                    if "J" in current_levels or (
+                        "B" not in current_levels
+                        and public_dyads
+                        and all(binary(d.level) == "J" for d in public_dyads)
+                    ):
+                        # An intimate dyad's sample must not override this character's public voice.
+                        signature = ch.voice.signature_ko
                 voice = ch.voice.model_copy(
                     update={
                         "idiolect": ent.voice.idiolect or ch.voice.idiolect,
                         "vocabulary": vocab,
                         "profanity_ceiling": ent.voice.profanity_ceiling,
-                        "signature_ko": ent.voice.signature_ko or ch.voice.signature_ko,
+                        "signature_ko": signature,
                     }
                 )
             persona_clean = mask_spoiler_persona(ent.persona_immutable or ch.persona, unrevealed_facts)

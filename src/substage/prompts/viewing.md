@@ -43,6 +43,8 @@ Also report:
   Report [headline] and [callout] even during continuous dialogue; do not omit them because a spoken cue overlaps their on-screen lifetime.
   start_ms/end_ms: absolute video ms ({start_ms} + time into the clip), the span the text is
   readable or the words are heard. Report each bubble, card, or insert appearance separately, even when a close-up prop or street sign is on screen for only 1–2 seconds.
+  For rapid montages of headlines, articles, slides, or social-media posts, report every distinct shot/cut in chronological order with its own start_ms/end_ms. Never collapse the montage into only its first and last item.
+  When one shot shows multiple headlines, clippings, or tweets at once, combine its key readable headline/callout into one concise item for that shot's [start_ms, end_ms]; do not emit multiple overlapping items with identical timestamps. Omit UI chrome and boilerplate such as "Click to add title", browser toolbars, and author bylines.
   plot_critical: true for every kind except [logo], [scroll] and out-of-focus background clutter. Any close-up shot whose subject is a readable prop, label, cover, or sign is plot_critical: true.
   covered_by_cue: only when that cue already speaks the exact same words aloud verbatim. Skip decorative text.
 

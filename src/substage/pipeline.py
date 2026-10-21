@@ -1113,6 +1113,7 @@ def run(
     if active_bible is not None and not active_bible.is_empty():
         context_map = series_state.reconcile_characters(context_map, active_bible, cues)
         save_model(ws.path("context_map.yaml"), context_map)
+        ck.put("context_map", _context_map_hash(txt.settings, cues, observations, view_tag), context_map)
     if _stopped(stop_after, "context_map", ws):
         return ws.data_dir
     # ---- S2b timeline ------------------------------------------------------
@@ -1163,6 +1164,7 @@ def run(
             register_map, active_bible, context_map=context_map, cues=cues, clef_client=series_clef
         )
         save_model(ws.path("register.yaml"), register_map)
+        ck.put("register", _register_hash(txt.settings, context_map, cues, observations, view_tag), register_map)
     register_observations = list(observations)
     if perception_ledger is not None:
         register_observations.extend(perception_ledger.cues.values())

@@ -211,10 +211,14 @@ def _retime(events: list[_Ev], settings) -> None:
             events.remove(b)
             top_ost.pop(i + 1)
         else:
-            b.start = max(b.start, a.end + settings.min_gap_ms)
-            b.end = max(b.end, b.start + settings.short_min_ms)
-            # A shifted event can move past another pending top event.
-            top_ost.sort(key=lambda ev: ev.start)
+            if b.start - a.start >= settings.short_min_ms + settings.min_gap_ms:
+                # End the previous montage card at the cut; keep the next start anchored.
+                a.end = min(a.end, b.start - settings.min_gap_ms)
+            if a.end > b.start:
+                b.start = max(b.start, a.end + settings.min_gap_ms)
+                b.end = max(b.end, b.start + settings.short_min_ms)
+                # A shifted event can move past another pending top event.
+                top_ost.sort(key=lambda ev: ev.start)
     events.sort(key=lambda ev: ev.start)
 
 
