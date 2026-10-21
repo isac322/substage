@@ -3290,7 +3290,7 @@ def evaluate_media_quality(
         )
 
     active: list[Mapping[str, Any]] = []
-    for event in events:
+    for event in sorted(events, key=lambda item: (item["start_ms"], item["end_ms"])):
         active = [previous for previous in active if previous["end_ms"] - event["start_ms"] > 50]
         for previous in active:
             if previous["position"] == event["position"] and event["position"] in ("an8", "an2"):
