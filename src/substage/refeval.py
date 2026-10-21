@@ -3185,11 +3185,12 @@ def evaluate_media_quality(
     ost_cues_list = [cue for cue in cues if cue.source == "ost" or cue.id.startswith("ost-")]
     events = _quality_display_events(srt, srt_lines)
     if spoken:
+        _, spk_by_ev = _quality_align(spoken, events)
+        _, ost_by_ev = _quality_align(ost_cues_list, events) if ost_cues_list else ({}, {})
         for ev in events:
             if ev["position"] != "an8" and ev["ost"]:
-                ov_ost_cue = any(min(ev["end_ms"], oc.end_ms) - max(ev["start_ms"], oc.start_ms) >= 150 for oc in ost_cues_list)
-                ov_spk_cue = any(min(ev["end_ms"], sc.end_ms) - max(ev["start_ms"], sc.start_ms) >= 150 for sc in spoken)
-                if ov_spk_cue and not ov_ost_cue:
+                idx = int(ev["idx"])
+                if spk_by_ev.get(idx) and not ost_by_ev.get(idx):
                     ev["ost"] = False
     ost_ev = [event for event in events if event["ost"]]
     dlg_ev = [event for event in events if not event["ost"]]
@@ -3500,10 +3501,15 @@ def evaluate_corpus_quality(
     if not items:
         raise ValueError("quality evaluation requires at least one media item")
     settings = settings or load_settings()
-    reports = []
-    for item in items:
+    def _eval_one(item: str | Mapping[str, Any]) -> dict[str, Any]:
         config = {"video_id": item} if isinstance(item, str) else dict(item)
-        reports.append(evaluate_media_quality(**config, settings=settings))
+        return evaluate_media_quality(**config, settings=settings)
+
+    if len(items) > 1:
+        with ThreadPoolExecutor(max_workers=min(8, len(items))) as pool:
+            reports = list(pool.map(_eval_one, items))
+    else:
+        reports = [_eval_one(items[0])]
     score_keys = (
         "format_score", "collision_free_score", "register_score", "pragmatic_score",
         "ost_score", "completeness_score", "quality_score",
