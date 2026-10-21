@@ -1072,6 +1072,24 @@ def _replace_fuzzy_ko_name(ko_text: str, target_ko_name: str) -> str:
     return out
 
 
+def _enforce_series_phrase_locks(en_text: str, ko_text: str) -> str:
+    """Lock series-wide slogans ('Grow or Die' -> '성장 아니면 사장') and codenames ('Heaven, Hell' -> '헤븐, 헬')."""
+    if not ko_text:
+        return ko_text
+    en_low = (en_text or "").replace("\xa0", " ").lower()
+    out = ko_text.replace("레반도스키", "레반도프스키").replace("레반도우스키", "레반도프스키").replace("레반다우스키", "레반도프스키")
+    if "grow or die" in en_low:
+        for v in (
+            "크든가 죽든가", "크든지 죽든지", "크거나 죽거나", "성장 아니면 죽음",
+            "성장 아님 죽음", "성장이냐 죽음이냐", "살길 아님 죽음", "살길 아니면 죽음",
+        ):
+            if v in out:
+                out = out.replace(v, "성장 아니면 사장")
+    if any(k in en_low for k in ("heaven, hell", "heaven,\nhell", "expose heaven", "through heaven", "look at heaven")):
+        out = out.replace("천국이든 지옥이든", "헤븐이든 헬이든").replace("천국과 지옥", "헤븐과 헬").replace("천국", "헤븐").replace("지옥", "헬")
+    return out
+
+
 def enforce_series_pins(
     ko: Mapping[str, str],
     cues: Sequence[Cue],
@@ -1136,6 +1154,7 @@ def enforce_series_pins(
                         locked_ko,
                         curr,
                     )
+        curr = _enforce_series_phrase_locks(cue.text, curr)
         out[cid] = curr
     if register_map is not None:
         out = register_mod.enforce_pragmatic_address(

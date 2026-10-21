@@ -553,6 +553,86 @@ def arm_metrics(
     }
 
 
+
+_OFF_SIM_JOSA_EOMI = (
+    "습니다", "ㅂ니다", "했어요", "했다", "한다", "해요", "하다", "예요", "이에요", "거예요", "건가요", "잖아", "잖아요", "거든", "거든요",
+    "은", "는", "이", "가", "을", "를", "도", "만", "에", "에서", "에게", "한테", "께", "의", "와", "과", "랑", "로", "으로", "고", "서", "요", "죠", "다", "니다", "까", "나", "네", "군", "지",
+)
+
+
+def _norm_off_surface(s: str) -> str:
+    s = re.sub(r"\{\\an\d+\}", "", s or "")
+    s = re.sub(r"[^\w\s가-힣]", " ", s)
+    return " ".join(s.split())
+
+
+def _extract_off_content_stems(s: str) -> Counter[str]:
+    stems: Counter[str] = Counter()
+    for tok in _norm_off_surface(s).split():
+        stem = tok
+        for suf in sorted(_OFF_SIM_JOSA_EOMI, key=len, reverse=True):
+            if len(stem) > len(suf) and stem.endswith(suf):
+                stem = stem[: -len(suf)]
+                break
+        if stem and (re.search(r"[가-힣0-9]", stem) or len(stem) >= 2):
+            stems[stem] += 1
+            if len(stem) >= 3 and re.match(r"^[가-힣]+$", stem):
+                stems[stem[:2]] += 1
+    return stems
+
+
+def evaluate_official_similarity(
+    groups: Sequence[Any],
+    arm_key: str = "ko",
+    jev_scores: Mapping[str, float] | None = None,
+) -> dict[str, float]:
+    """Compute Official-Subtitle Similarity (`OFF-SIM`), guaranteed 100.0 at identity (`cand == official`)."""
+    if not groups:
+        return {"chrf": 0.0, "recall": 0.0, "len_sim": 0.0, "jev_sim": 0.0, "off_sim": 0.0}
+    chrf_vals, rec_vals, len_vals, jev_vals, off_vals = [], [], [], [], []
+    for idx, g in enumerate(groups):
+        if isinstance(g, Mapping):
+            uid = str(g.get("uid") or g.get("id") or idx)
+            gold = str(g.get("official") or g.get("official_ko") or "")
+            cand = str(g.get(arm_key) or "")
+        else:
+            uid = str(getattr(g, "id", idx))
+            gold = g.text(OFFICIAL)
+            cand = g.text(arm_key)
+        s_cand = _norm_off_surface(cand)
+        s_gold = _norm_off_surface(gold)
+        if s_cand == s_gold:
+            c_sc = rec = l_sim = j_sim = o_sim = 100.0
+        else:
+            c_sc = chrf_score(chrf_stats(s_cand, s_gold))
+            o_stems = _extract_off_content_stems(gold)
+            c_stems = _extract_off_content_stems(cand)
+            if not o_stems and not c_stems:
+                rec = 100.0
+            elif not o_stems:
+                rec = 0.0
+            else:
+                rec = sum((o_stems & c_stems).values()) / sum(o_stems.values()) * 100.0
+            e_c = len(s_cand.split())
+            e_o = len(s_gold.split())
+            l_sim = (1.0 - abs(e_c - e_o) / max(e_c, e_o, 1)) * 100.0
+            j_raw = jev_scores.get(uid, 0.5) if jev_scores is not None else 0.5
+            j_sim = j_raw * 100.0
+            o_sim = 0.40 * c_sc + 0.30 * rec + 0.10 * l_sim + 0.20 * j_sim
+        chrf_vals.append(c_sc)
+        rec_vals.append(rec)
+        len_vals.append(l_sim)
+        jev_vals.append(j_sim)
+        off_vals.append(o_sim)
+    n = len(off_vals)
+    return {
+        "chrf": round(sum(chrf_vals) / n, 2),
+        "recall": round(sum(rec_vals) / n, 2),
+        "len_sim": round(sum(len_vals) / n, 2),
+        "jev_sim": round(sum(jev_vals) / n, 2),
+        "off_sim": round(sum(off_vals) / n, 2),
+    }
+
 def group_record(g: Group, arms: list[str]) -> dict:
     """Export shape of one aligned group (also the ``groups`` list of refeval.json)."""
     rec = {

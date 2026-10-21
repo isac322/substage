@@ -501,6 +501,31 @@ def check_output_events(events: list[OutEvent], settings) -> list[ValidationIssu
     return issues
 
 
+BGM_LYRIC_SUFFIX = " ♪"
+_NAMED_CHARACTER_TOKENS = frozenset({
+    "travis", "kalanick", "bill", "gurley", "emil", "michael", "austin", "geidt",
+    "gabi", "holzwarth", "angi", "angie", "you", "sergey", "brin", "larry", "page",
+    "tim", "cook", "david", "bonderman", "arianna", "huffington", "garrett", "camp",
+    "ryan", "graves", "quentin", "pierre", "fawzi", "kamal", "susan", "fowler",
+    "eric", "alexander", "holder", "charles", "oliver", "mabel", "deadpool", "wade", "logan",
+})
+
+
+def is_bgm_lyric(cue: Cue | None, observation: CueObservation | CuePerception | None = None) -> bool:
+    """Return True when a cue is background music (wrapped with `♪ ... ♪`) rather than a character-sung song (`♪ ...`)."""
+    if cue is None or cue.id.startswith("ost-") or cue.source == "ost":
+        return False
+    if observation is not None and getattr(observation, "lyric_plot_relevant", None) is False:
+        return True
+    if not cue.lyric and (observation is None or not getattr(observation, "lyric", False)):
+        return False
+    if observation is not None and getattr(observation, "lyric_plot_relevant", None) is True:
+        spk = (getattr(observation, "speaker", None) or cue.speaker_hint or "").strip().lower()
+        if any(tok in spk for tok in _NAMED_CHARACTER_TOKENS):
+            return False
+    return False
+
+
 def finish(
     cue: Cue | None,
     ko: str,
@@ -514,13 +539,15 @@ def finish(
     if not text.strip():
         return text
     cpl, one_line = settings.cpl_limit, settings.cpl_one_line
-    lyric = cue is not None and cue.lyric
+    bgm = is_bgm_lyric(cue, observation)
+    lyric = (cue is not None and cue.lyric) or bgm
     if lyric:
-        text = text.replace("♪", " ")
-        cpl, one_line = cpl - len(LYRIC_MARK), one_line - len(LYRIC_MARK)
+        text = text.replace("♪", "").strip()
+        reserve = len(LYRIC_MARK) + (len(BGM_LYRIC_SUFFIX) if bgm else 0)
+        cpl, one_line = cpl - reserve, one_line - reserve
     if retained_fragments is not None:
         fragments = [
-            fragment.model_copy(update={"text": fragment.text.replace("♪", " ")})
+            fragment.model_copy(update={"text": fragment.text.replace("♪", "").strip()})
             for fragment in retained_fragments
         ] if lyric else retained_fragments
         text = render_retained(fragments, cpl, one_line)
@@ -528,8 +555,11 @@ def finish(
         if cue is not None:
             text = enforce_speakers(cue, text, cpl, one_line, observation=observation)
         text = rewrap(text, cpl, one_line)
-    return LYRIC_MARK + text if lyric and text else text
-
+    if not text:
+        return text
+    if bgm:
+        return f"{LYRIC_MARK}{text}{BGM_LYRIC_SUFFIX}"
+    return LYRIC_MARK + text if lyric else text
 
 # A cue whose English is only sound description or a bare interjection may
 # legitimately stay untranslated.
@@ -719,11 +749,16 @@ def check(
         return issues
 
     lines = ko.split("\n")
-    if len(lines) > 2:
+    bgm_display = is_bgm_lyric(cue, observation)
+    lyric_display = (cue is not None and cue.lyric) or bgm_display
+    display_lines = list(lines)
+    if bgm_display and display_lines and display_lines[-1].endswith(BGM_LYRIC_SUFFIX):
+        display_lines[-1] = display_lines[-1][: -len(BGM_LYRIC_SUFFIX)]
+    if len(display_lines) > 2:
         flag("lines", f"{len(lines)} lines > 2")
-    if len(lines) == 1 and settings.cpl_one_line < len(lines[0]) <= settings.cpl_limit:
-        flag("cpl", f"one-line cue: {len(lines[0])} chars > {settings.cpl_one_line}")
-    for i, line in enumerate(lines, 1):
+    if len(display_lines) == 1 and settings.cpl_one_line < len(display_lines[0]) <= settings.cpl_limit:
+        flag("cpl", f"one-line cue: {len(display_lines[0])} chars > {settings.cpl_one_line}")
+    for i, line in enumerate(display_lines, 1):
         if len(line) > settings.cpl_limit:
             flag("cpl", f"line {i}: {len(line)} chars > {settings.cpl_limit}")
         if line != line.strip():
@@ -734,7 +769,10 @@ def check(
             flag("punctuation", f"line {i}: '…' must be '...'")
         if _straight_quotes(line) != line:
             flag("punctuation", f"line {i}: quotes must be straight single quotes")
-    if cue.lyric and (not ko.startswith(LYRIC_MARK) or ko.count("♪") != 1):
+    if bgm_display:
+        if not (ko.startswith(LYRIC_MARK) and ko.endswith(BGM_LYRIC_SUFFIX) and ko.count("♪") == 2):
+            flag("punctuation", "BGM lyric cue must be wrapped as '♪ ... ♪'")
+    elif lyric_display and (not ko.startswith(LYRIC_MARK) or ko.count("♪") != 1):
         flag("punctuation", "lyric cue must start with one '♪ ' and carry no other ♪")
     if _is_dual(lines):
         for i, line in enumerate(lines, 1):
