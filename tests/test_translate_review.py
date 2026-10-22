@@ -2735,3 +2735,69 @@ def test_compound_caption_splits_into_subsequent_silent_gap_and_quality_flags_mi
     assert report["counts"]["missing_ost"] == 1
     assert report["passes_targets"] is False
     assert any(d["kind"] == "missing_ost" and d["text"] == "THE SACRED TIMELINE" for d in report["actionable_defects"])
+
+
+def test_quality_detects_carnival_sales_episodic_group_oscillation(tmp_path):
+    import json
+    from substage import refeval
+    from substage.models import Character, CueObservation, Scene, VoiceCard
+    from substage.store import save_model
+
+    cues = [
+        cue("c0179", 705_162, 708_124, "Technically, the,\nthe Carnival's not a minivan."),
+        cue("c0180", 709_376, 710_377, "It's an MPV."),
+        cue("c0181", 710_543, 712_128, "So how does the Kia compare to..."),
+        cue("c0182", 712_295, 713_588, "-the Honda Odyssey?\n-The Odyssey?"),
+        cue("c0183", 713_755, 716_299, "That's a great question.\nIt doesn't fucking suck."),
+        cue("c0184", 716_966, 719_176, "You know, you can answer\nthe question without swearing."),
+        cue("c0185", 719_344, 721_263, "I'm sorry, Tammy, I don't, I don't have kids."),
+    ]
+    obs = [
+        CueObservation(cue_id="c0179", speaker="Wade Wilson", addressee="group"),
+        CueObservation(cue_id="c0180", speaker="Wade Wilson", addressee="group"),
+        CueObservation(cue_id="c0181", speaker="Tammy", addressee="Wade Wilson"),
+        CueObservation(cue_id="c0182", speaker="Wade Wilson", addressee="Tammy"),
+        CueObservation(cue_id="c0183", speaker="Wade Wilson", addressee="Tammy"),
+        CueObservation(cue_id="c0184", speaker="Tammy", addressee="Wade Wilson"),
+        CueObservation(cue_id="c0185", speaker="Wade Wilson", addressee="Tammy"),
+    ]
+    cm = ContextMap(
+        synopsis="s", tone_baseline="t",
+        characters=[Character(id="deadpool", en_name="Wade Wilson / Deadpool", ko_name="데드풀", aliases=["Wade", "Wade Wilson"], persona="p", voice=VoiceCard(idiolect="banter"))],
+    )
+    save_model(tmp_path / "context_map.yaml", cm)
+    (tmp_path / "observations.json").write_text(json.dumps([x.model_dump() for x in obs]), encoding="utf-8")
+    (tmp_path / "scenes.json").write_text(json.dumps([Scene(id="s012", start_ms=705_000, end_ms=722_000, cue_ids=[c.id for c in cues]).model_dump()]), encoding="utf-8")
+    _write_quality_track(
+        tmp_path,
+        [
+            (705_162, 708_124, "엄밀히 말하면\n카니발은 미니밴이 아니야"),
+            (709_376, 710_377, "MPV지"),
+            (710_543, 712_128, "기아차는\n비교하면 어떤가요?"),
+            (712_295, 713_588, "- 혼다 오딧세이요?\n- 오딧세이?"),
+            (713_755, 716_299, "좋은 질문이에요\n존나 안 구리거든요"),
+            (716_966, 719_176, "욕 안 쓰고도\n대답할 수 있잖아요"),
+            (719_344, 721_263, "죄송해요, 태미 씨\n제가 애가 없어서요"),
+        ],
+        cues,
+    )
+    bad_rep = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert bad_rep["counts"]["scene_oscillations"] == 3
+    assert bad_rep["passes_targets"] is False
+
+    _write_quality_track(
+        tmp_path,
+        [
+            (705_162, 708_124, "엄밀히 말하면 카니발은\n미니밴이 아니에요"),
+            (709_376, 710_377, "MPV예요"),
+            (710_543, 712_128, "기아차는\n비교하면 어떤가요?"),
+            (712_295, 713_588, "- 혼다 오딧세이요?\n- 오딧세이요?"),
+            (713_755, 716_299, "좋은 질문이에요\n존나 안 구리거든요"),
+            (716_966, 719_176, "욕 안 쓰고도\n대답할 수 있잖아요"),
+            (719_344, 721_263, "죄송해요, 태미 씨\n제가 애가 없어서요"),
+        ],
+        cues,
+    )
+    good_rep = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert good_rep["counts"]["scene_oscillations"] == 0
+    assert good_rep["register_score"] == 100.0

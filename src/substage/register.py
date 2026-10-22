@@ -467,7 +467,8 @@ def cue_pairs(
 
 THEATRICAL_VOCATIVE_RE = re.compile(
     r"\b(?:your\s+honor|ladies\s+and\s+gentlemen|members\s+of\s+the\s+jury|"
-    r"mr\.?\s+speaker|madam\s+chair|your\s+majesty|attention\s+passengers)\b",
+    r"mr\.?\s+speaker|madam\s+chair|your\s+majesty|attention\s+passengers|"
+    r"spirit,\s+come\s+into|come\s+into\s+us,\s+jesus|hear\s+our\s+prayer|hi\s+there,\s+jesus)\b",
     re.IGNORECASE,
 )
 
@@ -501,6 +502,8 @@ def lock_scene_pairs(
     cues_by_id: Mapping[str, Cue],
     pairs_by_cue: Mapping[str, Pair],
     observations: Iterable[ChunkObservations | CueObservation] = (),
+    *,
+    context_map: ContextMap | None = None,
 ) -> dict[str, Pair]:
     """Lock interpersonal (speaker, addressee) pairs per conversational episode.
 
@@ -517,13 +520,31 @@ def lock_scene_pairs(
 
     obs_map = _flat_observations(observations) if observations else {}
     out: dict[str, Pair] = {cid: pairs_by_cue[cid] for cid in scene_cue_ids if cid in pairs_by_cue}
+    resolver = name_resolver(context_map) if context_map is not None else lambda _: None
 
-    # Collect known character ID tokens from pairs_by_cue
+    # Collect known character ID tokens from pairs_by_cue, context_map, and observations
     known_ids: dict[str, str] = {}
     for spk, adr in pairs_by_cue.values():
         for pid in (spk, adr):
             if pid not in (GROUP, SYSTEM_AI, NARRATION) and not pid.startswith("ep:"):
                 known_ids[pid.lower()] = pid
+    if context_map is not None:
+        for ch in context_map.characters:
+            for form in (ch.id, ch.en_name, ch.ko_name, *ch.aliases):
+                toks = _name_tokens(form)
+                if toks:
+                    known_ids["".join(toks)] = ch.id
+    for cid, (spk, adr) in pairs_by_cue.items():
+        o = obs_map.get(cid)
+        if o is not None:
+            if o.speaker and spk not in (GROUP, SYSTEM_AI, NARRATION) and not spk.startswith("ep:"):
+                toks = _name_tokens(o.speaker)
+                if toks:
+                    known_ids["".join(toks)] = spk
+            if o.addressee and adr not in (GROUP, SYSTEM_AI, NARRATION) and not adr.startswith("ep:"):
+                toks = _name_tokens(o.addressee)
+                if toks:
+                    known_ids["".join(toks)] = adr
 
     # Admit episodic speaker/addressee pairs dropped by cue_pairs
     for cid in scene_cue_ids:
@@ -533,11 +554,11 @@ def lock_scene_pairs(
         if c is None or c.lyric or c.id.startswith("ost-") or c.source == "ost":
             continue
         o = obs_map[cid]
-        spk_id = _mint_ep_id(o.speaker or c.speaker_hint, known_ids)
-        adr_id = GROUP if is_group(o.addressee) else _mint_ep_id(o.addressee, known_ids)
+        raw_s = o.speaker or c.speaker_hint
+        spk_id = resolver(raw_s) or _mint_ep_id(raw_s, known_ids)
+        adr_id = GROUP if is_group(o.addressee) else (resolver(o.addressee) or _mint_ep_id(o.addressee, known_ids))
         if spk_id and adr_id and spk_id != adr_id:
             out[cid] = (spk_id, adr_id)
-
     # Detect cross-cut voiceover sentence bridges across OST cards
     spoken_cids = [
         cid for cid in scene_cue_ids
@@ -605,6 +626,11 @@ def lock_scene_pairs(
             continue
         members = tuple(sorted(top_dyad))
         other_of = {members[0]: members[1], members[1]: members[0]}
+        dyad_times = [
+            cues_by_id[ic].start_ms
+            for ic, ip in interpersonal
+            if frozenset(ip) == top_dyad and ic in cues_by_id
+        ]
         for cid in ep_cids:
             c = cues_by_id.get(cid)
             if c is None or c.lyric or c.id.startswith("ost-") or c.source == "ost":
@@ -614,7 +640,7 @@ def lock_scene_pairs(
             pair = out.get(cid)
             if pair is not None:
                 spk, adr = pair
-                if spk in other_of and adr == GROUP:
+                if spk in other_of and adr == GROUP and any(abs(c.start_ms - dt) <= 8000 for dt in dyad_times):
                     words = set(_words(c.text))
                     if not (words & GROUP_WORDS):
                         out[cid] = (spk, other_of[spk])
@@ -701,9 +727,15 @@ def lock_scene_dyad_levels(
             locked[pair] = "hae"
             continue
         if spk.startswith("ep:") or adr.startswith("ep:"):
-            rev_cids = pair_cids.get((adr, spk), [])
-            both_votes = _votes_for([*cids, *rev_cids])
-            if both_votes["haeyo"] > 0 or both_votes["hae"] < 2:
+            votes = _votes_for(cids)
+            rev_votes = _votes_for(pair_cids.get((adr, spk), []))
+            both_votes = votes + rev_votes
+            if (
+                votes["haeyo"] > votes["hae"]
+                or rev_votes["haeyo"] > rev_votes["hae"]
+                or both_votes["haeyo"] >= both_votes["hae"]
+                or both_votes["hae"] < 2
+            ):
                 locked[pair] = "haeyo"
             else:
                 locked[pair] = "hae"

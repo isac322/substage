@@ -3223,7 +3223,13 @@ def evaluate_media_quality(
                     },
                 }
             snapshots.append(Snapshot.model_validate(raw_snap))
-    translations = load_models(paths["translations.json"], SceneTranslation) if paths["translations.json"] else []
+    trans_path = (
+        paths["translations.json"]
+        if paths["translations.json"]
+        and (paths["cues.json"] is None or paths["translations.json"].parent == paths["cues.json"].parent)
+        else None
+    )
+    translations = load_models(trans_path, SceneTranslation) if trans_path else []
     translated = {line.cue_id: line for scene in translations for line in scene.cues}
     by_cue, by_event = _quality_align(spoken, dlg_ev)
     cue_by_id = {cue.id: cue for cue in spoken}
@@ -3365,12 +3371,21 @@ def evaluate_media_quality(
                         "other_characters": sorted(token_owners[tokens[0]] - {character.id}),
                     })
     pairs = register_mod.cue_pairs(context_map, spoken, observations) if context_map is not None else {}
-    resolver = register_mod.name_resolver(context_map) if context_map is not None else lambda value: value
+    resolver = register_mod.name_resolver(context_map) if context_map is not None else lambda value: None
     for cid, line in translated.items():
         if cid not in pairs and line.speaker and line.addressee:
             spk, adr = resolver(line.speaker), resolver(line.addressee)
             if spk and adr and spk != adr:
                 pairs[cid] = (spk, adr)
+    cues_by_id_all = {cue.id: cue for cue in cues}
+    obs_flat = register_mod._flat_observations(observations) if observations else {}
+    for scene in scenes:
+        sc_obs = [obs_flat[cid] for cid in scene.cue_ids if cid in obs_flat]
+        pairs.update(
+            register_mod.lock_scene_pairs(
+                scene.cue_ids, cues_by_id_all, pairs, sc_obs, context_map=context_map,
+            )
+        )
     cue_order = {cue.id: index for index, cue in enumerate(cues)}
     table = register_mod.RegisterTable(register_map, list(cue_order)) if register_map is not None else None
     scene_of = {cid: scene.id for scene in scenes for cid in scene.cue_ids}
@@ -3384,30 +3399,72 @@ def evaluate_media_quality(
         edge = table.edge(*pair) if table is not None else None
         expected = table.level_at(*pair, cue.id) if table is not None else None
         event = {"start_ms": cue.start_ms, "end_ms": cue.end_ms, "text": text}
-        if pair[1] != "group" and edge and edge.relation == "stranger_civil" and edge.step == 9 and register_mod.binary(expected) == "J" and levels[0] == "B":
+        if (
+            pair[1] not in ("group", "narration")
+            and edge
+            and edge.relation in ("stranger_civil", "professional")
+            and edge.step == 9
+            and register_mod.binary(expected) == "J"
+            and levels[0] == "B"
+        ):
             stranger_banmal_count += 1
             defect("register/translate", "stranger_banmal", event, cue_id=cue.id, pair=list(pair))
-        if pair[1] != "group" and cue.id in scene_of:
+        if pair[1] not in ("group", "narration") and cue.id in scene_of and not register_mod.THEATRICAL_VOCATIVE_RE.search(cue.text):
             levels_by_scene.setdefault((scene_of[cue.id], *pair), []).append((cue, levels[0]))
     for (scene_id, spk, adr), entries in levels_by_scene.items():
-        if len(entries) < 3:
+        if len(entries) < 2:
             continue
         edge = table.edge(spk, adr) if table is not None else None
         if edge and any(
-            table.in_shift(spk, adr, cue.id)
-            or shift.at_cue == cue.id or shift.until_cue == cue.id
+            shift.at_cue != shift.until_cue
+            and (table.in_shift(spk, adr, cue.id) or shift.at_cue == cue.id or shift.until_cue == cue.id)
             for cue, _ in entries for shift in edge.shifts
         ):
             continue
         counts = Counter(level for _, level in entries)
-        minority = min(counts, key=counts.get)
-        if len(counts) == 2 and counts[minority] / len(entries) <= 0.35:
+        if len(counts) == 2:
+            tb_exp = register_mod.binary(table.level_at(spk, adr, entries[0][0].id)) if edge else None
+            rev_entries = levels_by_scene.get((scene_id, adr, spk), [])
+            rev_counts = Counter(level for _, level in rev_entries)
+            if counts["J"] != counts["B"]:
+                minority = min(counts, key=counts.get)
+            elif tb_exp in ("J", "B"):
+                minority = "B" if tb_exp == "J" else "J"
+            elif (counts["J"] + rev_counts["J"]) >= (counts["B"] + rev_counts["B"]):
+                minority = "B"
+            else:
+                minority = "J"
             for cue, level in entries:
                 if level == minority:
                     scene_oscillations += 1
                     defect("register/translate", "scene_oscillation", {
                         "start_ms": cue.start_ms, "end_ms": cue.end_ms, "text": ko_by_cue[cue.id],
                     }, cue_id=cue.id, scene_id=scene_id, pair=[spk, adr])
+    for scene in scenes:
+        dash_pairs = register_mod.scene_dash_turn_pairs(scene.cue_ids, cues_by_id_all, pairs)
+        for cid, (p0, p1) in dash_pairs.items():
+            cue = cues_by_id_all.get(cid)
+            text = ko_by_cue.get(cid, "")
+            if cue is None or not text:
+                continue
+            e0 = levels_by_scene.get((scene.id, *p0), [])
+            e1 = levels_by_scene.get((scene.id, *p1), [])
+            c0, c1 = Counter(lv for _, lv in e0), Counter(lv for _, lv in e1)
+            if (c0["J"] + c1["J"]) >= (c0["B"] + c1["B"]) and (c0["J"] + c1["J"]) > 0:
+                turns_ko = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                t_lvls = [register_mod.binary(lv) if lv else None for lv in addressed_levels(text)]
+                if (
+                    len(turns_ko) == 2
+                    and len(t_lvls) == 2
+                    and turns_ko[0].endswith("요?")
+                    and turns_ko[1].endswith("?")
+                    and not turns_ko[1].endswith("요?")
+                    and t_lvls[1] is None
+                ):
+                    scene_oscillations += 1
+                    defect("register/translate", "scene_oscillation", {
+                        "start_ms": cue.start_ms, "end_ms": cue.end_ms, "text": text,
+                    }, cue_id=cid, scene_id=scene.id, pair=list(p0))
     scenes_by_id = {scene.id: scene for scene in scenes}
     if table is not None:
         for snapshot in snapshots:

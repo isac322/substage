@@ -128,6 +128,18 @@ def _classify_ef_token(
         return "hae"
     if form in ("는데", "은데", "\u11ab데", "던데", "니", "으니", "\u11ab데"):
         return "hae" if has_trailing_question else None
+    if form in ("지만", "고"):
+        return None
+    if form == "야" and idx > 0 and tokens[idx - 1].tag == "EC":
+        return None
+    if (
+        idx >= 3
+        and tokens[idx - 1].tag in ("VV", "VA", "VX")
+        and tokens[idx - 2].tag == "SP"
+        and tokens[idx - 2].form == ","
+        and tokens[idx - 3].form in ("죠", "요")
+    ):
+        return "haeyo"
     if form == "게":
         # Only promissive -(으)ㄹ게 is unambiguously addressed 해체 without context
         if idx > 0 and tokens[idx - 1].form and jongseong(tokens[idx - 1].form[-1]) == _JONG_L:
