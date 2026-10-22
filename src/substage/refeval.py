@@ -3479,7 +3479,7 @@ def evaluate_media_quality(
         ev for ev in events
         if ev["position"] == "an8"
         or ev["ost"]
-        or any(abs(ev["start_ms"] - s) <= 500 and abs(ev["end_ms"] - e) <= 1500 for s, e in kj_ost_spans)
+        or any(abs(ev["start_ms"] - s) <= 2000 for s, _ in kj_ost_spans)
         or not any(min(ev["end_ms"], sc.end_ms) - max(ev["start_ms"], sc.start_ms) > 100 for sc in spoken)
     ]
     expected_ost_cues = [
