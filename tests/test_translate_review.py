@@ -2682,3 +2682,56 @@ def test_quality_overlapping_dialogue_echo_is_distinct_from_time_collision(tmp_p
     report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
     assert report["counts"]["same_channel_overlaps"] == 1
     assert report["counts"]["adjacent_dialogue_echoes"] == 1
+
+
+def test_rewrap_and_quality_reject_newline_adjacent_slashes_while_keeping_fixed_tokens(tmp_path):
+    from substage import refeval, validate
+
+    assert validate.rewrap("전 남친 /\n어쩌고 하던데", 16, 14) == "전 남친\n어쩌고 하던데"
+    assert validate.rewrap("내 고무 재질\n/\n딸딸이 신발?", 16, 14) == "내 고무 재질\n딸딸이 신발?"
+    assert validate.rewrap("고마워할 줄도\n/ 알아야지", 16, 14) == "고마워할 줄도\n알아야지"
+    assert validate.rewrap("케토롤락 주사액\n30mg/mL", 16, 14) == "케토롤락 주사액\n30mg/mL"
+    _write_quality_track(tmp_path, [(1000, 3000, "전 남친 /\n어쩌고 하던데"), (4000, 6000, "케토롤락 30mg/mL")])
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["slash_count"] == 1
+    assert report["passes_targets"] is False
+
+
+def test_compound_caption_splits_into_subsequent_silent_gap_and_quality_flags_missing_ost(tmp_path):
+    from substage import refeval
+
+    cues = [
+        cue("c0076", 437_604, 440_148, "I've waited for this moment for so long."),
+        cue("c0077", 441_483, 443_610, "Thank you, sir, for seeing me."),
+        cue("c0078", 444_694, 446_571, "I firmly believe..."),
+    ]
+    obs = [
+        ChunkObservations(
+            chunk_id="v01", start_ms=0, end_ms=600_000,
+            on_screen_text=[
+                OnScreenText(
+                    start_ms=440_232, end_ms=441_399,
+                    text="[caption] EARTH - 616 THE SACRED TIMELINE", plot_critical=True,
+                ),
+            ],
+        )
+    ]
+    ost = translate.ost_cues(obs, cues, [])
+    assert [(c.start_ms, c.end_ms, c.text) for c in ost] == [
+        (440_232, 441_399, "EARTH - 616"),
+        (443_690, 444_654, "THE SACRED TIMELINE"),
+    ]
+    _write_quality_track(
+        tmp_path,
+        [
+            (437_604, 440_148, "오랫동안 기다려 온\n순간이에요"),
+            (440_232, 441_399, "'지구-616'"),
+            (441_483, 443_610, "만나 주셔서\n감사합니다"),
+            (444_694, 446_571, "제 능력이 도움이\n될 거라 믿어요"),
+        ],
+        [*cues, *ost],
+    )
+    report = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
+    assert report["counts"]["missing_ost"] == 1
+    assert report["passes_targets"] is False
+    assert any(d["kind"] == "missing_ost" and d["text"] == "THE SACRED TIMELINE" for d in report["actionable_defects"])

@@ -391,7 +391,7 @@ def _initial(
     ordered = sorted(cues, key=lambda cue: (cue.start_ms, cue.id))
     absorbed = _absorbed_timing_cues(ordered, ko, scene_of, lineage, source_cue)
     for cue in ordered:
-        text = ko.get(cue.id, "").strip()
+        text = strip_clause_slashes(ko.get(cue.id, "").strip())
         fragments = lineage.fragments_by_cue.get(cue.id) if lineage is not None else None
         if not text or (fragments is None and not _is_fixed(cue) and is_filler(cue, text)):
             continue
@@ -832,10 +832,10 @@ def _condense(gc, events: list[_Ev], settings, gate=None, *, lineage=None, cues=
             dur = (ev.end - ev.start) / 1000
             budget = max(1, math.floor(dur * settings.cps_max))
             who = " / ".join(t.speaker for t in ev.turns if not t.speaker.startswith("?")) or "?"
-            rows.append(f"{eid} | {dur:.1f}s | {budget} | {who} | {ev.ko.replace(chr(10), ' / ')}")
+            rows.append(f"{eid} | {dur:.1f}s | {budget} | {who} | {ev.ko.replace(chr(10), ' <br> ')}")
             sources.append(
                 f"{eid}{' [' + ','.join(ev.cue_ids) + ']' if ev.semantic else ''}: "
-                f"{ev.en_text.replace(chr(10), ' / ')}"
+                f"{ev.en_text.replace(chr(10), ' <br> ')}"
             )
         template = SEMANTIC_CONDENSE_PROMPT if any(ev.semantic for _, ev in batch) else CONDENSE_PROMPT
         prompt = template.format(events="\n".join(rows), sources="\n".join(sources))

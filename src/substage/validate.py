@@ -248,7 +248,7 @@ def rewrap(ko: str, cpl: int, one_line: int | None = None) -> str:
     '- text' lines, one speaker each, even when a line exceeds `cpl` (check()
     then flags cpl).
     """
-    lines = [" ".join(line.split()) for line in ko.strip().splitlines() if line.strip()]
+    lines = [" ".join(line.split()) for line in strip_clause_slashes(ko).strip().splitlines() if line.strip()]
     if not lines:
         return ""
     if _is_dual(lines):
@@ -335,14 +335,14 @@ def _strip_terminal(line: str) -> str:
     return line
 
 
-_CLAUSE_SLASH = re.compile(r"(?<=\S)\s+/\s+(?=\S)")
+_CLAUSE_SLASH = re.compile(r"(?<=\S)\s+/\s*(?=\S)|(?<=\S)\s*/\s+(?=\S)")
 
 
 def strip_clause_slashes(text: str) -> str:
-    """Replace spaced clause separators, preserving unspaced fixed tokens."""
-    text = re.sub(r"\s+/\s*\n\s*", "\n", text)
-    text = re.sub(r"\n\s*/\s+", "\n", text)
-    text = re.sub(r"^\s*/\s+|\s+/\s*$", "", text)
+    """Replace spaced or line-break clause separators, preserving unspaced fixed tokens."""
+    text = re.sub(r"[ \t]*/[ \t]*\n[ \t]*", "\n", text)
+    text = re.sub(r"[ \t]*\n[ \t]*/[ \t]*", "\n", text)
+    text = re.sub(r"^\s*/\s*|\s*/\s*$", "", text)
     if "\n" not in text and len(text.strip()) > 14:
         text = _CLAUSE_SLASH.sub("\n", text, count=1)
     return _CLAUSE_SLASH.sub(" ", text)

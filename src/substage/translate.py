@@ -2406,19 +2406,22 @@ def _same_text(a: str, b: str) -> bool:
         return True
     return SequenceMatcher(None, na, nb).ratio() >= 0.85
 
-def _carried_by(text: str, cue_texts: list[str]) -> bool:
+def _carried_by(text: str, cue_texts: list[str], *, kind: str | None = None) -> bool:
     """True when the cue texts together carry *text*: most of its words, or
     near-identical spelling (OCR/ASR noise) in one cue."""
     words = set(_words(text))
     if not words or not cue_texts:
         return False
-    have = {w for t in cue_texts for w in _words(t)}
+    all_cue_words = [w for t in cue_texts for w in _words(t)]
+    if kind not in {"spoken", None} and len(words) <= 3 and len(all_cue_words) > max(len(words) * 2, len(words) + 3):
+        if not any(_same_text(text, t) for t in cue_texts):
+            return False
+    have = set(all_cue_words)
     req_ratio = 0.85 if len(words) >= 4 else OST_COVER_RATIO
     if len(words & have) / len(words) >= req_ratio:
         return True
     nt = _norm_text(text)
     return any(SequenceMatcher(None, nt, _norm_text(t)).ratio() >= 0.8 for t in cue_texts)
-
 def _is_credit_scroll(kind: str | None, text: str) -> bool:
     """A 'credit' that is really a list of names (crawl/roll), not a card."""
     if kind != "credit":
@@ -2585,8 +2588,13 @@ _GREETING_OPEN_RE = re.compile(
 )
 
 
+_COMPOUND_CAPTION_RE = re.compile(
+    r"^((?:EARTH|UNIVERSE|SECTOR|DIMENSION|PART|CHAPTER|ACT|STAGE|PHASE|LEVEL|EPISODE)\s*[-–:#]?\s*\d+[A-Z0-9-]*)\s+((?:THE\s+)?[A-Z][A-Z0-9\s'&-]{4,})$"
+)
+
+
 def split_ost_beats(
-    kind: str | None, ost: OnScreenText
+    kind: str | None, ost: OnScreenText, spoken_cues: Sequence[Cue] = ()
 ) -> list[tuple[int, int, str, str | None]]:
     """Decompose a multi-bubble / multi-beat OnScreenText into timed visual beats.
 
@@ -2609,6 +2617,23 @@ def split_ost_beats(
     start = ost.start_ms
     span = ost.end_ms - start
     text = ost.text.strip()
+    m_comp = _COMPOUND_CAPTION_RE.match(text) if kind in {"caption", "title", "title_caption", None} else None
+    if m_comp:
+        p1, p2 = m_comp.group(1).strip(), m_comp.group(2).strip()
+        end1 = min(max(ost.end_ms, start + OST_MIN_MS), start + OST_MAX_MS)
+        ordered_spk = sorted(spoken_cues, key=lambda c: (c.start_ms, c.end_ms))
+        for idx_c, c_cur in enumerate(ordered_spk):
+            if 0 <= c_cur.start_ms - ost.end_ms <= 600:
+                nxt_s = ordered_spk[idx_c + 1].start_ms if idx_c + 1 < len(ordered_spk) else c_cur.end_ms + 1500
+                if nxt_s - c_cur.end_ms >= 800:
+                    s2 = c_cur.end_ms + 80
+                    e2 = min(max(nxt_s - 40, s2 + 900), s2 + OST_MAX_MS)
+                    return [(start, end1, p1, kind), (s2, e2, p2, kind)]
+                break
+        if span >= 2000:
+            mid = start + span // 2
+            return [(start, mid - 40, p1, kind), (mid + 40, ost.end_ms, p2, kind)]
+        return [(start, end1, p1, kind), (end1 + 80, end1 + 1080, p2, kind)]
     if span > 4000 and kind in {"sign", "message", "note", None}:
         raw_parts = [p.strip() for line in text.splitlines() for p in _BUBBLE_SPLIT_RE.split(line) if p.strip()]
         parts: list[str] = []
@@ -2679,7 +2704,7 @@ def ost_cues(
         if kind in {"callout", "headline"}:
             if linked is not None and _same_text(ost.text, linked.text):
                 continue
-        elif linked is not None and _carried_by(ost.text, [linked.text]):
+        elif linked is not None and _carried_by(ost.text, [linked.text], kind=kind):
             continue
         near_cues = [
             c for c in cues
@@ -2688,9 +2713,9 @@ def ost_cues(
         if kind in {"callout", "headline"}:
             if any(_same_text(ost.text, c.text) for c in near_cues):
                 continue
-        elif _carried_by(ost.text, [c.text for c in near_cues]):
+        elif _carried_by(ost.text, [c.text for c in near_cues], kind=kind):
             continue
-        for b_start, b_end, b_text, b_kind in split_ost_beats(kind, ost):
+        for b_start, b_end, b_text, b_kind in split_ost_beats(kind, ost, cues):
             raw_tag = kind or b_kind
             new.append(
                 Cue(

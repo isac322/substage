@@ -3246,13 +3246,15 @@ def evaluate_media_quality(
             "end_ms": event["end_ms"], "text": event["text"], **extra,
         })
 
+    _sep_slash_re = re.compile(r"(?:^|\s)/|/(?:\s|$)")
     cpl_over = cps_over = slash_count = over_two_lines_count = 0
     for event in events:
         text = event["text"]
+        slash_hits = len(_sep_slash_re.findall(text))
         for kind, bad in (
             ("cpl_over", any(len(part) > settings.cpl_limit for part in text.splitlines())),
             ("cps_over", cps_chars(text) / max((event["end_ms"] - event["start_ms"]) / 1000, 0.001) > settings.cps_max),
-            ("slash_separator", " / " in text),
+            ("slash_separator", slash_hits > 0),
             ("over_two_lines", len(text.splitlines()) > 2),
         ):
             if bad:
@@ -3262,7 +3264,7 @@ def evaluate_media_quality(
             elif kind == "cps_over":
                 cps_over += bad
             elif kind == "slash_separator":
-                slash_count += text.count(" / ")
+                slash_count += slash_hits
             else:
                 over_two_lines_count += bad
     count = max(len(events), 1)
@@ -3435,8 +3437,47 @@ def evaluate_media_quality(
     )
     pragmatic_score = round(100.0 * para_res["para"], 2)
     defects.extend({"stage": "pragmatic/address", **violation} for violation in para_res["violations"])
+    from .translate import merge_ost_cues_into_spine
+
+    chunk_obs = [o for o in observations if isinstance(o, ChunkObservations)]
+    merged_for_ost = merge_ost_cues_into_spine(cues, chunk_obs, scenes) if chunk_obs else list(cues)
+    _credit_ost_re = re.compile(
+        r"\b(presents|directed by|produced by|producer|written by|screenplay|casting|music by|music supervisor|"
+        r"executive|in association with|production|productions|a .* film|end credits|starring|created for television|"
+        r"based on the book|original series)\b",
+        re.I,
+    )
+    expected_ost_cues = [
+        oc for oc in merged_for_ost
+        if (oc.source == "ost" or oc.id.startswith("ost-"))
+        and oc.ost_kind not in {"credit", "logo", "scroll"}
+        and not str(oc.raw or "").lower().startswith("[credit]")
+        and not _credit_ost_re.search(oc.text)
+        and not (oc.id in translated and not translated[oc.id].ko.strip())
+    ]
+    missing_ost_count = 0
+    for oc in expected_ost_cues:
+        ov_any = [
+            ev for ev in events
+            if min(oc.end_ms + 1500, ev["end_ms"]) > max(oc.start_ms - 1500, ev["start_ms"])
+        ]
+        ov_ost_ev = [
+            ev for ev in ost_ev
+            if min(oc.end_ms + 1500, ev["end_ms"]) > max(oc.start_ms - 1500, ev["start_ms"])
+        ]
+        ko_expect = _norm_off_surface(translated[oc.id].ko) if oc.id in translated else ""
+        matched_in_any = bool(ko_expect and any(ko_expect in _norm_off_surface(ev["text"]) for ev in ov_any))
+        static_1to1_dlg = (
+            len(ov_any) == 1 and not ov_ost_ev
+            and any(abs(oc.start_ms - sc.start_ms) <= 1500 and abs(oc.end_ms - sc.end_ms) <= 1500 for sc in spoken)
+        )
+        if not ov_ost_ev and not matched_in_any and not static_1to1_dlg:
+            missing_ost_count += 1
+            defect("translate/ost", "missing_ost", {
+                "start_ms": oc.start_ms, "end_ms": oc.end_ms, "text": oc.text,
+            }, cue_id=oc.id)
     ost_res = evaluate_ost_and_sync(ost_ev, dlg_ev, sync_delta_ms=sync_delta_ms)
-    ost_score = (ost_res["ost_pos"] + ost_res["ost_emp"]) / 2
+    ost_score = max(0.0, (ost_res["ost_pos"] + ost_res["ost_emp"]) / 2 - 5.0 * missing_ost_count)
     for event in ost_ev:
         single = evaluate_ost_and_sync([event], dlg_ev)
         if single["ost_emp"] < 100:
@@ -3449,7 +3490,6 @@ def evaluate_media_quality(
         })
     if ost_res["sync_err_ms"] is not None and ost_res["sync_err_ms"] > QUALITY_TARGETS["sync_err_ms_max"]:
         defects.append({"stage": "sync", "kind": "sync_error", "sync_err_ms": ost_res["sync_err_ms"]})
-
     _sdh_re = re.compile(
         r"\b(music|sings|singing|plays|indistinctly|applause|laughter|groans|sighs|chuckles|screams|cheering)\b",
         re.I,
@@ -3492,11 +3532,13 @@ def evaluate_media_quality(
         **scores, **ost_res, "quality_score": quality_score,
         "passes_targets": (
             quality_score >= QUALITY_TARGETS["quality_score_min"] and collision_free_score == 100.0
-            and stranger_banmal_count == alias_collisions == snap_disagree == 0 and ost_res["ost_pos"] == 100.0
+            and stranger_banmal_count == alias_collisions == snap_disagree == slash_count == missing_ost_count == 0
+            and ost_res["ost_pos"] == 100.0
         ),
         "targets": dict(QUALITY_TARGETS),
         "counts": {
             "subtitle_events": len(events), "spoken_cues": len(spoken), "missing_dialogue": len(missing),
+            "missing_ost": missing_ost_count,
             "raw_music_count": raw_music_count, "english_only_count": english_only_count,
             "cpl_over": cpl_over, "slash_count": slash_count, "over_two_lines_count": over_two_lines_count,
             **collision_counts, "alias_collisions": alias_collisions, "snap_disagree": snap_disagree,
