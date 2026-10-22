@@ -3457,10 +3457,10 @@ def evaluate_media_quality(
             tb_exp = register_mod.binary(table.level_at(spk, adr, entries[0][0].id)) if edge else None
             rev_entries = levels_by_scene.get((scene_id, adr, spk), [])
             rev_counts = Counter(level for _, level in rev_entries)
-            if counts["J"] != counts["B"]:
-                minority = min(counts, key=counts.get)
-            elif tb_exp in ("J", "B"):
+            if tb_exp in ("J", "B"):
                 minority = "B" if tb_exp == "J" else "J"
+            elif counts["J"] != counts["B"]:
+                minority = min(counts, key=counts.get)
             elif (counts["J"] + rev_counts["J"]) >= (counts["B"] + rev_counts["B"]):
                 minority = "B"
             else:
