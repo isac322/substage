@@ -3437,41 +3437,76 @@ def evaluate_media_quality(
     )
     pragmatic_score = round(100.0 * para_res["para"], 2)
     defects.extend({"stage": "pragmatic/address", **violation} for violation in para_res["violations"])
-    from .translate import merge_ost_cues_into_spine
+    from .models import OnScreenText
+    from .translate import _carried_by, _same_text, merge_ost_cues_into_spine, split_ost_beats
 
     chunk_obs = [o for o in observations if isinstance(o, ChunkObservations)]
-    merged_for_ost = merge_ost_cues_into_spine(cues, chunk_obs, scenes) if chunk_obs else list(cues)
+    expanded_cues = list(spoken)
+    for oc in ost_cues_list:
+        beats = split_ost_beats(
+            oc.ost_kind,
+            OnScreenText(start_ms=oc.start_ms, end_ms=oc.end_ms, text=oc.text, plot_critical=True),
+            spoken,
+        )
+        if len(beats) <= 1:
+            expanded_cues.append(oc)
+        else:
+            for bi, (bs, be, bt, bk) in enumerate(beats):
+                expanded_cues.append(
+                    oc.model_copy(update={
+                        "id": oc.id if bi == 0 else f"{oc.id}-b{bi + 1}",
+                        "start_ms": bs, "end_ms": be, "text": bt, "ost_kind": bk or oc.ost_kind,
+                    })
+                )
+    merged_for_ost = merge_ost_cues_into_spine(expanded_cues, chunk_obs, scenes) if chunk_obs else expanded_cues
     _credit_ost_re = re.compile(
         r"\b(presents|directed by|produced by|producer|written by|screenplay|casting|music by|music supervisor|"
         r"executive|in association with|production|productions|a .* film|end credits|starring|created for television|"
-        r"based on the book|original series)\b",
+        r"based on the book|original series|copyright|all rights reserved|motion picture|visual effects|"
+        r"twenty-first century|twentieth century|marvel|columbia|sony|lionsgate|hulu|showtime|"
+        r"authorized distribution of this film)\b",
         re.I,
     )
+    kj_path = next((d / f"{video_id}.ko.json" for d in dirs if (d / f"{video_id}.ko.json").is_file()), None)
+    kj_ost_spans: list[tuple[int, int]] = []
+    if kj_path:
+        kj_data = json.loads(kj_path.read_text(encoding="utf-8"))
+        if isinstance(kj_data, dict):
+            for ev_item in kj_data.get("events", []):
+                if any(str(cid).startswith("ost") for cid in ev_item.get("cue_ids", [])):
+                    kj_ost_spans.append((int(ev_item["start_ms"]), int(ev_item["end_ms"])))
+    ost_srt_evs = [
+        ev for ev in events
+        if ev["position"] == "an8"
+        or ev["ost"]
+        or any(abs(ev["start_ms"] - s) <= 500 and abs(ev["end_ms"] - e) <= 1500 for s, e in kj_ost_spans)
+        or not any(min(ev["end_ms"], sc.end_ms) - max(ev["start_ms"], sc.start_ms) > 100 for sc in spoken)
+    ]
     expected_ost_cues = [
         oc for oc in merged_for_ost
         if (oc.source == "ost" or oc.id.startswith("ost-"))
-        and oc.ost_kind not in {"credit", "logo", "scroll"}
+        and oc.ost_kind not in {"credit", "logo", "scroll", "spoken"}
         and not str(oc.raw or "").lower().startswith("[credit]")
         and not _credit_ost_re.search(oc.text)
+        and not re.fullmatch(r"\d+", oc.text.strip())
         and not (oc.id in translated and not translated[oc.id].ko.strip())
     ]
     missing_ost_count = 0
     for oc in expected_ost_cues:
+        ov_spk = [sc for sc in spoken if min(oc.end_ms, sc.end_ms) - max(oc.start_ms, sc.start_ms) > 100]
+        if ov_spk and any(_same_text(oc.text, sc.text) or _carried_by(oc.text, [sc.text], kind=oc.ost_kind) for sc in ov_spk):
+            continue
+        ov_ost = [
+            ev for ev in ost_srt_evs
+            if min(oc.end_ms + 1500, ev["end_ms"]) - max(oc.start_ms - 1500, ev["start_ms"]) >= 150
+        ]
+        ko_expect = _norm_off_surface(translated[oc.id].ko) if oc.id in translated else ""
         ov_any = [
             ev for ev in events
             if min(oc.end_ms + 1500, ev["end_ms"]) > max(oc.start_ms - 1500, ev["start_ms"])
         ]
-        ov_ost_ev = [
-            ev for ev in ost_ev
-            if min(oc.end_ms + 1500, ev["end_ms"]) > max(oc.start_ms - 1500, ev["start_ms"])
-        ]
-        ko_expect = _norm_off_surface(translated[oc.id].ko) if oc.id in translated else ""
         matched_in_any = bool(ko_expect and any(ko_expect in _norm_off_surface(ev["text"]) for ev in ov_any))
-        static_1to1_dlg = (
-            len(ov_any) == 1 and not ov_ost_ev
-            and any(abs(oc.start_ms - sc.start_ms) <= 1500 and abs(oc.end_ms - sc.end_ms) <= 1500 for sc in spoken)
-        )
-        if not ov_ost_ev and not matched_in_any and not static_1to1_dlg:
+        if not ov_ost and not matched_in_any:
             missing_ost_count += 1
             defect("translate/ost", "missing_ost", {
                 "start_ms": oc.start_ms, "end_ms": oc.end_ms, "text": oc.text,

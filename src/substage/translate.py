@@ -2580,7 +2580,7 @@ def _dedupe_ost(items: list[OnScreenText]) -> list[tuple[str | None, OnScreenTex
 
 
 _BUBBLE_SPLIT_RE = re.compile(
-    r"(?<=[.!?])\s+(?=[A-Z])|(?<=\b(?:AM|PM))\s+(?=[A-Z])|(?<=\b(?:a\.m\.|p\.m\.))\s+(?=[A-Z])"
+    r"(?<!\b[A-Z])(?<=[.!?])\s+(?=[A-Z])|(?<=\b(?:AM|PM))\s+(?=[A-Z])|(?<=\b(?:a\.m\.|p\.m\.))\s+(?=[A-Z])"
 )
 _GREETING_OPEN_RE = re.compile(
     r"^(?:hey|hi|hello)\b.*\b(?:checking in|it's me|just texting)\.?$",
@@ -2752,7 +2752,7 @@ def dedupe_ost_shadows(ost_list: list[Cue], spoken_cues: Sequence[Cue] = ()) -> 
         overlapping = [
             b.text for b in ost_list
             if b.id != a.id and len(_norm_text(b.text)) < len(_norm_text(a.text))
-            and min(a.end_ms, b.end_ms) - max(a.start_ms, b.start_ms) > 0
+            and max(a.start_ms, b.start_ms) - min(a.end_ms, b.end_ms) <= 6000
         ]
         if len(overlapping) >= 2 and _carried_by(a.text, overlapping):
             continue
@@ -2822,13 +2822,29 @@ def merge_ost_cues_into_spine(
     """Ensure all promotable observations (captions, gag credits, signs, messages)
     are present in the cue spine without duplicating existing ``ost-`` cues."""
     spoken = [c for c in existing_cues if not c.id.startswith("ost-") and c.source != "ost"]
-    existing_ost = [c for c in existing_cues if c.id.startswith("ost-") or c.source == "ost"]
-    promoted = ost_cues(observations, spoken, scenes)
-    merged_ost = list(existing_ost)
+    existing_ost_raw = [c for c in existing_cues if c.id.startswith("ost-") or c.source == "ost"]
+    existing_ost: list[Cue] = []
     max_num = max(
-        [int(c.id.split("-")[1]) for c in merged_ost if c.id.startswith("ost-") and c.id.split("-")[1].isdigit()]
+        [int(c.id.split("-")[1]) for c in existing_ost_raw if c.id.startswith("ost-") and c.id.split("-")[1].isdigit()]
         or [0]
     )
+    for oc in existing_ost_raw:
+        beats = split_ost_beats(
+            oc.ost_kind,
+            OnScreenText(start_ms=oc.start_ms, end_ms=oc.end_ms, text=oc.text, plot_critical=True),
+            spoken,
+        )
+        if len(beats) <= 1:
+            existing_ost.append(oc)
+        else:
+            for bi, (bs, be, bt, bk) in enumerate(beats):
+                if bi == 0:
+                    existing_ost.append(oc.model_copy(update={"start_ms": bs, "end_ms": be, "text": bt, "ost_kind": bk or oc.ost_kind}))
+                else:
+                    max_num += 1
+                    existing_ost.append(oc.model_copy(update={"id": f"ost-{max_num:04d}", "start_ms": bs, "end_ms": be, "text": bt, "ost_kind": bk or oc.ost_kind}))
+    promoted = ost_cues(observations, spoken, scenes)
+    merged_ost = list(existing_ost)
     for cand in promoted:
         already = any(
             min(e.end_ms, cand.end_ms) - max(e.start_ms, cand.start_ms) >= 150
