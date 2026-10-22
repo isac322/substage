@@ -2606,11 +2606,16 @@ def split_ost_beats(
     if ost.beats:
         out_b: list[tuple[int, int, str, str | None]] = []
         for b in ost.beats:
-            if not b.text.strip():
+            t_b = b.text.strip()
+            if not t_b:
                 continue
             bs = b.start_ms
             be = min(max(b.end_ms, bs + OST_MIN_MS), bs + OST_MAX_MS)
-            out_b.append((bs, be, b.text.strip(), b.ost_kind or kind))
+            if out_b and re.search(r"\b[A-Z]\.$", out_b[-1][2]) and re.match(r"^[A-Z]", t_b):
+                ps, pe, pt, pk = out_b[-1]
+                out_b[-1] = (ps, min(max(be, ps + OST_MIN_MS), ps + OST_MAX_MS), f"{pt} {t_b}", pk)
+            else:
+                out_b.append((bs, be, t_b, b.ost_kind or kind))
         if out_b:
             return out_b
 
