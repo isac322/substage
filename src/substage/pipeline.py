@@ -1171,7 +1171,7 @@ def run(
     pairs_by_cue = register_mod.cue_pairs(context_map, cues, observations)
     cues_by_id_init = {c.id: c for c in cues}
     for sc in scenes:
-        pairs_by_cue.update(register_mod.lock_scene_pairs(sc.cue_ids, cues_by_id_init, pairs_by_cue, observations))
+        pairs_by_cue.update(register_mod.lock_scene_pairs(sc.cue_ids, cues_by_id_init, pairs_by_cue, observations, context_map=context_map))
     turn_pairs_by_cue = register_mod.cue_turn_pairs(context_map, register_observations)
     for sc in scenes:
         for cid, dp in register_mod.scene_dash_turn_pairs(sc.cue_ids, cues_by_id_init, pairs_by_cue).items():

@@ -277,6 +277,15 @@ def _violates_target_level(ko_txt: str, target_spec: str) -> bool:
         if any(not same_level(t, target_spec) for t in known):
             return True
     if want_bin == "J":
+        if (
+            len(t_strs) == 2
+            and len(turns) == 2
+            and t_strs[0].strip().endswith("요?")
+            and t_strs[1].strip().endswith("?")
+            and not t_strs[1].strip().endswith("요?")
+            and turns[1] is None
+        ):
+            return True
         for t_str in t_strs:
             m = analyze_turn_morphemes(t_str)
             if m.has_plain_1p or m.has_plain_2p or m.has_banmal_ic or m.has_bare_final_ec:
@@ -1945,7 +1954,7 @@ def repair_scene_register_oscillations(
         cids = [cid for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
         if len(cids) < 2:
             continue
-        locked_pairs = lock_scene_pairs(cids, cues_by_id, raw_pairs, observations)
+        locked_pairs = lock_scene_pairs(cids, cues_by_id, raw_pairs, observations, context_map=context_map)
         dyad_lvls = lock_scene_dyad_levels(
             table, cids, cues_by_id, locked_pairs, ko=ko, context_map=context_map
         )
