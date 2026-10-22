@@ -3379,13 +3379,44 @@ def evaluate_media_quality(
                 pairs[cid] = (spk, adr)
     cues_by_id_all = {cue.id: cue for cue in cues}
     obs_flat = register_mod._flat_observations(observations) if observations else {}
+    known_ids: dict[str, str] = {}
+    for spk, adr in pairs.values():
+        for pid in (spk, adr):
+            if pid not in (register_mod.GROUP, register_mod.SYSTEM_AI, register_mod.NARRATION) and not pid.startswith("ep:"):
+                known_ids[pid.lower()] = pid
+    if context_map is not None:
+        for ch in context_map.characters:
+            for form in (ch.id, ch.en_name, ch.ko_name, *ch.aliases):
+                toks = register_mod._name_tokens(form)
+                if toks:
+                    known_ids["".join(toks)] = ch.id
+    for cid, (spk, adr) in list(pairs.items()):
+        o = obs_flat.get(cid)
+        if o is not None:
+            if o.speaker and spk not in (register_mod.GROUP, register_mod.SYSTEM_AI, register_mod.NARRATION) and not spk.startswith("ep:"):
+                toks = register_mod._name_tokens(o.speaker)
+                if toks:
+                    known_ids["".join(toks)] = spk
+            if o.addressee and adr not in (register_mod.GROUP, register_mod.SYSTEM_AI, register_mod.NARRATION) and not adr.startswith("ep:"):
+                toks = register_mod._name_tokens(o.addressee)
+                if toks:
+                    known_ids["".join(toks)] = adr
+    for cue in spoken:
+        if cue.id in pairs or cue.id not in obs_flat:
+            continue
+        o = obs_flat[cue.id]
+        raw_s = o.speaker or cue.speaker_hint
+        s_id = resolver(raw_s) or register_mod._mint_ep_id(raw_s, known_ids)
+        a_id = register_mod.GROUP if register_mod.is_group(o.addressee) else (resolver(o.addressee) or register_mod._mint_ep_id(o.addressee, known_ids))
+        if s_id and a_id and s_id != a_id:
+            pairs[cue.id] = (s_id, a_id)
+    ost_cues_map = {c.id: c for c in ost_cues_list}
     for scene in scenes:
+        sc_cues = {cid: cues_by_id_all[cid] for cid in scene.cue_ids if cid in cues_by_id_all}
+        sc_cues.update(ost_cues_map)
+        sc_pairs = {cid: pairs[cid] for cid in scene.cue_ids if cid in pairs}
         sc_obs = [obs_flat[cid] for cid in scene.cue_ids if cid in obs_flat]
-        pairs.update(
-            register_mod.lock_scene_pairs(
-                scene.cue_ids, cues_by_id_all, pairs, sc_obs, context_map=context_map,
-            )
-        )
+        pairs.update(register_mod.lock_scene_pairs(scene.cue_ids, sc_cues, sc_pairs, sc_obs))
     cue_order = {cue.id: index for index, cue in enumerate(cues)}
     table = register_mod.RegisterTable(register_map, list(cue_order)) if register_map is not None else None
     scene_of = {cid: scene.id for scene in scenes for cid in scene.cue_ids}
