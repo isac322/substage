@@ -694,6 +694,7 @@ def evaluate_official_similarity(
             else:
                 j_sim = 0.50 * c_sc + 0.50 * rec
                 o_sim = 0.50 * c_sc + 0.35 * rec + 0.15 * l_sim
+        chrf_vals.append(c_sc)
         rec_vals.append(rec)
         len_vals.append(l_sim)
         jev_vals.append(j_sim)
@@ -3198,7 +3199,7 @@ def evaluate_media_quality(
         )
     )
     if srt.is_file() and (
-        "official" in srt.name.lower()
+        srt.name.lower() == "official.ko.srt"
         or (official_ref is not None and srt.resolve() == official_ref.resolve())
     ):
         events_gold = _quality_display_events(srt, srt_lines)
@@ -3902,7 +3903,7 @@ def check_session_invariants(
         video_id, ws_dir=ws_dir, srt_path=srt_path, ref_path=ref_path, settings=settings,
     )
     srt = Path(rep["srt_path"])
-    if "official" in srt.name.lower():
+    if srt.name.lower() == "official.ko.srt" or (ref_path is not None and Path(ref_path).is_file() and srt.resolve() == Path(ref_path).resolve()):
         return {"video_id": video_id, "passes_invariants": True, "invariant_pass_rate": 100.0, "failures": []}
 
     dirs = _quality_dirs(video_id, ws_dir)
@@ -4102,7 +4103,7 @@ def evaluate_ga_fitness(
         video_id, ws_dir=ws_dir, srt_path=rep["srt_path"], ref_path=ref_path, settings=settings, quality_report=rep,
     )
     srt = Path(rep["srt_path"])
-    if "official" in srt.name.lower():
+    if srt.name.lower() == "official.ko.srt" or (ref_path is not None and Path(ref_path).is_file() and srt.resolve() == Path(ref_path).resolve()):
         return {
             "video_id": video_id,
             "fitness": 100.0,

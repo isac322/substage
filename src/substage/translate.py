@@ -718,8 +718,11 @@ def enforce_echo_and_moniker_anchors(
         if link.kind == "conditional_echo" and link.anchor_en.lower() == "if":
             for cid in link.cue_ids:
                 text = out.get(cid, "")
-                if "만약" not in text:
-                    out[cid] = prefix_anchor(text, "만약")
+                if "만약" not in text and "만일" not in text:
+                    if cid in link.payoff_ids and re.search(r"['\"][^'\"]+['\"]\s*(?:이라니|라니)", text):
+                        out[cid] = re.sub(r"['\"][^'\"]+['\"](\s*(?:이라니|라니))", r"'만약'\1", text, count=1)
+                    else:
+                        out[cid] = prefix_anchor(text, "만약")
             continue
         if link.kind != "moniker_gloss":
             continue

@@ -2801,3 +2801,41 @@ def test_quality_detects_carnival_sales_episodic_group_oscillation(tmp_path):
     good_rep = refeval.evaluate_media_quality("sample", ws_dir=tmp_path, settings=Settings())
     assert good_rep["counts"]["scene_oscillations"] == 0
     assert good_rep["register_score"] == 100.0
+
+
+def test_ga_gen3_echo_anchor_harbor_and_condense_veto(tmp_path):
+    from substage import refeval, translate
+
+    c1128 = cue("c1128", 3670584, 3671418, "If they can fix your world…")
+    c1129 = cue("c1129", 3671585, 3673212, "what's the first thing you're gonna do\nwhen you get out of here?")
+    c1134 = cue("c1134", 3682136, 3683805, "If… they can fix your world?")
+    c1135 = cue("c1135", 3687934, 3689500, 'What do you mean, "if?"')
+    cues = [c1128, c1129, c1134, c1135]
+    raw_ko = {
+        "c1128": "세상 고쳐주면\n나가면 뭐부터 할래?",
+        "c1129": "세상 고쳐주면\n나가면 뭐부터 할래?",
+        "c1134": "네 세상...\n고쳐주면?",
+        "c1135": "'고쳐주면'이라니?",
+    }
+    fixed = translate.enforce_echo_and_moniker_anchors(cues, raw_ko)
+    assert all("만약" in fixed[cid] for cid in ("c1128", "c1129", "c1134", "c1135"))
+    assert fixed["c1135"] == "'만약'이라니?"
+
+    # Verify Official Gold Standard scores 100.0 on evaluate_ga_fitness
+    srt = _write_quality_track(
+        tmp_path,
+        [
+            (3670584, 3673295, fixed["c1128"]),
+            (3682136, 3684055, fixed["c1134"]),
+            (3687934, 3689644, fixed["c1135"]),
+        ],
+        cues,
+    )
+    off_srt = tmp_path / "official.ko.srt"
+    off_srt.write_text(srt.read_text(encoding="utf-8"), encoding="utf-8")
+    gold_fit = refeval.evaluate_ga_fitness("sample", ws_dir=tmp_path, srt_path=off_srt, ref_path=off_srt)
+    assert gold_fit["fitness"] == 100.0
+    assert gold_fit["passes_invariants"] is True
+    cand_fit = refeval.evaluate_ga_fitness("sample", ws_dir=tmp_path, srt_path=srt, ref_path=off_srt)
+    assert cand_fit["passes_invariants"] is True
+    assert cand_fit["failures"] == []
