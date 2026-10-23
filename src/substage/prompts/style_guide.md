@@ -184,7 +184,20 @@ Sovereign→subjects: archaic 해라체 (-느냐, -거라, -노라, -구나) wit
 - Which direction are you headed? (stranger on the road) | 어디로 가? | 어딜 향해 / 가는 것이오?
 - I have none to tell, King. (knight to king) | 할 얘기 없어요, 왕이시여 | 폐하께 올릴 / 이야기가 없습니다
 
-### 3.9 Mr./Ms. and endearments.
+### 3.9 Dialect, thick accent & culturally bound accent jokes.
+**Unmarked regional accent:** do not mechanically map every British, Southern or Hispanic speaker into a Korean provincial dialect; carry an everyday sociolect through vocabulary and rhythm at the ladder's speech level.
+**Plot-critical / comic dialect (`comic_dialect`):** when a speaker's thick dialect or unintelligible pronunciation is itself the butt of a joke or a communication barrier in the scene (Gambit's Cajun English in *Deadpool & Wolverine*: Deadpool mocks it via *Sling Blade*, asks if his dialect coach is the Minions, translates what he is trying to say), or the English subtitle uses eye-dialect (`we done be knowing`, `wit'it`, `I ain't know`, `biggum hands`, `Ain't not a wonna`), render those lines with unmistakable earthy Korean dialect markers (근디, ~거시여, ~제, ~뿌서, ~믄, 몬, 거시기, 울 엄니, ~슈) while keeping the speaker's consistent speech level (반말 for Gambit). Never let review smooth these endings back to standard Korean.
+**Culturally bound accent metaphors:** when an Anglo-American pop-culture title or name is used purely as shorthand for someone's accent (*Sling Blade* = thick Southern drawl; *(IN BRITISH ACCENT) Basil Fawlty* = stereotypical British accent; *Foghorn Leghorn* = Southern drawl), localize the reference so a Korean viewer gets the accent joke at once.
+**Manner-of-speaking SDH and regional slang:** respect `[In New York accent]` / `(IN BRITISH ACCENT)` delivery tags (the observation note carries them as `accent_sdh=`): Peter faking an adult New York voice to reassure passengers → 안녕하세요 / 이제 안심하세요; Delmar's bodega deference → 대령합죠. Translate British/Yiddish slang by meaning (you mug → 이 호구야 / 등신, oy vavoy → 세상에나), never phonetically (머그시, 오이 바보이).
+Why: when the accent is the joke, standard Korean deletes the joke; when it isn't, a provincial dialect invents one.
+- Have you seen Sling Blade? | 「슬링 블레이드」 봤어? | 남부 억양 지리네 / 다시 말해줄래?
+- We done be knowing that lid ain't comin' off. | 그 뚜껑은 안 열릴 거야 | 근디 그 뚜껑은 / 안 벗겨질 거시여
+- Biggum hands close, ain't not a wonna get in. | 큰 손이 닫히면 아무도 들어가요 | 큰 손이 딱 닫히믄 / 아무도 몬 들어가지
+- I hate to hurt you, but is your dialect coach the Minions? | 상처 주긴 싫은데 미니언즈가 코치야? | 상처 주긴 싫은데 / 사투리 선생이 미니언즈야?
+- (IN BRITISH ACCENT) Is it Basil Fawlty? | 배질 폴티야? | 영국인답게 / 배질 폴티야?
+- Get back here, you mug! | 이리 와, 머그시! | 이리 와, 이 호구야!
+
+### 3.10 Mr./Ms. and endearments.
 Mr./Ms. + surname → surname + 씨, or dropped as a vocative (3.7). With a rank, role title + 님 (점장님, 국장님). An official addressing a young woman: surname + 양. 미스터/미스 only as a mock-formal villain tic; never 선생 for "Mr." Endearments (baby, honey, darling, sweetheart) are dropped in most lines; couples who keep one use 자기야, a spouse calling to a spouse 여보. A character's signature endearment may be transliterated and kept every time.
 - Mr. [Surname] wants to meet us. | 미스터 [성]가 보재 | [성] 씨가 / 우릴 보고 싶대
 - Not this, darling, the house. | 이거 말고, 자기야, 집 | 얼굴 말고 집

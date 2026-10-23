@@ -52,3 +52,4 @@ Rules:
 - Describe, do not interpret style or translate. Korean is never used in your output.
 - If audio/subtitle timing drifts from the picture, trust the picture and say so in summary.
 - Only report cue_ids from the list; do not invent cues.
+- Dialect and accent (translation style guide §3.9): when a speaker's thick accent or dialect is itself the butt of a joke or a communication barrier, put `comic_dialect` plus the accent (e.g. "comic_dialect: thick Cajun") in delivery; when a line is a put-on accent or the subtitle carries a manner-of-speaking tag (`(IN BRITISH ACCENT)`, `[In New York accent]`), note it in delivery, and name the accent an accent-metaphor joke refers to (Sling Blade → Southern drawl).

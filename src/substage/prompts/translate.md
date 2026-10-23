@@ -41,6 +41,8 @@ Output: JSON matching the requested schema. One cues[] entry per input cue id, i
 - [full] Match each speaker's voice card: idiolect, vocabulary hints, signature line. Two characters must never sound alike.
 - [lite] Give each speaker the voice their own lines show (age, role, temperament). Two characters must never sound alike.
 - [full] Profanity never exceeds the speaker's ceiling (0 none … 3 strongest).
+- Dialect and accent (style guide §3.9): when a speaker's thick dialect or eye-dialect (`we done be knowing`, `biggum hands`) is itself the joke or a communication barrier (`comic_dialect`, e.g. Gambit's Cajun), write earthy Korean dialect endings (근디, ~거시여, ~제, ~믄, 몬, 거시기) at the speaker's fixed level; otherwise never map a regional accent onto a Korean provincial dialect.
+- Honor `accent_sdh=` observation notes (`(IN BRITISH ACCENT)`, `[In New York accent]`) as the line's delivery, localize accent-metaphor jokes (*Sling Blade*, *Basil Fawlty*, *Minions* dialect coach) so the Korean viewer gets the accent joke, and translate slang by meaning (you mug → 이 호구야, oy vavoy → 세상에나), never phonetically.
 
 ## Continuity and ambiguity
 - CALLBACKS: a payoff cue must reuse the fixed Korean wording of its setup verbatim.
