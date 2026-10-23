@@ -36,7 +36,7 @@ from .models import (
     SceneTranslation,
     Snapshot,
 )
-from .levels import addressed_levels, analyze_turn_morphemes, has_internal_register_clash, speaker_turns
+from .levels import addressed_levels, analyze_turn_morphemes, has_dialect_marker, has_internal_register_clash, speaker_turns, strips_dialect_marker
 from .register import THEATRICAL_VOCATIVE_RE, RegisterTable, binary, lock_scene_dyad_levels, lock_scene_pairs, render_scene_register, same_level, scene_dash_turn_pairs
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
@@ -760,6 +760,8 @@ def filter_edits_with_decisions(
             f not in ko.get(e.cue_id, "") or f in e.new_ko
             for f in protected_forms.get(e.cue_id, ())
         )
+        # never flatten an intentional regional-dialect rendering back into standard Korean
+        and not strips_dialect_marker(ko.get(e.cue_id, ""), e.new_ko)
     ]
     if not candidates:
         return []

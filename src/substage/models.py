@@ -184,11 +184,15 @@ class ChunkObservations(BaseModel):
 # ---------------------------------------------------------------- S2a video map
 
 
+DialectPolicy = Literal["none", "comic_dialect", "archaic_tone", "sociolect_slang"]
+
+
 class VoiceCard(BaseModel):
     idiolect: str  # how the character talks (≤25 words)
     vocabulary: list[str] = Field(default_factory=list)  # Korean word palette hints
     profanity_ceiling: int = 1  # 0 none … 3 strongest Korean profanity allowed
     signature_ko: str | None = None  # one example line in the target Korean voice
+    dialect_policy: DialectPolicy = "none"  # intentional regional/archaic/slang voice S4 must keep
 
 
 class Character(BaseModel):
