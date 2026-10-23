@@ -1,0 +1,8 @@
+{
+  "generation": "gen4-v2",
+  "branch": "ga/gen4-v2-flash-convergence",
+  "tag": "ga-gen4-v2-flash-convergence",
+  "description": "Gen-4 V2 Flash Convergence: Term-echo ('보조바퀴 프로토콜'), OstBeat addressee/speech_level, 27/27 Flash 147-turn convergence",
+  "flash_passed": "27/27",
+  "opus_passed": "27/27"
+}
