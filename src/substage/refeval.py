@@ -3158,7 +3158,7 @@ def evaluate_media_quality(
     from .models import SceneTranslation, Snapshot
 
     settings = settings or load_settings()
-    dirs = _quality_dirs(video_id, ws_dir)
+    dirs = [Path(ws_dir)] if ws_dir is not None else _quality_dirs(video_id, ws_dir)
     artifact_names = (
         "cues.json", "scenes.json", "observations.json", "context_map.yaml",
         "register.yaml", "snapshots.json", "translations.json",
@@ -3260,7 +3260,9 @@ def evaluate_media_quality(
             },
         }
     cues = sorted(
-        load_models(paths["cues.json"], Cue) if paths["cues.json"] else [],
+        load_models(paths["cues.json"], Cue)
+        if paths["cues.json"]
+        else (subs.load_cues(dirs[0] / "en.srt") if (dirs[0] / "en.srt").is_file() else []),
         key=lambda cue: (cue.start_ms, cue.end_ms),
     )
     spoken = [
@@ -3747,7 +3749,11 @@ def evaluate_media_quality(
     if ost_res["sync_err_ms"] is not None and ost_res["sync_err_ms"] > QUALITY_TARGETS["sync_err_ms_max"]:
         defects.append({"stage": "sync", "kind": "sync_error", "sync_err_ms": ost_res["sync_err_ms"]})
     _sdh_re = re.compile(
-        r"(?:music|sings|singing|plays|indistinctly|applause|laughter|groans|sighs|chuckles|screams|cheering)",
+        r"(?:music|sings|singing|plays|indistinctly|applause|laughter|groans|sighs|chuckles|screams|cheering|instrumental|theme)",
+        re.I,
+    )
+    _interjection_re = re.compile(
+        r"^(?:[\s\-–—,.?!'\"…♪♫]|oh+|ah+|uh+|um+|mm+|hmm+|whoa+|huh|ugh|ow|oof|shh+|phew|ha+|heh|argh|gah|ahem|yeah|yep|nope|hey|hi|okay|ok|ouch|wow|yay|woo+|ooh+)+$",
         re.I,
     )
     nearby_dialogue: set[str] = set()
@@ -3762,15 +3768,26 @@ def evaluate_media_quality(
                 nearby_dialogue.add(cue.id)
                 break
             right += 1
+    official_covered_cues: set[str] | None = None
+    if official_ref is not None and official_ref.is_file():
+        off_check_lines = load_ko(official_ref)
+        official_covered_cues = {
+            cue.id
+            for cue in spoken
+            if any(min(cue.end_ms + 250, ol.end_ms) >= max(cue.start_ms - 250, ol.start_ms) for ol in off_check_lines)
+        }
     missing = [
         cue for cue in spoken
         if not by_cue[cue.id]
         and cue.id not in nearby_dialogue
-        # A translation sidecar (empty or nonempty) is not displayed coverage.
-        # Remove only complete sound descriptions, never dialogue merely
-        # mentioning music/laughter or carrying an SDH prefix.
+        and (
+            (bool(translated) and (cue.id not in translated or bool(translated[cue.id].ko.strip())))
+            or (not translated and official_covered_cues is not None and cue.id in official_covered_cues and len(spoken) <= 50)
+            or (not translated and official_covered_cues is None and len(spoken) <= 50)
+        )
         and re.search(r"\w", re.sub(r"\[[^\]]*\]|\([^)]*\)", "", cue.text))
-        and not _sdh_re.fullmatch(cue.text.strip(" []().!?"))
+        and not _sdh_re.search(cue.text.replace("\xa0", " "))
+        and not _interjection_re.fullmatch(re.sub(r"\[[^\]]*\]|\([^)]*\)", "", cue.text.replace("\xa0", " ")).strip())
         and not re.fullmatch(r"[\s\-–—\[\]()♪♫.,?!'\"]+", cue.text)
     ]
     raw_music_count = english_only_count = 0

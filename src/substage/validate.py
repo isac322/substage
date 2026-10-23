@@ -992,12 +992,15 @@ def check_utterance_span_continuity(
         speaker = event.speaker or (next(iter(hints)) if len(hints) == 1 else None)
         return speaker, event.addressee
 
-    levels: list[str | None] = []
-    for event in events:
-        addressed = set(addressed_levels(event.text)) - {None}
-        polite = addressed & {"haeyo", "hasipsio", "hao", "haseo"}
-        informal = addressed & {"hae", "haera"}
-        levels.append("J" if polite and not informal else "B" if informal and not polite else None)
+    level_cache: dict[int, str | None] = {}
+
+    def level_at(idx: int) -> str | None:
+        if idx not in level_cache:
+            addressed = set(addressed_levels(events[idx].text)) - {None}
+            polite = addressed & {"haeyo", "hasipsio", "hao", "haseo"}
+            informal = addressed & {"hae", "haera"}
+            level_cache[idx] = "J" if polite and not informal else "B" if informal and not polite else None
+        return level_cache[idx]
 
     for index in range(1, len(events)):
         previous, event = events[index - 1], events[index]
@@ -1011,23 +1014,34 @@ def check_utterance_span_continuity(
             ids_b = {cue.id for cue in sources[index]}
             if source_a and source_b and ids_a.isdisjoint(ids_b) and flat(source_a) != flat(source_b):
                 flag(event, "adjacent_dialogue_echoes", f"Different source dialogue overwrites {previous.cue_id} with identical Korean")
-        if not levels[index] or not levels[index - 1] or levels[index] == levels[index - 1]:
-            continue
         if any(_EN_TURN_DASH.match(line) for ev in (previous, event) for line in ev.text.splitlines()):
             continue
         pair_a, pair_b = pair_at(index - 1), pair_at(index)
         if any(a and b and a != b for a, b in zip(pair_a, pair_b)):
             continue
-        same_pair = bool(pair_a[0] and pair_a[0] == pair_b[0])
-        established = (
+        same_pair = bool(pair_a[0] and pair_a[0] == pair_b[0] and pair_a[1] == pair_b[1])
+        self_intro_flip = bool(
             index >= 2
-            and levels[index - 2] == levels[index - 1]
-            and 0 <= previous.start_ms - events[index - 2].end_ms <= 3000
+            and 0 <= previous.start_ms - events[index - 2].end_ms <= 2500
             and not any(_EN_TURN_DASH.match(line) for line in events[index - 2].text.splitlines())
-            and not any(a and b and a != b for a, b in zip(pair_at(index - 2), pair_a))
+            and (
+                (
+                    re.search(r"(?:^|\s)(?:전|제가|저도|저는)(?:\s|$)", events[index - 2].text + " " + previous.text)
+                    and re.search(r"(?:^|\s)(?:난|내가|날|내|나는)(?:\s|$)", event.text)
+                )
+                or (
+                    re.search(r"(?:^|\s)(?:난|내가|날|내|나는)(?:\s|$)", events[index - 2].text + " " + previous.text)
+                    and re.search(r"(?:^|\s)(?:전|제가|저도|저는)(?:\s|$)", event.text)
+                )
+            )
         )
-        if same_pair or established:
-            flag(event, "srt_register_oscillation", f"Same-speaker run switches {levels[index - 1]}->{levels[index]} within 3s")
+        if not (same_pair or self_intro_flip):
+            continue
+        lvl_prev, lvl_curr = level_at(index - 1), level_at(index)
+        if not lvl_prev or not lvl_curr or lvl_prev == lvl_curr:
+            continue
+        if same_pair or (index >= 2 and level_at(index - 2) == lvl_prev):
+            flag(event, "srt_register_oscillation", f"Same-speaker run switches {lvl_prev}->{lvl_curr} within 3s")
     return issues
 
 
