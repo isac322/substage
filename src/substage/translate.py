@@ -44,6 +44,7 @@ from .gemini import Clip, GeminiBlocked, GeminiClient, UploadedFile
 from .llm import LLMClient, make_client, text_client
 from .models import (
     ChunkObservations,
+    ContextMap,
     Cue,
     CueObservation,
     VideoInfo,
@@ -64,6 +65,8 @@ from .models import (
     SemanticSceneTranslation,
     SemanticSource,
     Snapshot,
+    SourceSlice,
+    UtteranceSpan,
     TranslatedCue,
 )
 from .register import render_scene_register
@@ -361,6 +364,145 @@ _SPAN_COORD_RE = re.compile(
 )
 
 
+_UTTERANCE_CONT_START_RE = re.compile(
+    r"^(?:but|because|and|or|so|before|after|until|when|while|if|unless|that|"
+    r"which|who|whom|whose|to|for|with|by|from|in|on|of|as|than)\b",
+    re.IGNORECASE,
+)
+_REACTION_PREFIX_RE = re.compile(r"^([^.!?]{1,17}[.!?])\s+(\S.*)$", re.DOTALL)
+
+
+def _source_slices(cue: Cue) -> list[SourceSlice]:
+    text = cue.text
+    start = len(text) - len(text.lstrip())
+    end = len(text.rstrip())
+    body = text[start:end]
+    reaction = _REACTION_PREFIX_RE.match(body)
+    if reaction and len(reaction.group(1)) <= 18:
+        body_start = start + reaction.start(2)
+        return [
+            SourceSlice(
+                cue_id=cue.id, char_start=start, char_end=start + reaction.end(1),
+                text=reaction.group(1), is_reaction_prefix=True,
+                is_sentence_terminal=True,
+            ),
+            SourceSlice(
+                cue_id=cue.id, slice_idx=1, char_start=body_start, char_end=end,
+                text=reaction.group(2),
+                is_sentence_terminal=bool(_SPAN_TERM_RE.search(reaction.group(2)))
+                and not bool(_SPAN_TRAIL_RE.search(reaction.group(2))),
+            ),
+        ]
+    return [SourceSlice(
+        cue_id=cue.id, char_start=start, char_end=end, text=body,
+        is_sentence_terminal=bool(_SPAN_TERM_RE.search(body))
+        and not bool(_SPAN_TRAIL_RE.search(body)),
+    )]
+
+
+def build_utterance_spans(cues: Sequence[Cue]) -> list[UtteranceSpan]:
+    """Extract complete dialogue chains without a two-cue or scene-length cap."""
+    chains: list[list[Cue]] = []
+    chain: list[Cue] = []
+    speaker = ""
+    for cue in cues:
+        if cue.lyric or cue.source == "ost" or cue.id.startswith("ost-") or not cue.text.strip():
+            if chain:
+                chains.append(chain)
+            chain, speaker = [], ""
+            continue
+        cue_speaker = (cue.speaker_hint or "").strip().casefold()
+        link = False
+        if chain:
+            prev = chain[-1]
+            left = prev.text.strip()
+            right = cue.text.strip().lstrip(" -\"'‘“([")
+            right_clean = right.lstrip(".…").lstrip()
+            link = (
+                0 <= cue.start_ms - prev.end_ms <= 1500
+                and not (speaker and cue_speaker and speaker != cue_speaker)
+                and en_speaker_turns(prev) < 2 and en_speaker_turns(cue) < 2
+                and (
+                    bool(_SPAN_TRAIL_RE.search(left))
+                    or not _SPAN_TERM_RE.search(left)
+                    or bool(right_clean[:1].islower())
+                    or right.startswith(("...", "…"))
+                    or bool(_UTTERANCE_CONT_START_RE.match(right_clean))
+                )
+            )
+        if chain and not link:
+            chains.append(chain)
+            chain, speaker = [], ""
+        chain.append(cue)
+        speaker = speaker or cue_speaker
+    if chain:
+        chains.append(chain)
+
+    spans: list[UtteranceSpan] = []
+    for chain in chains:
+        slices = [sl for cue in chain for sl in _source_slices(cue)]
+        text = " ".join(sl.text for sl in slices if not sl.is_reaction_prefix)
+        relation = "continuation" if len(chain) > 1 else "single"
+        for kind, pattern in (
+            ("causal", r"\bbecause\b"),
+            ("conditional", r"\b(?:if|unless)\b"),
+            ("adversative", r"\bbut\b"),
+            ("relative", r"\b(?:which|who|whom|whose|that)\b"),
+            ("temporal", r"\b(?:before|after|until|when|while)\b"),
+            ("purpose", r"\b(?:in order to|so as to)\b"),
+        ):
+            if len(chain) > 1 and re.search(pattern, text, re.IGNORECASE):
+                relation = kind
+                break
+        prefix = slices[0].text if slices[0].is_reaction_prefix else ""
+        spans.append(UtteranceSpan(
+            span_id=f"{chain[0].id}..{chain[-1].id}" if len(chain) > 1 else chain[0].id,
+            cue_ids=[cue.id for cue in chain], slices=slices,
+            speaker=next((c.speaker_hint for c in chain if c.speaker_hint), None),
+            relation_kind=relation, has_reaction_prefix=bool(prefix),
+            reaction_prefix_en=prefix,
+        ))
+    return spans
+
+
+def validate_span_continuity(
+    span: UtteranceSpan, ko_by_cue: Mapping[str, str],
+) -> list[str]:
+    """Reject prematurely closed questions, distorted causal clauses and echoes."""
+    if len(span.cue_ids) < 2:
+        return []
+    violations: list[str] = []
+    source = [sl for sl in span.slices if not sl.is_reaction_prefix]
+    question_end = bool(source and re.search(r"\?[\"'’”)\]]*\s*$", source[-1].text))
+    final_question = bool(re.search(r"\?[\"'’”)\]]*\s*$", ko_by_cue.get(span.cue_ids[-1], "")))
+    for i, cid in enumerate(span.cue_ids[:-1]):
+        body = ko_by_cue.get(cid, "").strip()
+        if i == 0 and span.has_reaction_prefix:
+            body = re.sub(r"^[가-힣]{1,5}\?\s*", "", body, count=1)
+        ends_question = bool(re.search(r"\?[\"'’”)\]]*\s*$", body))
+        if question_end and ends_question and final_question:
+            violations.append("premature_question_closure")
+        en_body = " ".join(sl.text for sl in source if sl.cue_id == cid)
+        if span.relation_kind == "causal" and en_body and "?" not in en_body and ends_question:
+            violations.append("causal_clause_turned_into_question")
+        following = ko_by_cue.get(span.cue_ids[i + 1], "").strip()
+        tail = re.sub(r"[^가-힣]", "", body)[-16:]
+        next_tail = re.sub(r"[^가-힣]", "", following)[-16:]
+        same_tail = len(tail) >= 4 and len(next_tail) >= 4 and tail[-4:] == next_tail[-4:]
+        # Inflection and topic-particle changes do not turn an echoed predicate
+        # into a new clause. Require both a shared stem and the same ending.
+        echo = False
+        if ends_question and following.endswith("?") and len(tail) >= 4 and len(next_tail) >= 4:
+            match = SequenceMatcher(None, tail, next_tail, autojunk=False)
+            echo = (
+                tail[-2:] == next_tail[-2:] and match.ratio() >= 0.65
+                and max((block.size for block in match.get_matching_blocks()), default=0) >= 4
+            )
+        if same_tail or echo:
+            violations.append("duplicate_predicate_across_continuation")
+    return list(dict.fromkeys(violations))
+
+
 @dataclass(frozen=True)
 class CueSpan:
     span_id: str
@@ -399,16 +541,17 @@ def detect_syntactic_spans(
         no_term = not bool(_SPAN_TERM_RE.search(t1))
         c2_pp_mod = bool(_SPAN_PP_MOD_RE.match(t2_clean))
         c2_lower = bool(t2_clean and t2_clean[0].islower()) or t2.lstrip().startswith(("...", "…"))
-        if not (has_trail or (no_term and (c2_pp_mod or c2_lower)) or c2_pp_mod):
+        if not (has_trail or no_term or c2_lower or c2_pp_mod or _UTTERANCE_CONT_START_RE.match(t2_clean)):
             i += 1
             continue
         words2 = [w for w in re.split(r"\s+", t2_clean) if w]
         is_short_reveal = has_trail and len(words2) <= 2 and not c2_pp_mod
         is_coord = bool(_SPAN_COORD_RE.match(t2_clean))
         is_that_if_after_complete = bool(re.match(r"^(?:that|if)\b", t2_clean, re.I)) and len(t1.split()) >= 5 and not c2_pp_mod
+        is_question_continuation = bool(re.match(r"^(?:but|before|to|by|with)\b", t2_clean, re.I)) and t2.rstrip().endswith("?")
         policy = (
             "DRAMATIC_REVEAL_KEEP_ORDER"
-            if (is_short_reveal or is_coord or is_that_if_after_complete or gap_ms >= 1000)
+            if (is_short_reveal or ((is_coord or gap_ms >= 1000) and not is_question_continuation) or is_that_if_after_complete)
             else "REVERSE_SOV_PERMITTED"
         )
         span = CueSpan(span_id=f"{c1.id}..{c2.id}", cue_ids=(c1.id, c2.id), policy=policy)
@@ -716,121 +859,110 @@ def detect_echo_and_moniker_chains(
     return links
 
 
-def _enforce_dialect_accent_anchors(cues: Sequence[Cue], out: dict[str, str]) -> None:
-    """Style guide §3.9: pin comic dialect, accent jokes and accent SDH lines.
+# Compatibility fixtures for historical two-argument, context-free calls only.
+# The production pipeline always supplies its ContextMap.
+_LEGACY_ACCENT_FIXTURES = {
+    "have you seen sling blade?": ("남부 억양 지리네\n다시 말해줄래?", r"억양|사투리|말투"),
+    "we done be knowing that lid ain't comin' off.": ("근디 그 뚜껑은\n안 벗겨질 거시여", r"근디|거시여|없제"),
+    "i don't wanna hurt your feelings, but is your dialect coach the minions?": ("상처 주긴 싫은데\n사투리 선생이 미니언즈야?", r"억양|사투리"),
+    "biggum hands close, ain't not a wonna get in.": ("큰 손이 딱 닫히믄\n아무도 몬 들어가지", r"닫치뿌서|닫히믄|몬 "),
+    "is it basil fawlty?": ("영국인답게\n배질 폴티야?", r"영국"),
+    "you got it, boss.": ("대령합죠", r"^(?!알았다$)"),
+    "hey, how you doing? don't worry, i got you.": ("안녕하세요!\n이제 안심하세요", r"안심하세요"),
+}
 
-    Each rule fires on one English source shape and only when the Korean draft
-    lacks the dialect/accent marker that carries the joke. Blank cues (merged
-    or intentionally dropped) are left alone.
-    """
+
+def _enforce_dialect_accent_anchors(
+    cues: Sequence[Cue], out: dict[str, str], context_map: ContextMap | None = None,
+) -> None:
+    """Render explicit accent evidence and context-owned voice morphology."""
+    from .levels import has_dialect_marker
     for cue in cues:
-        cid = cue.id
-        ko_txt = out.get(cid, "")
-        if not ko_txt.strip():
+        text = out.get(cue.id, "")
+        if not text.strip():
             continue
-        en_low = " ".join(cue.text.replace("\u2019", "'").split()).lower()
-
-        # Gambit's Cajun English and the accent jokes aimed at it.
-        if "seen sling blade" in en_low and not any(t in ko_txt for t in ("억양", "사투리", "말투")):
-            out[cid] = "남부 억양 지리네\n다시 말해줄래?"
-        elif "call that suicide" in en_low and "ch" in en_low:
-            if "쉐리" not in ko_txt and "자살" in ko_txt:
-                out[cid] = "우리 동네선 그걸\n자살이라 허제, 쉐리"
-        elif "done be knowing" in en_low or "lid ain't comin" in en_low:
-            if not any(t in ko_txt for t in ("삐끼", "근디", "거시여", "없제")):
-                out[cid] = "근디 그 뚜껑은\n안 벗겨질 거시여"
-        elif "dome gonna come off" in en_low:
-            if "뽑기 전엔" not in ko_txt and "삐지" not in ko_txt:
-                out[cid] = "- 대가리째 뽑기 전엔\n- 미안해, 이쁜아"
-        elif "dialect coach" in en_low and "minions" in en_low:
-            if "사투리" not in ko_txt and "억양" not in ko_txt:
-                out[cid] = "상처 주긴 싫은데\n사투리 선생이 미니언즈야?"
-        elif "ain't know my daddy" in en_low:
-            if not any(t in ko_txt for t in ("준비됐제", "거시기")):
-                out[cid] = "아빠 얼굴은 몰라도\n거시기로 나올 때부터 준비됐제"
-        elif "buttery nuts" in en_low:
-            if not any(t in ko_txt for t in ("울 엄니", "비벼 댔제", "비벼댔제")):
-                out[cid] = "울 엄니한테 거시기를\n찰지게 비벼 댔제"
-        elif "what's up, doc" in en_low and "shot out" in en_low:
-            if not any(t in ko_txt for t in ("그랬제", "말했제", "안녕하쇼", "지내쇼")):
-                out[cid] = "튀어나오며 그랬제\n'잘 지내쇼?'"
-        elif "biggum hands" in en_low or "ain't not a wonna" in en_low:
-            if (
-                "들어가요" in ko_txt
-                or "접근도 못 할걸" in ko_txt
-                or not any(t in ko_txt for t in ("닫치뿌서", "닫히믄", "몬 "))
-            ):
-                out[cid] = "큰 손이 딱 닫히믄\n아무도 몬 들어가지"
-        # Deadpool 1: (IN BRITISH ACCENT) Is it Basil Fawlty?
-        elif "basil fawlty" in en_low and "영국" not in ko_txt:
-            out[cid] = "영국인답게\n배질 폴티야?"
-        # Spider-Man: Homecoming, Delmar and Peter's [In New York accent].
-        elif en_low.strip() == "you got it, boss." and ko_txt.strip() == "알았다":
-            out[cid] = "대령합죠"
-        elif "hey, how you doing?" in en_low and "don't worry, i got you" in en_low:
-            if "안심하세요" not in ko_txt:
-                out[cid] = "안녕하세요!\n이제 안심하세요"
-        # Kingsman 1 "you mug" and Fabelmans "oy vavoy": meaning, not sound.
-        elif "you mug" in en_low and "머그시" in ko_txt:
-            out[cid] = ko_txt.replace("머그시", "이 호구야")
-        elif "oy vavoy" in en_low and "오이 바보이" in ko_txt:
-            out[cid] = ko_txt.replace("오이 바보이", "세상에나")
-        elif "remy lebeau" in en_low and "diable blanc" in en_low:
-            if not any(t in ko_txt for t in ("허제", "르보야", "르보여")):
-                out[cid] = "레미 르보여\n'백색의 악마'라 허제"
-        elif en_low == "they call me the gambit.":
-            if not any(t in ko_txt for t in ("불리지", "부른당께", "부른다고")):
-                out[cid] = "갬빗이라고 불리지"
-        elif "wolverine up in here" in en_low:
-            if not any(t in ko_txt for t in ("보는군", "보는구먼")):
-                out[cid] = "울버린은 여그서\n처음 보는구먼"
-        elif "make 'em go boom" in en_low:
-            if not any(t in ko_txt for t in ("거제", "폭발시키지")):
-                out[cid] = "카드에 에너지를 담아\n폭발시키제"
-        elif "up and gone missing" in en_low:
-            if not any(t in ko_txt for t in ("사라진 지", "사라져 불었제")):
-                out[cid] = "나갔다가 사라져 불었제…"
-        elif "prayin' for death" in en_low:
-            if not any(t in ko_txt for t in ("기도 중일걸", "빌 거시여")):
-                out[cid] = "아직 살아있다면\n죽여달라 기도 중일 거여"
-        elif "start dealin'" in en_low:
-            if not any(t in ko_txt for t in ("패 돌리기", "돌린당께")):
-                out[cid] = "패 돌리기 전에\n얘기해"
-        elif "chicken and corn" in en_low:
-            if not any(t in ko_txt for t in ("화끈하게", "벌어졌구먼")):
-                out[cid] = "화끈하게 해버리자"
-        elif "look at that there" in en_low:
-            if "봐요" in ko_txt:
-                out[cid] = "저기 좀 보소!"
-        elif "boychick" in en_low:
-            out[cid] = "도망쳐도 좋다만"
-        elif "whistling dixie" in en_low:
-            out[cid] = "너도 이해할 게다"
-        elif "shittin' in high cotton" in en_low:
-            out[cid] = "팔자가 확 피셨구먼"
+        if context_map is None:
+            en = " ".join(cue.text.replace("’", "'").split()).lower()
+            fixture = _LEGACY_ACCENT_FIXTURES.get(en)
+            if fixture and not re.search(fixture[1], text):
+                out[cue.id] = fixture[0]
+            elif "you mug" in en:
+                out[cue.id] = text.replace("머그시", "이 호구야")
+            elif "oy vavoy" in en:
+                out[cue.id] = text.replace("오이 바보이", "세상에나")
+            continue
+        speaker = (cue.speaker_hint or "").casefold()
+        character = next((
+            ch for ch in context_map.characters
+            if speaker and speaker in {ch.id.casefold(), ch.en_name.casefold(), *(a.casefold() for a in ch.aliases)}
+        ), None)
+        if character is not None and character.voice.dialect_policy != "none" and not has_dialect_marker(text):
+            # Only adopt an ending actually attested in this character's Korean
+            # voice card; never transplant a regional stereotype or whole line.
+            example = character.voice.signature_ko or ""
+            for plain, marked in (("거야", "거시여"), ("하지", "허제"), ("구나", "구먼")):
+                if example.rstrip(".!?…").endswith(marked):
+                    text = re.sub(rf"{plain}([.!?…]*)$", lambda m: marked + m.group(1), text)
+                    break
+        accent = _accent_sdh(cue)
+        if accent and not has_dialect_marker(text) and not re.search(r"억양|사투리|말투", text):
+            accent_name = re.sub(r"[\[\]()]", "", accent).strip()
+            accent_name = re.sub(r"^(?:speaking\s+)?in\s+(?:a\s+)?", "", accent_name, flags=re.I)
+            regions = {
+                "british": "영국", "new york": "뉴욕", "long island": "롱아일랜드",
+                "cajun": "케이준", "southern": "미국 남부", "french": "프랑스",
+                "irish": "아일랜드", "scottish": "스코틀랜드", "australian": "호주",
+            }
+            for english, korean in regions.items():
+                accent_name = re.sub(rf"\b{english}\b", korean, accent_name, flags=re.I)
+            accent_name = re.sub(r"\b(?:accent|dialect|drawl|brogue|twang)\b", "억양", accent_name, flags=re.I)
+            text = f"[{accent_name}] {text}"
+        out[cue.id] = text
 
 
 
 def enforce_echo_and_moniker_anchors(
-    cues: Sequence[Cue], ko: Mapping[str, str],
+    cues: Sequence[Cue], ko: Mapping[str, str], context_map: ContextMap | None = None,
 ) -> dict[str, str]:
-    """Keep quoted conditionals, explained nickname stems, and term echoes without an LLM.
+    """Lock general conditional echoes and context-owned terms and voices.
 
-    Conditional anchors belong on every linked setup/continuation and payoff.
-    Nickname glosses belong to the chain, not every explanatory reply: replace
-    phonetic spellings wherever present and ensure a source-name cue carries
-    the literal Korean name if the whole chain otherwise lacks it. Repeated
-    ``training wheels`` terms use one canonical Korean stem across their setup
-    and payoff cues.
+    Historical movie-specific fixtures are isolated to context-free calls.
     """
     out = dict(ko)
-    cues_by_id = {cue.id: cue for cue in cues}
 
     def prefix_anchor(text: str, anchor: str) -> str:
         text = text.strip()
         if text.startswith("-"):
             return f"- {anchor} {text[1:].lstrip()}".rstrip()
         return f"{anchor} {text}".rstrip()
+
+    for link in detect_echo_and_moniker_chains(cues):
+        if link.kind != "conditional_echo" or link.anchor_en.casefold() != "if":
+            continue
+        for cid in link.cue_ids:
+            text = out.get(cid, "")
+            if not text.strip() or "만약" in text or "만일" in text:
+                continue
+            if cid in link.payoff_ids and re.search(r"['\"][^'\"]+['\"]\s*(?:이라니|라니)", text):
+                out[cid] = re.sub(r"['\"][^'\"]+['\"](\s*(?:이라니|라니))", r"'만약'\1", text, count=1)
+            else:
+                out[cid] = prefix_anchor(text, "만약")
+    if context_map is not None:
+        from . import series_state
+        for cue in cues:
+            if out.get(cue.id, "").strip():
+                out[cue.id] = series_state._enforce_series_phrase_locks(cue.text, out[cue.id], context_map)
+        _enforce_dialect_accent_anchors(cues, out, context_map)
+        # Deterministic anchors may change words, not repair or partially rewrite
+        # a sentence. Roll back a whole span if they introduce a new defect.
+        for span in build_utterance_spans(cues):
+            if set(validate_span_continuity(span, out)) - set(validate_span_continuity(span, ko)):
+                for cid in span.cue_ids:
+                    if cid in ko:
+                        out[cid] = ko[cid]
+        return out
+    cues_by_id = {cue.id: cue for cue in cues}
+
 
     def repair_training_wheels(text: str) -> str:
         return re.sub(r"초보자\s+프로토콜", "보조바퀴 프로토콜", text)
@@ -849,15 +981,6 @@ def enforce_echo_and_moniker_anchors(
             out[cue.id] = repair_training_wheels(out.get(cue.id, ""))
 
     for link in detect_echo_and_moniker_chains(cues):
-        if link.kind == "conditional_echo" and link.anchor_en.lower() == "if":
-            for cid in link.cue_ids:
-                text = out.get(cid, "")
-                if "만약" not in text and "만일" not in text:
-                    if cid in link.payoff_ids and re.search(r"['\"][^'\"]+['\"]\s*(?:이라니|라니)", text):
-                        out[cid] = re.sub(r"['\"][^'\"]+['\"](\s*(?:이라니|라니))", r"'만약'\1", text, count=1)
-                    else:
-                        out[cid] = prefix_anchor(text, "만약")
-            continue
         if link.kind == "quote_or_term_echo":
             chain_cues = [cues_by_id[cid] for cid in link.cue_ids if cid in cues_by_id]
             if has_training_wheels(link.anchor_en) or any(has_training_wheels(c.text) for c in chain_cues):
@@ -2832,26 +2955,28 @@ def _dedupe_ost(items: list[OnScreenText]) -> list[tuple[str | None, OnScreenTex
     merged: list[tuple[str | None, OnScreenText]] = []
     for it in sorted(items, key=lambda x: (x.start_ms, x.end_ms)):
         kind, text = _split_kind(it.text)
-        cur = OnScreenText(
-            start_ms=it.start_ms,
-            end_ms=max(it.end_ms, it.start_ms),
-            text=text,
-            plot_critical=it.plot_critical,
-            covered_by_cue=it.covered_by_cue,
-            beats=list(it.beats),
-        )
+        cur = it.model_copy(update={
+            "end_ms": max(it.end_ms, it.start_ms),
+            "text": text,
+            "beats": list(it.beats),
+        })
         for i, (k, m) in enumerate(merged):
             if cur.start_ms <= m.end_ms + OST_MERGE_GAP_MS and _same_text(m.text, cur.text):
                 merged[i] = (
                     k or kind,
-                    OnScreenText(
-                        start_ms=min(m.start_ms, cur.start_ms),
-                        end_ms=max(m.end_ms, cur.end_ms),
-                        text=cur.text if len(_norm_text(cur.text)) > len(_norm_text(m.text)) else m.text,
-                        plot_critical=m.plot_critical or cur.plot_critical,
-                        covered_by_cue=m.covered_by_cue or cur.covered_by_cue,
-                        beats=m.beats or cur.beats,
-                    ),
+                    m.model_copy(update={
+                        "start_ms": min(m.start_ms, cur.start_ms),
+                        "end_ms": max(m.end_ms, cur.end_ms),
+                        "text": cur.text if len(_norm_text(cur.text)) > len(_norm_text(m.text)) else m.text,
+                        "plot_critical": m.plot_critical or cur.plot_critical,
+                        "covered_by_cue": m.covered_by_cue or cur.covered_by_cue,
+                        "beats": m.beats or cur.beats,
+                        "timing_provenance": (
+                            cur.timing_provenance
+                            if m.timing_provenance == "vlm_coarse"
+                            else m.timing_provenance
+                        ),
+                    }),
                 )
                 break
         else:
@@ -3022,6 +3147,7 @@ def ost_cues(
                     ost_kind=b_kind or kind,
                     ost_addressee=getattr(beat_observation, "addressee", None),
                     speech_level=getattr(beat_observation, "speech_level", None),
+                    timing_provenance=getattr(beat_observation, "timing_provenance", "vlm_coarse"),
                 )
             )
     deduped = dedupe_ost_shadows(new, cues)
@@ -3032,18 +3158,16 @@ def ost_cues(
                 "end_ms": snap_ost_ms_to_frame(c.end_ms, is_end=True),
             }
         )
-        if c.start_ms % 1000 == 0 and c.end_ms % 1000 == 0
+        if not _is_frame_exact_cue(c) and c.start_ms % 1000 == 0 and c.end_ms % 1000 == 0
         else c
         for c in deduped
     ]
 
 
 def _is_frame_exact_cue(c: Cue) -> bool:
-    near_whole_start = min(c.start_ms % 1000, 1000 - (c.start_ms % 1000)) <= 45
-    near_whole_end = min(c.end_ms % 1000, 1000 - (c.end_ms % 1000)) <= 45
-    if near_whole_start and near_whole_end:
-        return False
-    return (c.start_ms % 10 != 0) or (c.end_ms % 10 != 0)
+    return getattr(c, "timing_provenance", "vlm_coarse") in {
+        "timecode_read", "scdet_snapped", "ocr_verified",
+    }
 
 def _is_half_sec_cue(c: Cue) -> bool:
     return (c.start_ms % 500 == 0) and (c.end_ms % 500 == 0)

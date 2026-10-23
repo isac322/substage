@@ -63,6 +63,7 @@ from .models import (
     SemanticLineage,
     SemanticSceneTranslation,
     Snapshot,
+    SpanEdit,
     Timeline,
 )
 from .store import Checkpoints, _atomic_write, input_hash, load_model, save_model
@@ -413,20 +414,62 @@ def _apply_edits(
     *,
     allow_omission: bool = False,
 ) -> tuple[dict[str, str], list[CueEdit]]:
-    """Apply non-empty edits in order; with *gate*, an edit that moves a line
-    off the register table (level or pronoun) is rejected and logged on the
-    gate. Returns (new ko, applied edits)."""
+    """Commit each span transaction only after every member passes the gate."""
     out = dict(ko)
     applied: list[CueEdit] = []
-    for e in edits:
-        if e.cue_id not in out or (
-            not e.new_ko.strip() and not (allow_omission and e.kind == "omission")
+    by_span: dict[str, list[CueEdit]] = {}
+    for edit in edits:
+        if edit.span_id is not None:
+            by_span.setdefault(edit.span_id, []).append(edit)
+    groups: list[list[CueEdit]] = []
+    seen_spans: set[str] = set()
+    i = 0
+    while i < len(edits):
+        edit = edits[i]
+        if edit.span_id is not None:
+            if edit.span_id not in seen_spans:
+                groups.append(by_span[edit.span_id])
+                seen_spans.add(edit.span_id)
+            i += 1
+            continue
+        group = [edit]
+        i += 1
+        # Old checkpoint payloads predate span_id. Keep their adjacent pair
+        # edits / discourse batches atomic as well, without grouping other work.
+        legacy_span = edit.reason == "span_sov_inversion"
+        legacy_discourse = edit.reason.startswith("discourse_unit:")
+        if legacy_span or legacy_discourse or stage in {"span_calques", "discourse_units"}:
+            while i < len(edits) and edits[i].span_id is None and edits[i].reason == edit.reason:
+                if legacy_span and len(group) == 2:
+                    break
+                group.append(edits[i])
+                i += 1
+        groups.append(group)
+    for group in groups:
+        if any(
+            edit.cue_id not in out or (
+                not edit.new_ko.strip() and not (allow_omission and edit.kind == "omission")
+            )
+            for edit in group
         ):
             continue
-        if gate is not None and not gate.check(stage, [e.cue_id], out[e.cue_id], e.new_ko):
-            continue
-        out[e.cue_id] = e.new_ko
-        applied.append(e)
+        if gate is not None:
+            checks = [
+                gate.check(stage, [edit.cue_id], out[edit.cue_id], edit.new_ko)
+                for edit in group
+            ]
+            if not all(checks):
+                continue
+        transaction = SpanEdit(
+            span_id=group[0].span_id or f"{stage}:{group[0].cue_id}",
+            cue_ids=[edit.cue_id for edit in group],
+            unified_ko=" ".join(edit.new_ko for edit in group),
+            old_by_cue={edit.cue_id: out[edit.cue_id] for edit in group},
+            new_by_cue={edit.cue_id: edit.new_ko for edit in group},
+            reason=group[0].reason,
+        )
+        out.update(transaction.new_by_cue)
+        applied.extend(group)
     return out, applied
 
 
@@ -1574,6 +1617,8 @@ def run(
             repair_kwargs = {"levels": levels}
             if repair_stage == "pragmatic_literal_traps":
                 repair_kwargs["proxy_video"] = Path(video.proxy_path) if video.proxy_path else None
+            elif repair_stage == "echo_and_register":
+                repair_kwargs["context_map"] = context_map
             repair_raw = _ck(
                 ck,
                 repair_stage,
@@ -1581,7 +1626,7 @@ def run(
                     _hash_ko(ko), _Cues(items=cues), _Scenes(items=scenes),
                     _Observations(items=observations), register_map, levels,
                     txt.settings.model_main, repair_gate.model,
-                    settings.cpl_limit, settings.cpl_one_line, "gen2-hybrid-jev-v2",
+                    settings.cpl_limit, settings.cpl_one_line, "utterance-backbone-v1",
                     _Snapshots(items=snapshots_list), video,
                     *([lineage.model_dump_json()] if lineage is not None else []),
                 ),
@@ -1608,7 +1653,7 @@ def run(
             ko, cues, active_bible, series_pins, context_map=context_map,
             register_map=register_map, observations=observations, scenes=scenes,
         )
-    anchored_ko = translate.enforce_echo_and_moniker_anchors(cues, ko)
+    anchored_ko = translate.enforce_echo_and_moniker_anchors(cues, ko, context_map=context_map)
     edits += [
         CueEdit(cue_id=cid, new_ko=text, reason="echo_moniker_anchor", kind="polish")
         for cid, text in anchored_ko.items() if text != ko.get(cid, "")

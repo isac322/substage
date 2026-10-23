@@ -65,7 +65,7 @@ from .llm import ClefDecisionsClient
 from .models import ChunkObservations, Cue, CueObservation, ContextMap, RegisterMap, Scene
 from .style import PRO_SUBTITLE_LAWS
 from .store import Checkpoints, input_hash, load_model, load_models
-from .validate import cps_chars
+from .validate import check_utterance_span_continuity, cps_chars
 
 STAGE = "refeval-judge"
 OFFICIAL = "official"
@@ -673,6 +673,7 @@ def evaluate_official_similarity(
             cand = g.text(arm_key)
         s_cand = _norm_off_surface(cand)
         s_gold = _norm_off_surface(gold)
+        speech_act_penalty = 0.65 if ("?" in gold) != ("?" in cand) else 1.0
         if s_cand == s_gold:
             c_sc = rec = l_sim = j_sim = o_sim = 100.0
         else:
@@ -694,6 +695,10 @@ def evaluate_official_similarity(
             else:
                 j_sim = 0.50 * c_sc + 0.50 * rec
                 o_sim = 0.50 * c_sc + 0.35 * rec + 0.15 * l_sim
+        # Surface normalization removes '?'; identity must not erase a changed
+        # speech act, even when every lexical token remains identical.
+        c_sc *= speech_act_penalty
+        o_sim *= speech_act_penalty
         chrf_vals.append(c_sc)
         rec_vals.append(rec)
         len_vals.append(l_sim)
@@ -3330,6 +3335,21 @@ def evaluate_media_quality(
             "stage": stage, "kind": kind, "start_ms": event["start_ms"],
             "end_ms": event["end_ms"], "text": event["text"], **extra,
         })
+    universal_issues = check_utterance_span_continuity(spoken, dlg_ev)
+    universal_counts = Counter(issue.rule for issue in universal_issues)
+    for issue in universal_issues:
+        cue = cue_by_id.get(issue.cue_id)
+        event_index = issue.cue_id.removeprefix("event@")
+        event = (
+            dlg_ev[int(event_index)]
+            if issue.cue_id.startswith("event@") and event_index.isdigit() and int(event_index) < len(dlg_ev)
+            else {
+                "start_ms": cue.start_ms if cue else 0,
+                "end_ms": cue.end_ms if cue else 0,
+                "text": ko_by_cue.get(issue.cue_id, ""),
+            }
+        )
+        defect("universal/continuity", issue.rule, event, cue_id=issue.cue_id, detail=issue.detail)
 
     official_lines = load_ko(official_ref) if official_ref is not None else []
     official_limits = [
@@ -3727,15 +3747,30 @@ def evaluate_media_quality(
     if ost_res["sync_err_ms"] is not None and ost_res["sync_err_ms"] > QUALITY_TARGETS["sync_err_ms_max"]:
         defects.append({"stage": "sync", "kind": "sync_error", "sync_err_ms": ost_res["sync_err_ms"]})
     _sdh_re = re.compile(
-        r"\b(music|sings|singing|plays|indistinctly|applause|laughter|groans|sighs|chuckles|screams|cheering)\b",
+        r"(?:music|sings|singing|plays|indistinctly|applause|laughter|groans|sighs|chuckles|screams|cheering)",
         re.I,
     )
+    nearby_dialogue: set[str] = set()
+    left = 0
+    for cue in spoken:
+        while left < len(dlg_ev) and dlg_ev[left]["end_ms"] + 500 < cue.start_ms:
+            left += 1
+        right = left
+        while right < len(dlg_ev) and dlg_ev[right]["start_ms"] <= cue.end_ms + 500:
+            event = dlg_ev[right]
+            if event["text"].strip() and event["end_ms"] + 500 >= cue.start_ms:
+                nearby_dialogue.add(cue.id)
+                break
+            right += 1
     missing = [
         cue for cue in spoken
         if not by_cue[cue.id]
-        and not (cue.id in translated and not translated[cue.id].ko.strip())
-        and not (cue.id in translated and translated[cue.id].ko.strip())
-        and not _sdh_re.search(cue.text)
+        and cue.id not in nearby_dialogue
+        # A translation sidecar (empty or nonempty) is not displayed coverage.
+        # Remove only complete sound descriptions, never dialogue merely
+        # mentioning music/laughter or carrying an SDH prefix.
+        and re.search(r"\w", re.sub(r"\[[^\]]*\]|\([^)]*\)", "", cue.text))
+        and not _sdh_re.fullmatch(cue.text.strip(" []().!?"))
         and not re.fullmatch(r"[\s\-–—\[\]()♪♫.,?!'\"]+", cue.text)
     ]
     raw_music_count = english_only_count = 0
@@ -3770,6 +3805,7 @@ def evaluate_media_quality(
             quality_score >= QUALITY_TARGETS["quality_score_min"] and collision_free_score == 100.0
             and stranger_banmal_count == alias_collisions == snap_disagree == slash_count == missing_ost_count == 0
             and ost_res["ost_pos"] == 100.0
+            and not missing and not universal_issues
         ),
         "targets": dict(QUALITY_TARGETS),
         "counts": {
@@ -3779,11 +3815,14 @@ def evaluate_media_quality(
             "cpl_over": cpl_over, "slash_count": slash_count, "over_two_lines_count": over_two_lines_count,
             **collision_counts, "alias_collisions": alias_collisions, "snap_disagree": snap_disagree,
             "stranger_banmal_count": stranger_banmal_count, "scene_oscillations": scene_oscillations,
+            "universal_defects": len(universal_issues),
+            **{f"universal_{rule}": value for rule, value in universal_counts.items()},
         },
         "cpl_over_rate": cpl_over / count, "cps_over_rate": cps_over_rate, "coverage": round(coverage, 4),
         "artifact_paths": {name: str(path) if path is not None else None for name, path in paths.items()},
         "unassessed": [name for name, path in paths.items() if path is None],
         "pragmatic_eval": para_res, "actionable_defects": defects,
+        "universal_checks": [issue.model_dump() for issue in universal_issues],
     }
     if ref_path is not None and Path(ref_path).is_file():
         gold = official_lines
@@ -3942,6 +3981,12 @@ def check_session_invariants(
             return any(s_ms <= c.start_ms <= e_ms for c in cues)
         return bool(events) and events[0]["start_ms"] <= s_ms and events[-1]["end_ms"] >= e_ms
     failures: list[dict[str, Any]] = []
+    universal_issues = check_utterance_span_continuity(cues, dlg_evs)
+    for issue in universal_issues:
+        failures.append({
+            "req": f"universal_{issue.rule}", "video_id": video_id,
+            "cue_id": issue.cue_id, "got": issue.detail, "expected": "No universal dialogue defects",
+        })
     cnt = rep["counts"]
     raw_srt_text = _decode(srt)
 
@@ -3959,6 +4004,11 @@ def check_session_invariants(
         failures.append({"req": "R05_zero_scene_oscillation", "video_id": video_id, "got": cnt["scene_oscillations"], "expected": 0})
     if cnt["stranger_banmal_count"] > 0:
         failures.append({"req": "R05_zero_stranger_banmal", "video_id": video_id, "got": cnt["stranger_banmal_count"], "expected": 0})
+    if cnt.get("missing_dialogue", 0) > 0:
+        failures.append({
+            "req": "universal_missing_dialogue", "video_id": video_id,
+            "got": cnt["missing_dialogue"], "expected": 0,
+        })
 
     # R06 & R07: Universal EchoLink conditional ('만약') & moniker ('장님 알', '순결이') anchors
     for el in tr_mod.detect_echo_and_moniker_chains(cues):
@@ -4222,6 +4272,11 @@ def check_session_invariants(
         "R03_zero_slash", "R03_max_two_lines", "R03_no_duplicate_an8_tags",
         "R05_zero_scene_oscillation", "R05_zero_stranger_banmal", "R11_R12_ost_and_collision_free",
         "R19_zero_unsnapped_000_ost",
+        "universal_premature_question_split", "universal_causal_clause_question",
+        "universal_adjacent_dialogue_echoes", "universal_descriptive_concept_transliteration",
+        "universal_slogan_inconsistency", "universal_orphan_speaker_dash",
+        "universal_unicode_ellipsis", "universal_unnormalized_quotes",
+        "universal_srt_register_oscillation", "universal_missing_dialogue",
     }
     by_vid = {
         "deadpool-and-wolverine-2024": {"R05_carnival_polite", "R05_nicepool_banmal", "R06_conditional_echo_if", "R07_moniker_blind_al", "R08_stripper_sov_inversion", "R10_not_all_of_you_asleep", "R11_sacred_timeline_ost", "R15_gambit_cajun_dialect_and_sling_blade", "R20_dpw_spam_ost_timing"},

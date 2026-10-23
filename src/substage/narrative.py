@@ -29,10 +29,13 @@ from .models import (
     AmbiguityFlag,
     CharacterState,
     ChunkObservations,
+    ConceptEntry,
     Cue,
     CueDelta,
     VideoInfo,
     ContextMap,
+    GlossaryEntry,
+    OnScreenText,
     PerceptionLedger,
     RegisterMap,
     Revelation,
@@ -46,7 +49,7 @@ from .models import (
 )
 from .perception import selective_perception_pass as _selective_perception_pass
 from .store import Checkpoints, input_hash
-from .style import REGISTER_TOKEN, register_rules
+from .style import REGISTER_TOKEN, register_rules, style_guide
 
 _PROMPTS = resources.files("substage") / "prompts"
 _TIMELINE_SCENES_PER_CALL = 20
@@ -62,10 +65,17 @@ _OST_REL_SLACK_MS = 2_000
 
 
 def _prompt(name: str) -> str:
-    """Prompt template text with the style guide's register section embedded,
-    so template-keyed checkpoints also change when that section does."""
+    """Embed style sections so guide changes invalidate template checkpoints."""
     text = (_PROMPTS / name).read_text(encoding="utf-8")
-    return text.replace(REGISTER_TOKEN, register_rules()) if REGISTER_TOKEN in text else text
+    if REGISTER_TOKEN in text:
+        text = text.replace(REGISTER_TOKEN, register_rules())
+    if "<<STYLE_GUIDE_TERMS>>" in text:
+        guide = style_guide()
+        start = guide.index("### 6.3 ")
+        end = re.search(r"\n#{1,3} ", guide[start + 1:])
+        terms = guide[start:start + 1 + end.start()] if end else guide[start:]
+        text = text.replace("<<STYLE_GUIDE_TERMS>>", terms.strip())
+    return text
 
 
 def _mmss(ms: int) -> str:
@@ -149,18 +159,39 @@ def _wallclock_minute_base_ms(start_ms: int) -> int:
     return (start_ms // 60_000) * 60_000
 
 
+def _parse_timecode_ms(tc: str | None) -> int | None:
+    """Parse an absolute HH:MM:SS.mmm or MM:SS.mmm clock without floats."""
+    if tc is None:
+        return None
+    match = re.fullmatch(r"(?:(\d{2,}):)?(\d{2,}):([0-5]\d)(?:[.,](\d{1,3}))?", tc.strip())
+    if match is None:
+        return None
+    hours, minutes, seconds, fraction = match.groups()
+    if hours is not None and int(minutes) >= 60:
+        return None
+    return ((int(hours or 0) * 60 + int(minutes)) * 60 + int(seconds)) * 1000 + int((fraction or "0").ljust(3, "0"))
+
+
 def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
     """Put on-screen-text times on the video clock inside the clip window.
 
-    Times well before the clip that fit its length were reported relative to
-    the clip start and are shifted by it; base-100 MMSS*1000 times are decoded
-    to milliseconds before clamping; all spans are then clamped to the
-    window. Empty texts are dropped."""
+    Parsed burned-in timecodes are authoritative absolute timestamps and bypass
+    the coarse VLM clock heuristics. Legacy numeric reports are decoded and
+    rebased when needed. All spans are clamped to the clip window; empty texts
+    are dropped.
+    """
     span = end_ms - start_ms
     non_empty = [t for t in obs.on_screen_text if t.text.strip()]
+    for t in non_empty:
+        parsed_start = _parse_timecode_ms(t.start_timecode)
+        parsed_end = _parse_timecode_ms(t.end_timecode)
+        if parsed_start is not None and parsed_end is not None and parsed_end >= parsed_start:
+            t.start_ms, t.end_ms = parsed_start, parsed_end
+            t.timing_provenance = "timecode_read"
     def _is_mmss_cand(it: OnScreenText) -> bool:
         return (
-            it.covered_by_cue is None
+            it.timing_provenance != "timecode_read"
+            and it.covered_by_cue is None
             and 100_000 <= it.start_ms < 600_000
             and it.start_ms != end_ms
             and it.start_ms % 100 == 0
@@ -172,37 +203,39 @@ def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
     # In-range clock values are ambiguous: require another span at or beyond
     # the clip boundary before interpreting a first-chunk batch as MMSS.
     has_clamped_or_over_end = end_ms > 0 and any(
-        t.start_ms > end_ms or t.end_ms > end_ms + 1000
-        or (t.start_ms >= end_ms - 500 and t.end_ms >= end_ms)
+        t.timing_provenance != "timecode_read" and (
+            t.start_ms > end_ms or t.end_ms > end_ms + 1000
+            or (t.start_ms >= end_ms - 500 and t.end_ms >= end_ms)
+        )
         for t in non_empty
     )
     batch_mmss = start_ms == 0 and has_clamped_or_over_end
     kept = []
     for t in non_empty:
-        if end_ms > 0 and t.start_ms == end_ms and t.end_ms == end_ms:
-            continue
-        if end_ms > 0 and t.start_ms > end_ms:
-            ds, de = _decode_mmss_ms(t.start_ms), _decode_mmss_ms(t.end_ms)
-            if 0 <= ds <= span and start_ms > 0 and ds < start_ms - _OST_REL_SLACK_MS:
-                t.start_ms, t.end_ms = ds + start_ms, de + start_ms
-            elif start_ms <= ds <= end_ms:
-                t.start_ms, t.end_ms = ds, max(ds, de)
-            else:
+        if t.timing_provenance != "timecode_read":
+            if end_ms > 0 and t.start_ms == end_ms and t.end_ms == end_ms:
                 continue
-        elif batch_mmss and _is_mmss_cand(t):
-            t.start_ms = _decode_mmss_ms(t.start_ms)
-            t.end_ms = _decode_mmss_ms(t.end_ms)
-        in_window = start_ms <= t.start_ms <= end_ms
-        if (
-            not in_window
-            and t.start_ms < start_ms - _OST_REL_SLACK_MS
-            and 0 <= t.start_ms <= span
-        ):
-            # Clip-relative report. A mid-minute clip's wall-clock-second
-            # report (base ``_wallclock_minute_base_ms``) is indistinguishable
-            # here; realign_ost_to_anchors_and_gaps resolves it against cues.
-            t.start_ms += start_ms
-            t.end_ms += start_ms
+            if end_ms > 0 and t.start_ms > end_ms:
+                ds, de = _decode_mmss_ms(t.start_ms), _decode_mmss_ms(t.end_ms)
+                if 0 <= ds <= span and start_ms > 0 and ds < start_ms - _OST_REL_SLACK_MS:
+                    t.start_ms, t.end_ms = ds + start_ms, de + start_ms
+                elif start_ms <= ds <= end_ms:
+                    t.start_ms, t.end_ms = ds, max(ds, de)
+                else:
+                    continue
+            elif batch_mmss and _is_mmss_cand(t):
+                t.start_ms = _decode_mmss_ms(t.start_ms)
+                t.end_ms = _decode_mmss_ms(t.end_ms)
+            in_window = start_ms <= t.start_ms <= end_ms
+            if (
+                not in_window
+                and t.start_ms < start_ms - _OST_REL_SLACK_MS
+                and 0 <= t.start_ms <= span
+            ):
+                # Clip-relative and wall-clock-second reports are ambiguous;
+                # realign_ost_to_anchors_and_gaps resolves them against cues.
+                t.start_ms += start_ms
+                t.end_ms += start_ms
         t.start_ms = min(max(t.start_ms, start_ms), end_ms)
         t.end_ms = min(max(t.end_ms, t.start_ms), end_ms)
         if end_ms > 0 and t.start_ms == end_ms and t.end_ms == end_ms:
@@ -400,6 +433,95 @@ def render_perception_ledger(
 # --------------------------------------------------------------------- S2a
 
 
+# Compositional meanings, not film-specific phrase substitutions. Unknown
+# compounds stay visible for review rather than acquiring invented meanings.
+_CONCEPT_WORDS = {
+    "anchor": "주축",
+    "being": "인물",
+    "blind": "장님",
+    "al": "알",
+    "gut": "장에 좋은",
+    "milk": "우유",
+    "training wheels": "왕초보",
+    "enhanced interrogation": "고급 취조",
+    "doomsday": "최후의 날",
+    "protocol": "모드",
+    "grow or die": "성장 아니면 사장",
+}
+_PHONETIC_CONCEPT = re.compile(
+    r"앤커|앵커|비잉|거트|블라인드|트레이닝|프로토콜|그로우?|오어\s*다이|인터로게이션|둠스데이|보조\s*바퀴"
+)
+_UNRESOLVED_CONCEPT = "[semantic glossary unresolved]"
+
+
+def _concept_key(text: str) -> str:
+    return re.sub(r"[^\w]+", " ", text.casefold()).strip()
+
+
+def _compose_concept(en: str) -> str | None:
+    words = _concept_key(en).split()
+    translated: list[str] = []
+    while words:
+        for size in range(min(3, len(words)), 0, -1):
+            phrase = " ".join(words[:size])
+            if phrase in _CONCEPT_WORDS:
+                meaning = _CONCEPT_WORDS[phrase]
+                if phrase == "protocol" and "최후의 날" in translated:
+                    meaning = "수칙"
+                translated.append(meaning)
+                del words[:size]
+                break
+        else:
+            return None
+    return " ".join(translated) or None
+
+
+def normalize_concept_glossary(context_map: ContextMap) -> ContextMap:
+    """Merge semantic locks and repair recognizable phonetic concept labels."""
+    merged: dict[str, GlossaryEntry] = {}
+    for entry in [*context_map.glossary, *context_map.concepts]:
+        key = _concept_key(entry.en)
+        previous = merged.get(key)
+        values = entry.model_dump()
+        if previous is not None:
+            values["note"] = entry.note or previous.note
+            values["definition_in_film"] = entry.definition_in_film or previous.definition_in_film
+            if (
+                (not entry.ko.strip() or _PHONETIC_CONCEPT.search(entry.ko))
+                and re.search(r"[가-힣]", previous.ko)
+                and not _PHONETIC_CONCEPT.search(previous.ko)
+            ):
+                values["ko"] = previous.ko
+        merged[key] = GlossaryEntry(**values)
+    for entry in merged.values():
+        if entry.kind not in {"descriptive_concept", "slogan"}:
+            continue
+        composed = _compose_concept(entry.en)
+        definition = entry.definition_in_film.strip()
+        korean_definition = (
+            definition if 0 < len(definition) <= 40
+            and re.search(r"[가-힣]", definition)
+            and not re.search(r"[.!?\n]", definition)
+            and not _PHONETIC_CONCEPT.search(definition) else None
+        )
+        phonetic = bool(_PHONETIC_CONCEPT.search(entry.ko)) or (
+            composed is not None and entry.kind in {"descriptive_concept", "slogan"} and entry.ko != composed
+        )
+        if not re.search(r"[가-힣]", entry.ko) or phonetic:
+            replacement = composed or korean_definition
+            if replacement is not None:
+                entry.ko = replacement
+                entry.note = f"{entry.note} {_UNRESOLVED_CONCEPT}".strip()
+        elif composed is None and korean_definition is None and _UNRESOLVED_CONCEPT not in entry.note:
+            entry.note = f"{entry.note} {_UNRESOLVED_CONCEPT}".strip()
+    context_map.glossary = list(merged.values())
+    concept_keys = dict.fromkeys(_concept_key(entry.en) for entry in context_map.concepts)
+    context_map.concepts = [
+        ConceptEntry(**merged[key].model_dump()) for key in concept_keys
+    ]
+    return context_map
+
+
 def build_context_map(
     ws: Workspace,
     gc: GeminiClient,
@@ -460,7 +582,7 @@ def build_context_map(
         cp.put("context_map", h, hit)
     if series_bible is not None:
         hit = reconcile_characters(hit, series_bible, cues)  # type: ignore[arg-type]
-    return hit
+    return normalize_concept_glossary(hit)
 
 # --------------------------------------------------------------------- S2b
 
@@ -653,6 +775,7 @@ def materialize_snapshots(
 
     Pure Python, no model calls. See module docstring for the causal rules.
     """
+    context_map = normalize_concept_glossary(context_map)
     pos = {c.id: i for i, c in enumerate(cues)}
     text_by_id = {c.id: c.text for c in cues}
     hint_by_id = {c.id: c.speaker_hint for c in cues}

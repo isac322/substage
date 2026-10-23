@@ -16,6 +16,25 @@ Output: JSON matching the requested schema. One cues[] entry per input cue id, i
 - ko "" for: sound-only cues, LYRIC INCIDENTAL cues (unattributed background BGM, credit songs, pure vocable noise like 'Oy, oy, oy' or 'Bom, bom, tsk'), real studio/cast/crew ON-SCREEN CREDIT cues, and cues the style guide leaves unsubtitled. Translate LYRIC PLOT-RELEVANT cues without ♪: when tagged `PARODY/RHYME CHAIN`, rebuild the phonetic suffix/rhyme chain in Korean across the span (e.g. '-이카 / -니까', 3-item '-카' rhyme '알파카, 알라스카, 남아프리카!', '-야' rhyme chain '우리집은 애리조니아 / 텅텅 빈 황무지야') rather than dictionary-glossing medical or brand nouns; when tagged `SPEECH WITH STRAY ♪`, translate as ordinary spoken dialogue in the speaker's register; otherwise use concise Korean song register. Translate gag credits (`[gag_credit]` or satirical role cards like "STARRING GOD'S PERFECT IDIOT" -> '출연 / 신이 내린 또라이') and every ON-SCREEN TEXT cue (messages, notes, close-up prop labels, signs, HUD/UI, location/time captions, titles, dedications) — never inside [ ]. Never leave a non-credit ON-SCREEN TEXT cue empty, never merge sequential ON-SCREEN TEXT cues into one cue, and always preserve clock times, numbers, and signatures (e.g. '스파이더맨', '피터 파커').
 
 ## Multi-cue syntactic spans, Discourse Units, and Korean SOV order
+- **Multi-Cue Sentence Continuity (`UtteranceSpan`)**: when one English sentence or
+  question spans 2–3 consecutive cues (including `...`, `…`, `because`, `but`,
+  `before`, `to`, `by`, a relative clause or a purpose clause), plan ONE unified
+  Korean sentence for the whole span before projecting it into cue slots. Apply
+  this even without an explicit SPAN or DISCOURSE UNIT tag.
+- Keep every non-final sentence slot naturally open with a Korean connective or
+  unfinished phrase (`-는데`, `-어서`, `-하려고`, `이유가`, `-더니`); put the final
+  predicate and sentence-final `?` or `!` ONLY in the last cue of that sentence.
+  Preserve each clause's cause, contrast, condition or temporal relationship.
+- A single continuing English question must not become two Korean questions:
+  never close both slots as `...거 아니고?` / `...거 아니고?` or
+  `...말이 뭐였죠?` / `...말은 뭐였죠?`. A causal `because ... finally dies`
+  clause is not a question: never turn it into `뒈졌다고?`.
+- Separate a short independent reaction from the continuing sentence that follows
+  it in the SAME cue. For `Do they? Are you sure you didn't just really, really
+  want them to…` followed by the completion, keep `Do they?` as `그래?`, then
+  leave Cue 1's continuing question open (`그래? 네가 불러달라고 그렇게 유도했는데`)
+  and close it only in Cue 2 (`잘 안된 거 아니고?`). A reaction's own `?` does
+  not license prematurely closing the following sentence.
 - When consecutive cues carry `[DISCOURSE UNIT c1..cN: <speech_act_type>]`, they form a single connected utterance or speech act across 2–5 cues:
   * Formulate the unified Korean thought for the entire `c1..cN` chain first, then slice it across `c1..cN` so reading them sequentially forms one seamless Korean sentence/exchange.
   * When tagged `hesitation_completion` or `HOLD-ELLIPSIS` (e.g. `And as a more concrete gesture of our gratitude, / we'd like to offer you a... / Let's call it a favor.`), NEVER invent a placeholder noun (like `선물을...`) in the `...` cue, and NEVER calque `more concrete gesture` (`실질적인`) or `favor` (`호의`). Keep the `...` cue open on the addressee or verb stem (`감사의 표시로 저희가` / `부인께...`) and render the metalinguistic completion cue (`Let's call it a favor` / `Think of it as...` / `Let's say...`) as the natural Korean speech act (`도움을 하나 드린다고 생각하시죠` or `도움을 드리죠`).
@@ -24,7 +43,7 @@ Output: JSON matching the requested schema. One cues[] entry per input cue id, i
 - When tagged `[SPAN c1..c2: DRAMATIC_REVEAL_KEEP_ORDER]`, preserve chronological cue order so a hesitant reveal or punchline in `c2` is never spoiled in `c1`.
 - When cues carry `[ECHO UNIT <id>: <kind> (SETUP|PAYOFF, anchor=...)]`:
   * `conditional_echo`: When a later cue echoes or questions `"if"` / `"unless"` (`What do you mean, "if?"`), EVERY setup cue and the payoff cue must explicitly include the quotable Korean conditional word `만약` + `~(으)면 / ~수 있다면` (`만약 네 세계를 고친다면` -> `만약 네 세계를 고칠 수 있다면?` -> `만약이라니?`). Never drop `만약` on the setup cue or replace `"if"` with a non-conditional phrase like `고쳐주면`.
-  * `quote_or_term_echo`: Every setup cue and payoff cue in the echo chain must use one identical Korean noun/phrase stem (`'왕초보 모드'` or `'보조 바퀴 프로토콜' -> '보조 바퀴'`, `'사람들도 거대하잖아' -> '무슨 사람들?' -> '사람은 거인 같다며'`); never switch terms mid-chain.
+  * `quote_or_term_echo`: Every setup cue and payoff cue in the echo chain must use one identical Korean noun/phrase stem (`'왕초보 모드' -> '왕초보'`, `'사람들도 거대하잖아' -> '무슨 사람들?' -> '사람은 거인 같다며'`); never switch terms mid-chain.
   * `moniker_gloss`: When a character's descriptive nickname is questioned or explained by its literal meaning in dialogue (`Blind Al -> You call her "Blind Al"? -> Well, she's blind`, `Give it up for Chastity! -> Or as I like to call her, Irony`), translate the nickname by its everyday Korean trait (`장님 알`, `순결이`) rather than pure phonetic transliteration (`블라인드 알`, `체스터티`).
 
 ## Situational grounding, nonverbal context, and pragmatic implicature (Pragma-DPAF)
@@ -46,7 +65,15 @@ Output: JSON matching the requested schema. One cues[] entry per input cue id, i
 
 ## Continuity and ambiguity
 - CALLBACKS: a payoff cue must reuse the fixed Korean wording of its setup verbatim.
-- GLOSSARY terms and character names: use the given Korean forms exactly.
+- GLOSSARY terms and character names: use the given Korean forms exactly. For
+  `descriptive_concept` and `slogan`, preserve the Korean meaning fixed by
+  `definition_in_film`, never revert to phonetic Hangul. A coined label's capital
+  letters do not make it a proper name: 주축 인물, 장에 좋은 우유, 장님 알,
+  왕초보 모드, 고급 취조 모드, 최후의 날 수칙, 성장 아니면 사장 carry meaning;
+  앤커 비잉, 거트 밀크, 블라인드 알 and 보조바퀴 프로토콜 obscure it.
+  If a term is marked `[semantic glossary unresolved]`, do not treat a phonetic
+  spelling as a semantic lock: use its in-film definition and the current dialogue
+  to render its meaning, and report the unresolved lock as an erratum.
 - PRESERVE AMBIGUITY cues must stay as double-edged in Korean as in English. Do not resolve pronouns, gender, or intent the video deliberately leaves open.
 - The CONTEXT block contains only what is knowable at this point in the video. Never leak future facts into tone or word choice.
 

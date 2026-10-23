@@ -32,6 +32,10 @@ class MediaNeed(StrEnum):
 
 # ---------------------------------------------------------------- S0 ingest
 
+OstTimingProvenance = Literal[
+    "vlm_coarse", "timecode_read", "scdet_snapped", "ocr_verified", "dialogue_anchored"
+]
+
 
 class Cue(BaseModel):
     id: str  # "c0001"…, stable for the whole run; on-screen-text cues use "ost-0001"
@@ -47,7 +51,7 @@ class Cue(BaseModel):
     ost_kind: str | None = None
     ost_addressee: str | None = None
     speech_level: str | None = None
-
+    timing_provenance: OstTimingProvenance = "vlm_coarse"
 class VideoInfo(BaseModel):
     video_id: str  # slug, e.g. "sample-2016"
     title: str
@@ -160,7 +164,7 @@ class OstBeat(BaseModel):
     sender: str | None = None
     addressee: str | None = None
     speech_level: str | None = None
-
+    timing_provenance: OstTimingProvenance = "vlm_coarse"
 
 class OnScreenText(BaseModel):
     start_ms: int
@@ -169,7 +173,9 @@ class OnScreenText(BaseModel):
     plot_critical: bool = False
     covered_by_cue: str | None = None  # existing cue id if already subtitled
     beats: list[OstBeat] = Field(default_factory=list)
-
+    start_timecode: str | None = None  # optional "HH:MM:SS.mmm" read from burned-in clock
+    end_timecode: str | None = None
+    timing_provenance: OstTimingProvenance = "vlm_coarse"
 class ChunkObservations(BaseModel):
     chunk_id: str  # "v01"
     start_ms: int
@@ -312,10 +318,21 @@ class Callback(BaseModel):
     note: str = ""
 
 
+ConceptKind = Literal["descriptive_concept", "proper_alias", "slogan", "place_or_org"]
+
+
 class GlossaryEntry(BaseModel):
     en: str
     ko: str
     note: str = ""
+    kind: ConceptKind = "proper_alias"
+    definition_in_film: str = ""
+
+
+class ConceptEntry(GlossaryEntry):
+    """Semantic concept, descriptive nickname, or slogan locked across all acts."""
+
+    kind: ConceptKind = "descriptive_concept"
 
 
 class AmbiguityFlag(BaseModel):
@@ -332,8 +349,8 @@ class ContextMap(BaseModel):
     twist_facts: list[TwistFact] = Field(default_factory=list)
     callbacks: list[Callback] = Field(default_factory=list)
     glossary: list[GlossaryEntry] = Field(default_factory=list)
+    concepts: list[ConceptEntry] = Field(default_factory=list)
     ambiguous: list[AmbiguityFlag] = Field(default_factory=list)
-
 
 # ---------------------------------------------------------------- S2b timeline
 
@@ -493,11 +510,13 @@ class SourceAct(_SemanticModel):
 
 
 class SourceRelation(_SemanticModel):
-    kind: Literal["elapsed", "relative_time", "question_answer", "order", "list"]
+    kind: Literal[
+        "elapsed", "relative_time", "question_answer", "order", "list",
+        "causal", "continuation", "adversative", "purpose", "conditional",
+    ]
     refs: list[str] = Field(min_length=1)
     claim: str
     uncertainty: list[str] = Field(default_factory=list)
-
 
 class SemanticSource(_SemanticModel):
     scene_id: str
@@ -590,13 +609,65 @@ class SemanticSceneTranslation(SceneTranslation):
 # ---------------------------------------------------------------- S4/S5/C7
 
 
+class SourceSlice(BaseModel):
+    """Sub-cue or full-cue source slice participating in an UtteranceSpan."""
+
+    cue_id: str
+    slice_idx: int = 0
+    char_start: int = 0
+    char_end: int = 0
+    text: str = ""
+    is_sentence_terminal: bool = True
+    is_reaction_prefix: bool = False
+
+
+SpanRelationKind = Literal[
+    "single", "continuation", "causal", "adversative", "relative",
+    "temporal", "purpose", "conditional",
+]
+
+
+class UtteranceSpan(BaseModel):
+    """First-class multi-cue (or split-cue) semantic utterance unit across S1..S5."""
+
+    span_id: str
+    cue_ids: list[str]
+    slices: list[SourceSlice] = Field(default_factory=list)
+    speaker: str | None = None
+    addressee: str | None = None
+    relation_kind: SpanRelationKind = "single"
+    has_reaction_prefix: bool = False
+    reaction_prefix_en: str = ""
+
+
+class SpanTranslation(BaseModel):
+    """Unified Korean sentence for an UtteranceSpan plus its per-cue slot projections."""
+
+    span_id: str
+    cue_ids: list[str]
+    unified_ko: str
+    reaction_prefix_ko: str = ""
+    cue_fragments: dict[str, str] = Field(default_factory=dict)
+
+
+class SpanEdit(BaseModel):
+    """All-or-nothing atomic edit transaction replacing an entire UtteranceSpan."""
+
+    span_id: str
+    cue_ids: list[str]
+    unified_ko: str
+    old_by_cue: dict[str, str] = Field(default_factory=dict)
+    new_by_cue: dict[str, str] = Field(default_factory=dict)
+    reason: str = ""
+    kind: str = "span_continuity"
+
+
 class CueEdit(BaseModel):
     cue_id: str
     new_ko: str
     reason: str
     kind: str  # register | omission | consistency | callback | naturalness | condensation | picture
-
-
+    span_id: str | None = None  # when set, _apply_edits commits/rejects all CueEdits sharing span_id atomically
 class ReadFlag(BaseModel):
     cue_id: str
     problem: str  # 번역투, unclear referent, unnatural phrasing…

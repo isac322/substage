@@ -514,16 +514,25 @@ def slice_proxy_clip(ws: Workspace, video: Path, start_s: float, end_s: float) -
     tail_cmd = [
         "-c:v", "libx264", "-crf", "32", "-preset", "ultrafast",
         "-c:a", "aac", "-ac", "1", "-ar", "48000",
-        "-movflags", "+faststart", str(tmp),
+        "-movflags", "+faststart",
     ]
     tc_vf = ["-vf", r"drawtext=text='%{pts\:hms}':x=8:y=8:fontsize=16:fontcolor=white:box=1:boxcolor=black@0.65"]
     try:
-        _run([*base_cmd, *tc_vf, *tail_cmd], what=f"slice_proxy_clip (timecode) {video.name} {start:.1f}-{end:.1f}s")
-    except MediaError:
+        _run([*base_cmd, *tc_vf, *tail_cmd, str(tmp)], what=f"slice_proxy_clip (timecode) {video.name} {start:.1f}-{end:.1f}s")
+    except MediaError as exc:
+        logger.warning(
+            "Timecode burn-in failed for %s %.1f-%.1fs; using an unburned .notc.mp4 clip: %s",
+            video.name, start, end, exc,
+        )
+        tmp.unlink(missing_ok=True)
+        out = out.with_suffix(".notc.mp4")
+        if out.is_file() and out.stat().st_size > 0:
+            return out
+        tmp = _partial(out)
         _run([
             ff, "-nostdin", "-v", "error", "-y",
             "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-            "-i", str(video), *tail_cmd,
+            "-i", str(video), *tail_cmd, str(tmp),
         ], what=f"slice_proxy_clip {video.name} {start:.1f}-{end:.1f}s")
     tmp.replace(out)
     return out

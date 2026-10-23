@@ -27,7 +27,8 @@ shortening, and revalidates.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from pydantic import BaseModel
 
@@ -814,6 +815,219 @@ def check(
     n_chars = cps_chars(ko)
     if duration_s > 0 and n_chars / duration_s > settings.cps_max:
         flag("cps", f"{n_chars} chars / {duration_s:.1f}s = {n_chars / duration_s:.1f} cps > {settings.cps_max}")
+    return issues
+
+
+@dataclass(frozen=True)
+class _ContinuityEvent:
+    cue_id: str
+    start_ms: int
+    end_ms: int
+    text: str
+    cue_ids: tuple[str, ...] = ()
+    speaker: str | None = None
+    addressee: str | None = None
+
+
+_REACTION_QUESTION = re.compile(r"^(?:(?:그래|정말|진짜|뭐|왜|네|응|어|설마)\s*[?!]\s*)+")
+_DESCRIPTIVE_CALQUE = re.compile(
+    r"(?:앤커|앵커)\s*(?:비잉|존재)|거트\s*밀크|블라인드\s*알|"
+    r"(?:보조\s*바퀴|심문\s*강화|최후의\s*날)\s*프로토콜"
+)
+
+
+def _event_field(event: object, key: str, default: object = None) -> object:
+    return event.get(key, default) if isinstance(event, Mapping) else getattr(event, key, default)
+
+
+def check_utterance_span_continuity(
+    en_cues: Sequence[Cue],
+    ko_events: Sequence[object] | Mapping[str, str],
+) -> list[ValidationIssue]:
+    """Audit displayed dialogue, including tracks without workspace metadata.
+
+    Cue identities take precedence over temporal alignment; a merged display
+    event is never mistaken for two independently translated questions.
+    Unknown-speaker register checks require an established two-event register
+    run, rather than treating every neighboring speaker change as oscillation.
+    """
+    from .levels import addressed_levels
+
+    cues = sorted(
+        (cue for cue in en_cues if cue.source != "ost" and not cue.lyric),
+        key=lambda cue: (cue.start_ms, cue.end_ms),
+    )
+    cues_by_id = {cue.id: cue for cue in cues}
+    causal_cue_ids: set[str] = set()
+    causal_continuation = False
+    previous_cue: Cue | None = None
+    for cue in cues:
+        if previous_cue is not None and (
+            cue.start_ms - previous_cue.end_ms > 3000
+            or (cue.speaker_hint and previous_cue.speaker_hint and cue.speaker_hint != previous_cue.speaker_hint)
+        ):
+            causal_continuation = False
+        source = cue.text.strip().rstrip("\"'”’")
+        causal = "?" not in source and (
+            causal_continuation or bool(re.search(r"\bbecause\b", source, re.I))
+        )
+        if causal:
+            causal_cue_ids.add(cue.id)
+        causal_continuation = causal and (
+            source.endswith(("...", "…", ",")) or bool(re.search(r"\w$", source))
+        )
+        previous_cue = cue
+    events: list[_ContinuityEvent] = []
+    if isinstance(ko_events, Mapping):
+        for cid, text in ko_events.items():
+            cue = cues_by_id.get(cid)
+            if cue is not None and text.strip():
+                events.append(_ContinuityEvent(
+                    cid, cue.start_ms, cue.end_ms, text, (cid,), cue.speaker_hint,
+                ))
+    else:
+        for index, event in enumerate(ko_events):
+            if _event_field(event, "ost", False) or _event_field(event, "position") == "an8":
+                continue
+            text = str(_event_field(event, "ko", _event_field(event, "text", "")))
+            text = re.sub(r"\{\\an\d+\}|<[^>]*>", "", text).strip()
+            if not text or "♪" in text:
+                continue
+            ids = tuple(str(cid) for cid in (_event_field(event, "cue_ids", ()) or ()))
+            cid = str(_event_field(event, "cue_id", "") or (ids[0] if ids else f"event@{index}"))
+            speaker = _event_field(event, "speaker")
+            addressee = _event_field(event, "addressee")
+            events.append(_ContinuityEvent(
+                cid, int(str(_event_field(event, "start_ms", 0))),
+                int(str(_event_field(event, "end_ms", 0))), text, ids,
+                str(speaker) if speaker else None, str(addressee) if addressee else None,
+            ))
+    events.sort(key=lambda event: (event.start_ms, event.end_ms))
+    issues: list[ValidationIssue] = []
+    seen: set[tuple[str, str]] = set()
+
+    def flag(event: _ContinuityEvent, rule: str, detail: str) -> None:
+        key = (event.cue_id, rule)
+        if key not in seen:
+            seen.add(key)
+            issues.append(ValidationIssue(cue_id=event.cue_id, rule=rule, detail=detail))
+
+    by_cue: dict[str, list[int]] = {cue.id: [] for cue in cues}
+    sources: list[list[Cue]] = []
+    left = 0
+    for index, event in enumerate(events):
+        while left < len(cues) and cues[left].end_ms <= event.start_ms:
+            left += 1
+        if event.cue_ids:
+            matched = [cues_by_id[cid] for cid in event.cue_ids if cid in cues_by_id]
+        else:
+            matched = []
+            right = left
+            while right < len(cues) and cues[right].start_ms < event.end_ms:
+                if cues[right].end_ms > event.start_ms:
+                    matched.append(cues[right])
+                right += 1
+        sources.append(matched)
+        for cue in matched:
+            by_cue[cue.id].append(index)
+        lines = [line.strip() for line in event.text.splitlines() if line.strip()]
+        dashed = [bool(_EN_TURN_DASH.match(line)) for line in lines]
+        if (len(lines) == 1 and any(dashed)) or (len(lines) == 2 and sum(dashed) == 1):
+            flag(event, "orphan_speaker_dash", "One speaker must not carry a lone/asymmetric leading dash")
+        if "…" in event.text:
+            flag(event, "unicode_ellipsis", "Dialogue ellipsis must be three ASCII periods")
+        if _straight_quotes(event.text) != event.text:
+            flag(event, "unnormalized_quotes", "Dialogue quotes must be straight single quotes")
+        if _DESCRIPTIVE_CALQUE.search(event.text):
+            flag(event, "descriptive_concept_transliteration", "Translate descriptive meaning, not phonetic labels")
+        source = " ".join(cue.text for cue in matched)
+        causal_clauses = [
+            clause for clause in re.split(r"(?<=[.!?])\s+", source)
+            if re.search(r"\bbecause\b", clause, re.I) and "?" not in clause
+        ]
+        body = _REACTION_QUESTION.sub("", event.text.strip())
+        if (causal_clauses or any(cue.id in causal_cue_ids for cue in matched)) and re.search(r"(?:다고|냐고)\s*\?[\"'’”]*$", body):
+            flag(event, "causal_clause_question", "Declarative because-clause was changed into a question")
+
+    for first, second in zip(cues, cues[1:]):
+        if second.start_ms - first.end_ms > 3000:
+            continue
+        if first.speaker_hint and second.speaker_hint and first.speaker_hint != second.speaker_hint:
+            continue
+        first_matches, second_matches = by_cue[first.id], by_cue[second.id]
+        if not first_matches or not second_matches:
+            continue
+        a, b = first_matches[-1], second_matches[0]
+        if a >= b:
+            continue
+        source = first.text.strip().rstrip("\"'”’")
+        continuing = source.endswith(("...", "…", ",")) or bool(re.search(r"[\w]$", source))
+        if not continuing or "?" not in second.text:
+            continue
+        # A complete question before a fragment is a separate speech act.
+        tail = source.rsplit("?", 1)[-1].strip()
+        if not tail:
+            continue
+        ko_a = _REACTION_QUESTION.sub("", events[a].text.strip()).rstrip("\"'”’")
+        ko_b = _REACTION_QUESTION.sub("", events[b].text.strip()).rstrip("\"'”’")
+        if ko_a.endswith("?") and ko_b.endswith("?"):
+            flag(events[a], "premature_question_split", f"Continuing source question closes twice across {first.id}/{second.id}")
+
+    slogan_forms: dict[str, list[_ContinuityEvent]] = {}
+    for event in events:
+        for form in ("성장 아니면 죽음", "성장 아니면 사장"):
+            if re.sub(r"\s+", "", form) in re.sub(r"\s+", "", event.text):
+                slogan_forms.setdefault(form, []).append(event)
+    if len(slogan_forms) > 1:
+        for matches in slogan_forms.values():
+            for event in matches:
+                flag(event, "slogan_inconsistency", "The same track uses conflicting translations of one slogan")
+
+    def flat(text: str) -> str:
+        return re.sub(r"[^\w가-힣]", "", text).casefold()
+
+    def pair_at(index: int) -> tuple[str | None, str | None]:
+        event = events[index]
+        hints = {cue.speaker_hint for cue in sources[index] if cue.speaker_hint}
+        speaker = event.speaker or (next(iter(hints)) if len(hints) == 1 else None)
+        return speaker, event.addressee
+
+    levels: list[str | None] = []
+    for event in events:
+        addressed = set(addressed_levels(event.text)) - {None}
+        polite = addressed & {"haeyo", "hasipsio", "hao", "haseo"}
+        informal = addressed & {"hae", "haera"}
+        levels.append("J" if polite and not informal else "B" if informal and not polite else None)
+
+    for index in range(1, len(events)):
+        previous, event = events[index - 1], events[index]
+        gap = event.start_ms - previous.end_ms
+        if gap > 3000 or gap < -500:
+            continue
+        if gap <= 2000 and len(flat(event.text)) >= 6 and flat(event.text) == flat(previous.text):
+            source_a = " ".join(cue.text for cue in sources[index - 1])
+            source_b = " ".join(cue.text for cue in sources[index])
+            ids_a = {cue.id for cue in sources[index - 1]}
+            ids_b = {cue.id for cue in sources[index]}
+            if source_a and source_b and ids_a.isdisjoint(ids_b) and flat(source_a) != flat(source_b):
+                flag(event, "adjacent_dialogue_echoes", f"Different source dialogue overwrites {previous.cue_id} with identical Korean")
+        if not levels[index] or not levels[index - 1] or levels[index] == levels[index - 1]:
+            continue
+        if any(_EN_TURN_DASH.match(line) for ev in (previous, event) for line in ev.text.splitlines()):
+            continue
+        pair_a, pair_b = pair_at(index - 1), pair_at(index)
+        if any(a and b and a != b for a, b in zip(pair_a, pair_b)):
+            continue
+        same_pair = bool(pair_a[0] and pair_a[0] == pair_b[0])
+        established = (
+            index >= 2
+            and levels[index - 2] == levels[index - 1]
+            and 0 <= previous.start_ms - events[index - 2].end_ms <= 3000
+            and not any(_EN_TURN_DASH.match(line) for line in events[index - 2].text.splitlines())
+            and not any(a and b and a != b for a, b in zip(pair_at(index - 2), pair_a))
+        )
+        if same_pair or established:
+            flag(event, "srt_register_oscillation", f"Same-speaker run switches {levels[index - 1]}->{levels[index]} within 3s")
     return issues
 
 

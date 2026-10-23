@@ -31,16 +31,38 @@ def _strip_an_prefix(text: str) -> str:
     return _AN_PREFIX.sub("", text).lstrip()
 
 
-def _event_text(event: OutEvent) -> str:
-    text = strip_clause_slashes(event.ko)
-    if event.position == "an8":
-        text = _collapse_an_prefix(text)
-        if not text.startswith(r"{\an8}"):
-            text = r"{\an8}" + text
-    else:
-        text = _strip_an_prefix(text)
+def _normalize_body(event: OutEvent) -> str:
+    """Normalize displayed punctuation and dialogue dashes without changing ASS tag presence."""
+    text = _strip_an_prefix(strip_clause_slashes(event.ko)).replace("…", "...")
+    if event.channel == "dialogue":
+        lines = text.splitlines()
+        dashed = [bool(re.match(r"^\s*-\s*", line)) for line in lines]
+        if len(lines) == 1 and dashed[0]:
+            text = re.sub(r"^\s*-\s*", "", lines[0])
+        elif len(lines) == 2 and any(dashed):
+            speakers = [
+                fragment.speaker.strip().casefold()
+                for fragment in event.fragments
+                if fragment.text.strip() and fragment.speaker
+            ]
+            two_voices = (
+                len(set(speakers)) == 2
+                and all(fragment.speaker for fragment in event.fragments if fragment.text.strip())
+            )
+            bodies = [re.sub(r"^\s*-\s*", "", line) for line in lines]
+            text = "\n".join(
+                f"- {body}" if all(dashed) or two_voices else body
+                for body in bodies
+            )
     return text
 
+
+def _event_text(event: OutEvent) -> str:
+    """Normalize displayed punctuation/dashes and apply positioning."""
+    text = _normalize_body(event)
+    if event.position == "an8":
+        text = r"{\an8}" + text
+    return text
 
 def _sort_key(event: OutEvent) -> tuple[int, int]:
     return event.start_ms, event.end_ms
@@ -76,8 +98,16 @@ def _sanitize_lane(lane: list[OutEvent]) -> list[OutEvent]:
 
 
 def sanitize_display_events(events: list[OutEvent]) -> list[OutEvent]:
-    """Guarantee no two displayed events overlap at the same screen position:
-    identical texts merge, otherwise the earlier event ends before the later."""
+    """Normalize displayed text and resolve overlaps at each screen position."""
+    events = [
+        event.model_copy(
+            update={
+                "ko": (r"{\an8}" if event.position == "an8" and _AN_PREFIX.match(event.ko) else "")
+                + _normalize_body(event)
+            }
+        )
+        for event in events
+    ]
     an2 = [e for e in events if e.position != "an8"]
     an8 = [e for e in events if e.position == "an8"]
     return sorted([*_sanitize_lane(an2), *_sanitize_lane(an8)], key=_sort_key)

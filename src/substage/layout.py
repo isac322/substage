@@ -301,7 +301,7 @@ def _retime(events: list[_Ev], settings) -> None:
 def _flat(text: str) -> str:
     return " ".join(
         line.strip().lstrip(_DASHES).strip()
-        for line in strip_clause_slashes(text).splitlines() if line.strip()
+        for line in strip_clause_slashes(text).replace("…", "...").splitlines() if line.strip()
     )
 
 
@@ -420,7 +420,10 @@ def _initial(
     ordered = sorted(cues, key=lambda cue: (cue.start_ms, cue.id))
     absorbed = _absorbed_timing_cues(ordered, ko, scene_of, lineage, source_cue)
     for cue in ordered:
-        text = _collapse_an_prefix(strip_clause_slashes(ko.get(cue.id, "").strip()))
+        text = _collapse_an_prefix(strip_clause_slashes(ko.get(cue.id, "").strip()).replace("…", "..."))
+        dialogue = cue.source != "ost" and not cue.id.startswith("ost-")
+        if dialogue:
+            text = normalize_punct(text)
         fragments = lineage.fragments_by_cue.get(cue.id) if lineage is not None else None
         if not text or (fragments is None and not _is_fixed(cue) and is_filler(cue, text)):
             continue
@@ -438,6 +441,14 @@ def _initial(
                 continue
             text = render_retained(fragments, 10**9, 10**9)
         else:
+            lines = text.splitlines()
+            source_lines = [line.strip() for line in cue.text.splitlines() if line.strip()]
+            source_dual = len(source_lines) == 2 and all(line.startswith(tuple(_DASHES)) for line in source_lines)
+            dashed = [line.lstrip().startswith(tuple(_DASHES)) for line in lines]
+            if dialogue and (len(lines) == 1 or (len(lines) == 2 and sum(dashed) == 1 and not source_dual)):
+                text = "\n".join(line.lstrip().lstrip(_DASHES).lstrip() for line in lines)
+            elif dialogue and len(lines) == 2 and source_dual:
+                text = "\n".join(_dual_line(line) for line in lines)
             dual = _speakers([line for line in text.split("\n") if line.strip()])
             if dual is not None:
                 turns = [_Turn(f"?{cue.id}#{n}", t) for n, t in enumerate(dual)]
@@ -1021,7 +1032,7 @@ def layout(
         _retime(events, settings)
     return [
         OutEvent(
-            start_ms=e.start, end_ms=e.end, ko=_collapse_an_prefix(e.ko), cue_ids=e.cue_ids,
+            start_ms=e.start, end_ms=e.end, ko=_collapse_an_prefix(e.ko.replace("…", "...")), cue_ids=e.cue_ids,
             fragments=[fragment for turn in e.turns for fragment in turn.fragments],
             omissions=e.omissions,
             attribution_passes=e.attribution_passes,

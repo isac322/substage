@@ -3102,3 +3102,137 @@ def test_gen8_session_invariants_live_ost_position_and_same_channel_overlap(tmp_
         an8_ws, [(1000, 4000, "{\\an8}'간판'"), (1100, 4900, "대사"), (2000, 5000, "{\\an8}'표지'")], cues,
     )
     assert req in _invariant_reqs("sample", an8_ws, an8)
+
+
+def test_backbone_build_utterance_spans_and_validate_continuity():
+    # 1) 68:02 Gambit reaction prefix ("Do they?") + 2-cue accusation question
+    g_cues = [
+        cue("c1212", 4082787, 4085248, "Do they? Are you sure you didn't just\nreally, really want them to…"),
+        cue("c1213", 4085414, 4086540, "but it never quite worked out?"),
+    ]
+    spans = translate.build_utterance_spans(g_cues)
+    assert len(spans) == 1
+    sp = spans[0]
+    assert sp.cue_ids == ["c1212", "c1213"]
+    assert sp.has_reaction_prefix and sp.reaction_prefix_en == "Do they?"
+
+    # Official & Opus preserve connective open ending on c1212 -> valid ([])
+    assert translate.validate_span_continuity(
+        sp, {"c1212": "그래? 네가 불러달라고\n그렇게 유도했는데", "c1213": "잘 안된 거 아니고?"}
+    ) == []
+    assert translate.validate_span_continuity(
+        sp, {"c1212": "그래? 너 혼자\n그렇게 불리고 싶었는데", "c1213": "안 먹힌 거 아니고?"}
+    ) == []
+    # Flash prematurely closes c1212 with '? ' and duplicates '거 아니고?' -> flagged!
+    fl_errs = translate.validate_span_continuity(
+        sp, {"c1212": "정말? 부르고 싶어서\n안달만 난 거 아니고?", "c1213": "결국 무산된\n거 아니고?"}
+    )
+    assert "premature_question_closure" in fl_errs
+    assert "duplicate_predicate_across_continuation" in fl_errs
+
+    # 2) 34:11 Wolverine 3-cue causal span ("because that hairy… / thundercunt… / finally dies...")
+    w_cues = [
+        cue("c0639", 2051675, 2054720, "I'm about to lose everything that I've\never cared about because that hairy…"),
+        cue("c0640", 2054886, 2056638, "thundercunt from down undercunt…"),
+        cue("c0641", 2056805, 2059850, "finally dies\nand he's standing right behind me, isn't he?"),
+    ]
+    w_spans = translate.build_utterance_spans(w_cues)
+    assert len(w_spans) == 1 and w_spans[0].cue_ids == ["c0639", "c0640", "c0641"]
+    assert w_spans[0].relation_kind == "causal"
+    assert translate.validate_span_continuity(
+        w_spans[0],
+        {
+            "c0639": "내 소중한 모든 걸\n잃게 되는 이유가",
+            "c0640": "호주에서 온\n개호구 복슬이가",
+            "c0641": "마침내 죽어서인데\n내 뒤에 서있지?",
+        },
+    ) == []
+    w_errs = translate.validate_span_continuity(
+        w_spans[0],
+        {
+            "c0639": "소중한 걸 다 잃게\n생겼는데 저 털북숭이...",
+            "c0640": "호주산 씹새끼가\n마침내 뒈졌다고?",
+            "c0641": "지금 내 뒤에\n서 있지?",
+        },
+    )
+    assert "causal_clause_turned_into_question" in w_errs
+
+
+def test_backbone_concept_glossary_replaces_lazy_transliteration():
+    from substage.models import ConceptEntry, GlossaryEntry
+
+    cm = ContextMap(
+        synopsis="test",
+        tone_baseline="haeyo",
+        glossary=[
+            GlossaryEntry(en="Anchor Being", ko="앤커 비잉", kind="descriptive_concept", definition_in_film="시간선의 주축 인물"),
+            GlossaryEntry(en="Gut Milk", ko="거트 밀크", kind="descriptive_concept"),
+            GlossaryEntry(en="Blind Al", ko="블라인드 알", kind="descriptive_concept"),
+            GlossaryEntry(en="training wheels protocol", ko="보조바퀴 프로토콜", kind="descriptive_concept"),
+        ],
+        concepts=[
+            ConceptEntry(en="Grow or Die", ko="성장 아니면 죽음", kind="slogan"),
+        ],
+    )
+    norm_cm = narrative.normalize_concept_glossary(cm)
+    by_en = {g.en.lower(): g.ko for g in norm_cm.glossary}
+    assert by_en["anchor being"] == "주축 인물"
+    assert by_en["gut milk"] == "장에 좋은 우유"
+    assert by_en["blind al"] == "장님 알"
+    assert by_en["training wheels protocol"] == "왕초보 모드"
+    assert by_en["grow or die"] == "성장 아니면 사장"
+
+
+def test_backbone_atomic_span_edit_all_or_nothing():
+    from substage import pipeline as pipe_mod
+    from substage import register as reg_mod
+    from substage.models import RegisterEdge, RegisterMap
+
+    rm = RegisterMap(edges=[
+        RegisterEdge(
+            speaker="wade", addressee="gambit", relation="peer",
+            apparent_generation="same", history="met_as_adults", stance="civil",
+            step=5, level="hae",
+        )
+    ])
+    table = reg_mod.RegisterTable(rm, ["c1", "c2"])
+    gate = reg_mod.RegisterGate(table, {"c1": ("wade", "gambit"), "c2": ("wade", "gambit")})
+    out = {"c1": "원래 앞 문장인데", "c2": "원래 뒷 문장이야"}
+    edits = [
+        CueEdit(cue_id="c1", new_ko="새 앞 문장인데", reason="span", kind="naturalness", span_id="sp-1"),
+        CueEdit(cue_id="c2", new_ko="잘 안된 거 아니에요?", reason="span", kind="naturalness", span_id="sp-1"),
+    ]
+    pipe_mod._apply_edits(out, edits, gate, "discourse")
+    assert out["c1"] == "원래 앞 문장인데"
+    assert out["c2"] == "원래 뒷 문장이야"
+
+
+def test_backbone_timecode_parsing_and_provenance():
+    ost = OnScreenText(
+        start_ms=0, end_ms=0, text="[sign] SPAM", plot_critical=True,
+        start_timecode="01:16:34.465", end_timecode="01:16:38.469",
+    )
+    obs = ChunkObservations(chunk_id="v09", start_ms=4_589_147, end_ms=4_708_000, on_screen_text=[ost])
+    narrative._absolute_ost(obs, 4_589_147, 4_708_000)
+    assert (obs.on_screen_text[0].start_ms, obs.on_screen_text[0].end_ms) == (4_594_465, 4_598_469)
+    assert obs.on_screen_text[0].timing_provenance == "timecode_read"
+    (c,) = translate.ost_cues([obs], [], [])
+    assert c.timing_provenance == "timecode_read"
+    assert translate._is_frame_exact_cue(c) is True
+
+
+def test_backbone_universal_evaluator_speech_act_penalty_and_universal_defects(tmp_path):
+    from substage import refeval
+
+    # 1) Speech-act penalty: declarative/causal gold vs question-distorted candidate
+    g_bad = [{"id": "g1", "official": "호주에서 온 개호구 복슬이가 마침내 죽어서인데", "ko": "호주산 씹새끼가 마침내 뒈졌다고?"}]
+    g_exact_q_mismatch = [{"id": "g2", "official": "마침내 죽었어", "ko": "마침내 죽었어?"}]
+    sim_mismatch = refeval.evaluate_official_similarity(g_exact_q_mismatch, arm_key="ko")
+    assert sim_mismatch["off_sim"] < 70.0
+
+    # 2) Universal invariant checks catch lazy transliteration ('앤커 비잉') on any arbitrary movie ID!
+    cues = [cue("c1", 1000, 3000, "What is an Anchor Being?")]
+    ws = tmp_path / "any_movie"
+    srt = _write_quality_track(ws, [(1000, 3000, "앤커 비잉이 뭔데?")], cues, video_id="brand-new-movie-2026")
+    reqs = _invariant_reqs("brand-new-movie-2026", ws, srt)
+    assert any("translit" in r or "concept" in r or "U0" in r or "universal" in r.lower() for r in reqs)

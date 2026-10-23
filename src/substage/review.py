@@ -35,22 +35,23 @@ from .models import (
     SceneSituationCard,
     SceneTranslation,
     Snapshot,
+    SpanTranslation,
+    UtteranceSpan,
 )
 from .levels import addressed_levels, analyze_turn_morphemes, has_dialect_marker, has_internal_register_clash, speaker_turns, strips_dialect_marker
 from .register import THEATRICAL_VOCATIVE_RE, RegisterTable, binary, lock_scene_dyad_levels, lock_scene_pairs, render_scene_register, same_level, scene_dash_turn_pairs
 from .store import Checkpoints, input_hash
 from .style import PRO_SUBTITLE_LAWS, with_guide
 from .translate import (
-    CueSpan,
-    DiscourseUnit,
-    EchoLink,
     _NON_TRANSLATED,
     _fmt_ms,
     build_discourse_units,
+    build_utterance_spans,
     detect_echo_and_moniker_chains,
     detect_pragmatic_risk_cues,
     detect_syntactic_spans,
     enforce_echo_and_moniker_anchors,
+    validate_span_continuity,
 )
 from .validate import classify_lyric_cue, is_translated_lyric, ost_kind, rewrap
 
@@ -1038,6 +1039,45 @@ def _is_valid_sov_rewrite(
             return False
     return True
 
+
+def _utterance_for_unit(cues: Sequence[Cue], span_id: str) -> UtteranceSpan:
+    """Adapt legacy discourse metadata to the same source-slice backbone."""
+    extracted = build_utterance_spans(cues)
+    if len(extracted) == 1 and extracted[0].cue_ids == [cue.id for cue in cues]:
+        return extracted[0].model_copy(update={"span_id": span_id})
+    slices = [sl for span in extracted for sl in span.slices]
+    prefix = slices[0].text if slices and slices[0].is_reaction_prefix else ""
+    return UtteranceSpan(
+        span_id=span_id, cue_ids=[cue.id for cue in cues], slices=slices,
+        speaker=next((cue.speaker_hint for cue in cues if cue.speaker_hint), None),
+        relation_kind="causal" if any(re.search(r"\bbecause\b", cue.text, re.I) for cue in cues) else "continuation",
+        has_reaction_prefix=bool(prefix), reaction_prefix_en=prefix,
+    )
+
+
+def _validated_span_translation(
+    span: UtteranceSpan, unified_ko: str, by_id: Mapping[str, str],
+) -> SpanTranslation | None:
+    """A projection must preserve its unified utterance and its continuity."""
+    if set(by_id) != set(span.cue_ids) or any(not by_id[cid].strip() for cid in span.cue_ids):
+        return None
+    combined = " ".join(by_id[cid] for cid in span.cue_ids)
+    # Layout punctuation/whitespace can change at slice boundaries, but words
+    # may not be fabricated, lost, or reordered relative to the unified draft.
+    normalize = lambda text: re.sub(r"[\W_]", "", text)
+    if not unified_ko.strip() or normalize(combined) != normalize(unified_ko):
+        return None
+    if validate_span_continuity(span, by_id):
+        return None
+    reaction = ""
+    if span.has_reaction_prefix:
+        match = re.match(r"^[가-힣]{1,5}\?", by_id[span.cue_ids[0]].strip())
+        reaction = match.group(0) if match else ""
+    return SpanTranslation(
+        span_id=span.span_id, cue_ids=span.cue_ids, unified_ko=unified_ko.strip(),
+        reaction_prefix_ko=reaction, cue_fragments=dict(by_id),
+    )
+
 def repair_span_calques(
     ws: Workspace,
     txt_client: Any,
@@ -1055,11 +1095,22 @@ def repair_span_calques(
     levels = levels or {}
     rev_map = _reverse_level_map(levels, ws)
     obs_map = _obs_by_id(observations)
-    candidate_spans: list[CueSpan] = []
+    candidate_spans: list[UtteranceSpan] = []
     seen_cues: set[str] = set(excluded_cues or ())
     neighbor_map: dict[str, tuple[str, str]] = {}
     for sc in scenes:
         sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
+        observed_cues = [
+            cue.model_copy(update={"speaker_hint": obs_map[cue.id].speaker})
+            if cue.id in obs_map and obs_map[cue.id].speaker else cue
+            for cue in sc_cues
+        ]
+        # Longer utterances are repaired by repair_discourse_units as a whole;
+        # a pair transaction must never rewrite only their first two slots.
+        seen_cues.update(
+            cid for span in build_utterance_spans(observed_cues)
+            if len(span.cue_ids) > 2 for cid in span.cue_ids
+        )
         # Pass 1: Protect already-inverted spans (unless they have a duplicate with an adjacent cue)
         for idx_p in range(len(sc_cues) - 1):
             c1, c2 = sc_cues[idx_p], sc_cues[idx_p + 1]
@@ -1067,6 +1118,9 @@ def repair_span_calques(
             if not k1 or not k2 or k2.lstrip().startswith("-"):
                 continue
             sp = detect_syntactic_spans([c1, c2], obs_map).get(c1.id)
+            source_span = _utterance_for_unit([c1, c2], f"{c1.id}..{c2.id}")
+            if validate_span_continuity(source_span, ko):
+                continue
             if sp is not None and sp.policy == "REVERSE_SOV_PERMITTED" and not _is_svo_premature_verb_close(k1, k2):
                 prev_k = ko.get(sc_cues[idx_p - 1].id, "").strip() if idx_p > 0 else ""
                 next_k = ko.get(sc_cues[idx_p + 2].id, "").strip() if idx_p + 2 < len(sc_cues) else ""
@@ -1083,13 +1137,15 @@ def repair_span_calques(
                 continue
             sp_pair = detect_syntactic_spans([c1, c2], obs_map)
             sp = sp_pair.get(c1.id)
-            if sp is not None and sp.policy == "REVERSE_SOV_PERMITTED" and _is_svo_premature_verb_close(k1, k2):
+            source_span = _utterance_for_unit([c1, c2], f"{c1.id}..{c2.id}")
+            broken = bool(validate_span_continuity(source_span, ko))
+            if sp is not None and (broken or sp.policy == "REVERSE_SOV_PERMITTED") and (broken or _is_svo_premature_verb_close(k1, k2)):
                 seen_cues.add(c1.id)
                 seen_cues.add(c2.id)
                 prev_k = ko.get(sc_cues[idx_c - 1].id, "").strip() if idx_c > 0 else ""
                 next_k = ko.get(sc_cues[idx_c + 2].id, "").strip() if idx_c + 2 < len(sc_cues) else ""
                 neighbor_map[sp.span_id] = (prev_k, next_k)
-                candidate_spans.append(sp)
+                candidate_spans.append(source_span)
                 idx_c += 2
                 continue
             idx_c += 1
@@ -1097,7 +1153,7 @@ def repair_span_calques(
         return []
 
     # Role-2 Clef Span-Pair Calque Diagnosis (batched <= 20 spans per decide call)
-    flagged_spans: list[CueSpan] = []
+    flagged_spans: list[UtteranceSpan] = []
     for b_start in range(0, len(candidate_spans), 20):
         sub_spans = candidate_spans[b_start : b_start + 20]
         state_obj: dict[str, Any] = {}
@@ -1128,7 +1184,7 @@ def repair_span_calques(
             c1_id, c2_id = sp.cue_ids
             k1, k2 = ko.get(c1_id, "").strip(), ko.get(c2_id, "").strip()
             p_calq = float((ans.get(f"sp{idx}_calque") or {}).get("noul", 0.0))
-            if p_calq >= calque_threshold or _has_cross_cue_duplicate(k1, k2) or _DANGLING_PP_RE.search(_last_turn_text(k2)):
+            if validate_span_continuity(sp, ko) or p_calq >= calque_threshold or _has_cross_cue_duplicate(k1, k2) or _DANGLING_PP_RE.search(_last_turn_text(k2)):
                 flagged_spans.append(sp)
 
     if not flagged_spans:
@@ -1138,7 +1194,7 @@ def repair_span_calques(
     is_av_model = "gemini" in model_name.lower()
     sys_prompt = "You are a professional subtitle localization specialist translating fictional motion picture dialogue into Korean."
 
-    def _rewrite_one(sp: CueSpan) -> tuple[CueSpan, str, str] | None:
+    def _rewrite_one(sp: UtteranceSpan) -> tuple[UtteranceSpan, SpanTranslation] | None:
         c1_id, c2_id = sp.cue_ids
         c1, c2 = cues_by_id[c1_id], cues_by_id[c2_id]
         curr1, curr2 = ko.get(c1_id, "").strip(), ko.get(c2_id, "").strip()
@@ -1181,11 +1237,15 @@ def repair_span_calques(
             n1 = rewrap(raw1, 14, 12)
             n2 = rewrap(raw2, 14, 12)
             prev_k, next_k = neighbor_map.get(sp.span_id, ("", ""))
-            if _is_valid_sov_rewrite(curr1, curr2, n1, n2, tl1, tl2, require_open_c1=True, prev_ko=prev_k, next_ko=next_k):
-                return (sp, n1, n2)
+            candidate = _validated_span_translation(
+                sp, getattr(res, "unified_sov_ko", f"{n1} {n2}"),
+                {c1_id: n1, c2_id: n2},
+            )
+            if candidate is not None and _is_valid_sov_rewrite(curr1, curr2, n1, n2, tl1, tl2, require_open_c1=True, prev_ko=prev_k, next_ko=next_k):
+                return sp, candidate
         return None
 
-    candidates_out: list[tuple[CueSpan, str, str]] = []
+    candidates_out: list[tuple[UtteranceSpan, SpanTranslation]] = []
     with ThreadPoolExecutor(max_workers=min(8, len(flagged_spans))) as ex:
         for item_res in ex.map(_rewrite_one, flagged_spans):
             if item_res is not None:
@@ -1199,7 +1259,8 @@ def repair_span_calques(
         sub_cands = candidates_out[b_start : b_start + 10]
         state_obj = {}
         questions = {}
-        for idx, (sp, n1, n2) in enumerate(sub_cands):
+        for idx, (sp, translation) in enumerate(sub_cands):
+            n1, n2 = (translation.cue_fragments[cid] for cid in sp.cue_ids)
             c1_id, c2_id = sp.cue_ids
             en_span = f"{cues_by_id[c1_id].text.replace(chr(10),' ').strip()} {cues_by_id[c2_id].text.replace(chr(10),' ').strip()}"
             curr_span = f"{ko.get(c1_id,'').replace(chr(10),' ').strip()} {ko.get(c2_id,'').replace(chr(10),' ').strip()}"
@@ -1220,7 +1281,8 @@ def repair_span_calques(
                     "instructions": f"Span {sp.span_id}: Does combined Korean {val!r} read in natural Korean head-final SOV order without English afterthought calque?",
                 }
         ans = gate_client.decide(stage="s4b_gate", state=state_obj, questions=questions)
-        for idx, (sp, n1, n2) in enumerate(sub_cands):
+        for idx, (sp, translation) in enumerate(sub_cands):
+            n1, n2 = (translation.cue_fragments[cid] for cid in sp.cue_ids)
             pid = f"g{idx}"
             c1_id, c2_id = sp.cue_ids
             d_om = float((ans.get(f"{pid}_cand_omiss") or {}).get("noul", 0.0)) - float((ans.get(f"{pid}_curr_omiss") or {}).get("noul", 0.0))
@@ -1228,8 +1290,8 @@ def repair_span_calques(
             cand_om = float((ans.get(f"{pid}_cand_omiss") or {}).get("noul", 0.0))
             cand_mi = float((ans.get(f"{pid}_cand_mistrans") or {}).get("noul", 0.0))
             if (d_om <= 0.25 or cand_om <= 0.35) and (d_mi <= 0.15 or cand_mi <= 0.25):
-                accepted_edits.append(CueEdit(cue_id=c1_id, new_ko=n1, reason="span_sov_inversion", kind="polish"))
-                accepted_edits.append(CueEdit(cue_id=c2_id, new_ko=n2, reason="span_sov_inversion", kind="polish"))
+                accepted_edits.append(CueEdit(cue_id=c1_id, new_ko=n1, reason="span_sov_inversion", kind="polish", span_id=sp.span_id))
+                accepted_edits.append(CueEdit(cue_id=c2_id, new_ko=n2, reason="span_sov_inversion", kind="polish", span_id=sp.span_id))
     return accepted_edits
 
 
@@ -1721,22 +1783,42 @@ def repair_discourse_units(
     rev_map = _reverse_level_map(levels, ws)
     obs_map = _obs_by_id(observations)
 
-    all_units: list[tuple[Scene, DiscourseUnit]] = []
+    all_units: list[tuple[Scene, UtteranceSpan]] = []
+    unit_metadata: dict[str, tuple[str, tuple[str, ...]]] = {}
     for sc in scenes:
-        sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
-        for du in build_discourse_units(sc_cues, obs_map):
-            if len(du.cue_ids) >= 3 or du.speech_act_type == "hesitation_completion":
-                all_units.append((sc, du))
+        sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id]
+        observed_cues = [
+            cue.model_copy(update={"speaker_hint": obs_map[cue.id].speaker})
+            if cue.id in obs_map and obs_map[cue.id].speaker else cue
+            for cue in sc_cues
+        ]
+        legacy = build_discourse_units(sc_cues, obs_map)
+        for unit in legacy:
+            unit_metadata[unit.unit_id] = (unit.speech_act_type, unit.hold_ellipsis_cue_ids)
+        candidates = [span for span in build_utterance_spans(observed_cues) if len(span.cue_ids) >= 2]
+        covered = {cid for span in candidates for cid in span.cue_ids}
+        for unit in legacy:
+            if not covered.intersection(unit.cue_ids):
+                candidates.append(_utterance_for_unit([cues_by_id[cid] for cid in unit.cue_ids], unit.unit_id))
+                covered.update(unit.cue_ids)
+        for span in candidates:
+            if any(not ko.get(cid, "").strip() for cid in span.cue_ids):
+                continue
+            unit_metadata.setdefault(span.span_id, (
+                span.relation_kind,
+                tuple(sl.cue_id for sl in span.slices if not sl.is_reaction_prefix and not sl.is_sentence_terminal and sl.text.rstrip().endswith(("...", "…"))),
+            ))
+            all_units.append((sc, span))
     if not all_units:
         return []
 
-    flagged_units: list[tuple[Scene, DiscourseUnit]] = []
+    flagged_units: list[tuple[Scene, UtteranceSpan]] = []
     for b_start in range(0, len(all_units), 12):
         sub = all_units[b_start : b_start + 12]
         unit_dicts = [
             {
-                "unit_id": du.unit_id,
-                "speech_act_type": du.speech_act_type,
+                "unit_id": du.span_id,
+                "speech_act_type": unit_metadata[du.span_id][0],
                 "en": [cues_by_id[cid].text.replace("\n", " ") for cid in du.cue_ids],
                 "ko": [ko.get(cid, "").replace("\n", " ") for cid in du.cue_ids],
             }
@@ -1745,7 +1827,7 @@ def repair_discourse_units(
         qs = build_clef_discourse_questions(unit_dicts)
         ans = gate_client.decide(stage=_STAGE_BLIND, state={"units": unit_dicts}, questions=qs)
         for sc, du in sub:
-            uid = du.unit_id
+            uid = du.span_id
             scores = [
                 float((ans.get(f"{uid}__{axis}") or {}).get("noul", 0.0))
                 for axis in (
@@ -1755,7 +1837,7 @@ def repair_discourse_units(
                     "q4_unnatural_speech_act",
                 )
             ]
-            if max(scores, default=0.0) >= flag_threshold:
+            if validate_span_continuity(du, ko) or max(scores, default=0.0) >= flag_threshold:
                 flagged_units.append((sc, du))
     if not flagged_units:
         return []
@@ -1765,8 +1847,9 @@ def repair_discourse_units(
         "Translate multi-cue English discourse units as one unified Korean thought first, then slice across cues."
     )
 
-    def _rewrite_unit(item: tuple[Scene, DiscourseUnit]) -> tuple[DiscourseUnit, dict[str, str]] | None:
+    def _rewrite_unit(item: tuple[Scene, UtteranceSpan]) -> tuple[UtteranceSpan, SpanTranslation] | None:
         sc, du = item
+        act_type, hold_ids = unit_metadata[du.span_id]
         sc_cues = [cues_by_id[cid] for cid in sc.cue_ids if cid in cues_by_id]
         idx_map = {c.id: idx for idx, c in enumerate(sc_cues)}
         first_idx = idx_map.get(du.cue_ids[0], 0)
@@ -1780,25 +1863,25 @@ def repair_discourse_units(
             curr_k = ko.get(cid, "").strip()
             _, tl = _effective_cue_level(c_obj, curr_k, *levels.get(cid, ("-", "-")), rev_map)
             target_lvls[cid] = tl
-            hold_note = " [HOLD-ELLIPSIS: keep open with '...' or particle; NEVER invent a placeholder noun]" if cid in du.hold_ellipsis_cue_ids else ""
+            hold_note = " [HOLD-ELLIPSIS: keep open with '...' or particle; NEVER invent a placeholder noun]" if cid in hold_ids else ""
             cues_lines.append(
                 f"- {cid} (target_level={tl}{hold_note}): EN={c_obj.text.replace(chr(10), ' ')!r} | Current_KO={curr_k!r}"
             )
         prompt = (
-            f"## Multi-Cue Discourse Unit Rewrite ({du.unit_id}, type={du.speech_act_type})\n"
+            f"## Multi-Cue Discourse Unit Rewrite ({du.span_id}, type={act_type}, relation={du.relation_kind})\n"
             f"Prev Cue: {prev_c.text.replace(chr(10), ' ') if prev_c else 'None'!r} (KO: {ko.get(prev_c.id, '') if prev_c else ''!r})\n"
             + "\n".join(cues_lines)
             + f"\nNext Cue: {next_c.text.replace(chr(10), ' ') if next_c else 'None'!r} (KO: {ko.get(next_c.id, '') if next_c else ''!r})\n\n"
-            f"1. Resolve idioms ('Let\\'s call it a favor' -> '도움을 하나 드린다고 생각하시죠 / 도움을 드리죠', 'more concrete gesture' -> '감사의 표시로'), omitted subjects/addressees, and referents in `idiom_and_referent_resolution`.\n"
-            f"2. Write `unified_korean_discourse` as one connected Korean utterance for the entire unit.\n"
-            f"3. Slice `unified_korean_discourse` across `cues` for exact cue_ids {list(du.cue_ids)} (<=2 lines, <=14 chars/line, exact target_level)."
+            f"1. Resolve idioms, omitted subjects/addressees, and referents in `idiom_and_referent_resolution`.\n"
+            f"2. Write `unified_korean_discourse` as one connected Korean utterance. Preserve the independent reaction {du.reaction_prefix_en!r} separately; never close the continuation body early or turn a causal clause into a question.\n"
+            f"3. Allocate every word of that utterance, in order, across exact cue_ids {list(du.cue_ids)} (<=2 lines, <=14 chars/line, exact target_level). Do not repeat the predicate across cues."
         )
         try:
             res = txt_client.generate(stage=_STAGE_REGEN, prompt=prompt, schema=_DiscourseUnitRewrite, system=sys_prompt)
         except GeminiBlocked:
             return None
         by_id = {s.cue_id: s.ko.replace("\\n", "\n").strip() for s in res.cues if s.ko.strip()}
-        if set(by_id.keys()) != set(du.cue_ids):
+        if len(res.cues) != len(du.cue_ids) or set(by_id.keys()) != set(du.cue_ids):
             return None
         cleaned: dict[str, str] = {}
         for cid in du.cue_ids:
@@ -1809,16 +1892,19 @@ def repair_discourse_units(
             lines_n = [l for l in new_k.splitlines() if l.strip()]
             if not lines_n or len(lines_n) > 2 or any(len(l) > 16 for l in lines_n):
                 return None
-            if _violates_target_level(new_k, target_lvls[cid]):
+            if _violates_target_level(new_k, target_lvls[cid]) or curr_k.lstrip().startswith("-") != new_k.lstrip().startswith("-"):
                 return None
-            if cid in du.hold_ellipsis_cue_ids and "선물" in new_k and "gift" not in cues_by_id[cid].text.lower() and "present" not in cues_by_id[cid].text.lower():
+            if cid in hold_ids and "선물" in new_k and "gift" not in cues_by_id[cid].text.lower() and "present" not in cues_by_id[cid].text.lower():
                 return None
             cleaned[cid] = new_k
         if all(cleaned[cid] == ko.get(cid, "").strip() for cid in du.cue_ids):
             return None
-        return du, cleaned
+        translation = _validated_span_translation(du, res.unified_korean_discourse, cleaned)
+        if translation is None:
+            return None
+        return du, translation
 
-    rewritten: list[tuple[DiscourseUnit, dict[str, str]]] = []
+    rewritten: list[tuple[UtteranceSpan, SpanTranslation]] = []
     with ThreadPoolExecutor(max_workers=min(8, len(flagged_units))) as ex:
         for r_item in ex.map(_rewrite_unit, flagged_units):
             if r_item is not None:
@@ -1831,25 +1917,32 @@ def repair_discourse_units(
         sub_r = rewritten[b_start : b_start + 10]
         state_obj = {}
         questions = {}
-        for idx, (du, cand_map) in enumerate(sub_r):
+        for idx, (du, translation) in enumerate(sub_r):
+            cand_map = translation.cue_fragments
             pid = f"du{idx}"
             en_j = " / ".join(cues_by_id[cid].text.replace("\n", " ") for cid in du.cue_ids)
             curr_j = " / ".join(ko.get(cid, "").replace("\n", " ") for cid in du.cue_ids)
             cand_j = " / ".join(cand_map[cid].replace("\n", " ") for cid in du.cue_ids)
-            state_obj[pid] = {"en": en_j, "curr_ko": curr_j, "cand_ko": cand_j}
+            state_obj[pid] = {"en": en_j, "curr_ko": curr_j, "cand_ko": cand_j, "unified_ko": translation.unified_ko}
             questions[f"{pid}_discourse_improved"] = {
                 "type": "noul",
                 "instructions": (
-                    f"Unit {du.unit_id} (EN={en_j!r}): Does Candidate KO ({cand_j!r}) connect more naturally as a unified Korean thought/speech act than Current KO ({curr_j!r}) without omitting core meaning?"
+                    f"Unit {du.span_id} (EN={en_j!r}): Does Candidate KO ({cand_j!r}) connect more naturally as a unified Korean thought/speech act than Current KO ({curr_j!r}) without omitting core meaning?"
                 ),
             }
         ans = gate_client.decide(stage="s4b_gate", state=state_obj, questions=questions)
-        for idx, (du, cand_map) in enumerate(sub_r):
+        for idx, (du, translation) in enumerate(sub_r):
+            cand_map = translation.cue_fragments
             p_imp = float((ans.get(f"du{idx}_discourse_improved") or {}).get("noul", 0.0))
-            if p_imp >= 0.50:
+            if p_imp >= 0.50 and not validate_span_continuity(du, cand_map):
+                # Include unchanged slots as transaction members so every
+                # register/identity precondition is checked before commit.
                 for cid in du.cue_ids:
-                    if cand_map[cid] != ko.get(cid, "").strip():
-                        accepted.append(CueEdit(cue_id=cid, new_ko=cand_map[cid], reason=f"discourse_unit:{du.speech_act_type}", kind="polish"))
+                    accepted.append(CueEdit(
+                        cue_id=cid, new_ko=cand_map[cid],
+                        reason=f"discourse_unit:{unit_metadata[du.span_id][0]}",
+                        kind="polish", span_id=du.span_id,
+                    ))
     return accepted
 
 
@@ -1910,6 +2003,7 @@ def repair_echo_and_register_windows(
     observations,
     *,
     levels: dict[str, tuple[str, str]] | None = None,
+    context_map: ContextMap | None = None,
 ) -> list[CueEdit]:
     """Repair cross-cue/cross-scene lexical echo links, moniker payoffs, and intra-scene register oscillations."""
     levels = levels or {}
@@ -1951,7 +2045,7 @@ def repair_echo_and_register_windows(
         }
         if set(by_id.keys()) != set(cids):
             continue
-        anchored = enforce_echo_and_moniker_anchors(ordered_cues, {**ko, **by_id})
+        anchored = enforce_echo_and_moniker_anchors(ordered_cues, {**ko, **by_id}, context_map=context_map)
         by_id = {cid: anchored[cid] for cid in cids}
         if any(
             _violates_target_level(
