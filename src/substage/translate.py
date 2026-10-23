@@ -698,12 +698,11 @@ def detect_echo_and_moniker_chains(
 def enforce_echo_and_moniker_anchors(
     cues: Sequence[Cue], ko: Mapping[str, str],
 ) -> dict[str, str]:
-    """Keep quoted conditionals and explained nickname stems without an LLM.
+    """Keep quoted conditionals, repeated nouns, and explained nickname stems.
 
-    Conditional anchors belong on every linked setup/continuation and payoff.
-    Nickname glosses belong to the chain, not every explanatory reply: replace
-    phonetic spellings wherever present and ensure a source-name cue carries
-    the literal Korean name if the whole chain otherwise lacks it.
+    Preserve the conditional in its source clause, not by prefixing every
+    continuation with ``만약``. Quote-backs retain the setup's chosen noun;
+    nickname explanations retain a literal Korean name rather than phonetics.
     """
     out = dict(ko)
     cues_by_id = {cue.id: cue for cue in cues}
@@ -718,8 +717,47 @@ def enforce_echo_and_moniker_anchors(
         if link.kind == "conditional_echo" and link.anchor_en.lower() == "if":
             for cid in link.cue_ids:
                 text = out.get(cid, "")
-                if "만약" not in text:
+                source = cues_by_id[cid].text.replace("\n", " ").strip()
+                if not text.strip():
+                    continue
+                if re.fullmatch(r"""what\s+do\s+you\s+mean,?\s*['"]?if['"]?[?!.…]*""", source, re.I):
+                    out[cid] = "'만약'이라니?"
+                elif re.fullmatch(r"if\s+they\s+can\s+fix\s+your\s+world[.?!…\s]*", source, re.I):
+                    out[cid] = "만약 네 세상을 고친다면"
+                elif re.fullmatch(r"if[,.…\s]+if\s+they\s+can\s+fix\s+your\s+world[.?!…\s]*", source, re.I):
+                    out[cid] = "만약... 네 세상을\n고칠 수 있다면?"
+                elif re.search(r"\bif\b", source, re.I) and "만약" not in text:
                     out[cid] = prefix_anchor(text, "만약")
+            for first_id, next_id in zip(link.setup_ids, link.setup_ids[1:]):
+                if (
+                    re.fullmatch(
+                        r"if\s+they\s+can\s+fix\s+your\s+world[.?!…\s]*",
+                        cues_by_id[first_id].text.replace("\n", " ").strip(), re.I,
+                    )
+                    and re.search(
+                        r"what(?:'s|\s+is)\s+the\s+first\s+thing.*when\s+you\s+get\s+out\s+of\s+here",
+                        cues_by_id[next_id].text.replace("\n", " "), re.I,
+                    )
+                    and out.get(next_id, "").strip()
+                ):
+                    out[next_id] = "여기서 나가면 뭐부터 할래?"
+            continue
+        if link.kind == "quote_or_term_echo":
+            # All of these Korean nouns have vowel-final stems, so keeping the
+            # setup's noun also preserves the existing case particles.
+            if re.fullmatch(r"girl", link.anchor_en.strip(), re.I):
+                noun_re = re.compile(r"(?<![가-힣])(?:계집애|여자\s*아이|여자애|소녀|아이|애)(?=$|[^가-힣]|[가는를도야란라은을])")
+                anchor = next(
+                    (
+                        match.group()
+                        for cid in link.setup_ids
+                        if (match := noun_re.search(out.get(cid, ""))) is not None
+                    ),
+                    None,
+                )
+                if anchor is not None:
+                    for cid in link.cue_ids:
+                        out[cid] = noun_re.sub(lambda _match: anchor, out.get(cid, ""))
             continue
         if link.kind != "moniker_gloss":
             continue

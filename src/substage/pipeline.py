@@ -1020,6 +1020,9 @@ def run(
     # ---- S0 ingest (+ cue extraction) ------------------------------------
     video = _ingest(ws, gc, ck, video, en_sub, title, year, media_id)
     cues = _load_cues(ck, video)
+    sync_offset_ms = getattr(settings, "sync_offset_ms", 0)
+    if sync_offset_ms:
+        cues = acquire.apply_sync_offset(cues, sync_offset_ms)
     save_model(ws.path("cues.json"), cues)
     if _stopped(stop_after, "ingest", ws):
         return ws.data_dir
@@ -1139,6 +1142,14 @@ def run(
             ws.path("timeline.yaml"),
             lambda: narrative.build_timeline(ws, txt, context_map, scenes, cues, observations),
         )
+    timeline_errata = getattr(timeline, "errata", ())
+    if timeline_errata:
+        context_map, timeline = narrative.apply_errata(
+            context_map, timeline, list(timeline_errata),
+            set(getattr(timeline, "accepted_errata_ids", range(len(timeline_errata)))),
+        )
+        save_model(ws.path("context_map.yaml"), context_map)
+        save_model(ws.path("timeline.yaml"), timeline)
     if _stopped(stop_after, "timeline", ws):
         return ws.data_dir
 
@@ -1493,12 +1504,14 @@ def run(
             input_hash(
                 ko_hash,
                 clef_client.model,
-                "clef-6axis-v1",
+                "clef-6axis-ost-lyric-v2",
                 register_map,
+                _Observations(items=observations), _Cues(items=cues), _Scenes(items=scenes),
             ),
             _Flags,
             lambda: _Flags(items=review.diagnose_with_decisions(
                 ws, clef_client, scenes, cues_by_id, ko, levels=levels, scene_images=scene_images,
+                observations=observations,
             )),
         ).items
     else:
@@ -1541,15 +1554,26 @@ def run(
         )
     semantic_stage("s4-regeneration")
     edits += finale_edits + regen_edits
+    repair_gate = None
     if decisions_cfg:
         repair_gate = llm.ClefDecisionsClient(
             ws, settings, review.resolve_decisions_model(decisions_cfg, has_images=False),
         )
         for repair_stage, repair_fn in (
             ("span_calques", review.repair_span_calques),
+            ("pragmatic_literal_traps", review.repair_pragmatic_literal_traps),
             ("discourse_units", review.repair_discourse_units),
             ("echo_and_register", review.repair_echo_and_register_windows),
         ):
+            repair_ws = _semantic_workspace(ws, lineage, repair_stage)
+            repair_args = (
+                (repair_ws, txt, dedicated_av or gc, repair_gate, scenes, cues_by_id, snapshots, ko, observations)
+                if repair_stage == "pragmatic_literal_traps"
+                else (repair_ws, txt, repair_gate, scenes, cues_by_id, ko, observations)
+            )
+            repair_kwargs = {"levels": levels}
+            if repair_stage == "pragmatic_literal_traps":
+                repair_kwargs["proxy_video"] = Path(video.proxy_path) if video.proxy_path else None
             repair_raw = _ck(
                 ck,
                 repair_stage,
@@ -1557,20 +1581,33 @@ def run(
                     _hash_ko(ko), _Cues(items=cues), _Scenes(items=scenes),
                     _Observations(items=observations), register_map, levels,
                     txt.settings.model_main, repair_gate.model,
-                    settings.cpl_limit, settings.cpl_one_line, "gen1-discourse-echo-v1",
+                    settings.cpl_limit, settings.cpl_one_line, "gen2-hybrid-jev-v2",
+                    _Snapshots(items=snapshots_list), video,
                     *([lineage.model_dump_json()] if lineage is not None else []),
                 ),
                 _Edits,
-                lambda: _Edits(items=repair_fn(
-                    _semantic_workspace(ws, lineage, repair_stage), txt, repair_gate,
-                    scenes, cues_by_id, ko, observations, levels=levels,
-                )),
+                lambda: _Edits(items=repair_fn(*repair_args, **repair_kwargs)),
             ).items
             ko, repair_edits = _apply_edits(
                 ko, list(repair_raw), gate, repair_stage, allow_omission=lineage is not None,
             )
             edits += repair_edits
             semantic_stage(f"s4-{repair_stage}")
+        register_raw = review.repair_scene_register_oscillations(
+            _semantic_workspace(ws, lineage, "scene_register"), txt, repair_gate,
+            scenes, cues_by_id, ko, observations, table=table,
+            pairs_by_cue=pairs_by_cue, context_map=context_map,
+        )
+        ko, register_edits = _apply_edits(
+            ko, register_raw, gate, "scene_register", allow_omission=lineage is not None,
+        )
+        edits += register_edits
+        semantic_stage("s4-scene-register")
+    if series_pins:
+        ko = series_state.enforce_series_pins(
+            ko, cues, active_bible, series_pins, context_map=context_map,
+            register_map=register_map, observations=observations, scenes=scenes,
+        )
     anchored_ko = translate.enforce_echo_and_moniker_anchors(cues, ko)
     edits += [
         CueEdit(cue_id=cid, new_ko=text, reason="echo_moniker_anchor", kind="polish")
@@ -1701,17 +1738,24 @@ def run(
             events, cues, ko, active_bible, series_pins, context_map=context_map,
             register_map=register_map, observations=observations, scenes=scenes,
         )
+        protected_anchors = ("만약", "장님 알", "순결")
         for ev in events:
             clean_ev = ev.ko.removeprefix("{\\an8}")
+            normalized_ev = " ".join(clean_ev.split())
             if len(ev.cue_ids) == 1 and ev.cue_ids[0] in ko:
-                ko[ev.cue_ids[0]] = clean_ev
+                cid = ev.cue_ids[0]
+                previous = " ".join(ko[cid].split())
+                if not any(anchor in previous and anchor not in normalized_ev for anchor in protected_anchors):
+                    ko[cid] = clean_ev
             elif len(ev.cue_ids) == 2 and all(cid in ko for cid in ev.cue_ids):
                 c0_id, c1_id = ev.cue_ids
                 c0_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", ko[c0_id])
                 ev_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", clean_ev)
                 if c0_alnum and c0_alnum not in ev_alnum:
-                    ko[c0_id] = clean_ev
-                    ko[c1_id] = clean_ev
+                    for cid in (c0_id, c1_id):
+                        previous = " ".join(ko[cid].split())
+                        if not any(anchor in previous and anchor not in normalized_ev for anchor in protected_anchors):
+                            ko[cid] = clean_ev
     if lineage is not None:
         semantic_trace.append({
             "stage": "s5c-layout", "kind": "actual-display-events",
@@ -1726,6 +1770,10 @@ def run(
         route_metadata["semantic_stages"] = semantic_trace
         _write_route_artifact(ws, route_metadata)
     save_model(ws.path("layout.json"), events)
+    for st in translations_list:
+        for tc in st.cues:
+            tc.ko = ko.get(tc.cue_id, tc.ko)
+    save_model(ws.path("translations.json"), translations_list)
     _save_report()
     if _stopped(stop_after, "layout", ws):
         return ws.data_dir

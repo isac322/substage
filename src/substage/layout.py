@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -761,6 +762,41 @@ def _dedupe_events(events: list[_Ev], settings) -> list[_Ev]:
 # ---------------------------------------------------------------- condense
 
 
+def _required_anchors_for_cues(cues: Sequence[Cue] | None) -> dict[str, tuple[str, ...]]:
+    """Protect echo and nickname anchors, including split setup continuations."""
+    if not cues:
+        return {}
+    from .translate import detect_echo_and_moniker_chains
+
+    index_by_id = {cue.id: i for i, cue in enumerate(cues)}
+    required: dict[str, tuple[str, ...]] = {}
+    for chain in detect_echo_and_moniker_chains(cues):
+        anchor_en = chain.anchor_en.lower()
+        if chain.kind == "conditional_echo" and anchor_en == "if":
+            anchors = ("만약",)
+        elif chain.kind == "moniker_gloss" and "blind al" in anchor_en:
+            anchors = ("장님 알",)
+        elif chain.kind == "moniker_gloss" and "chastity" in anchor_en:
+            anchors = ("순결",)
+        else:
+            continue
+        cue_ids = set(chain.cue_ids)
+        for cid in chain.setup_ids:
+            i = index_by_id[cid]
+            while i + 1 < len(cues):
+                current, following = cues[i], cues[i + 1]
+                if not (
+                    current.text.rstrip().endswith(("...", "…", ","))
+                    or following.text.lstrip()[:1].islower()
+                ) or following.start_ms - current.end_ms > 800:
+                    break
+                cue_ids.add(following.id)
+                i += 1
+        for cid in cue_ids:
+            required[cid] = tuple(dict.fromkeys((*required.get(cid, ()), *anchors)))
+    return required
+
+
 class _Condensed(BaseModel):
     event_id: str
     ko: str
@@ -781,6 +817,7 @@ filler, honorific padding, obvious pronouns and
 repetition. An event with two '- ' lines has two speakers: keep exactly two
 '- ' lines, one per speaker. Use a single '\\n' if the text needs two lines.
 The style guide (system text) decides what to cut and how to phrase it.
+NEVER drop conditional echo anchors ('만약') or nickname trait glosses ('장님 알', '순결이') present in the Korean line.
 
 Events (id | duration | max chars | speakers | Korean):
 {events}
@@ -820,6 +857,7 @@ def _condense(gc, events: list[_Ev], settings, gate=None, *, lineage=None, cues=
     its register level is rejected."""
     from .gemini import GeminiBlocked  # local: layout stays importable without the SDK
 
+    req_anchors = _required_anchors_for_cues(cues)
     over = [
         (f"e{i + 1:04d}", ev)
         for i, ev in enumerate(events)
@@ -856,10 +894,22 @@ def _condense(gc, events: list[_Ev], settings, gate=None, *, lineage=None, cues=
             ev = by_id.pop(item.event_id, None)
             if ev is None or not item.ko.strip():
                 continue
+            before = " ".join(ev.ko.split())
+            required = {
+                anchor for cid in ev.cue_ids for anchor in req_anchors.get(cid, ())
+            }
+            required.update(
+                anchor for anchor in ("만약", "장님 알", "순결") if anchor in before
+            )
+            if "if" in ev.en_text.lower():
+                required.add("만약")
+            protected = tuple(anchor for anchor in required if anchor in before)
             if ev.semantic:
                 from .translate import reattribute_semantic_fragments
 
                 candidate = normalize_punct(item.ko.strip())
+                if any(anchor not in " ".join(candidate.split()) for anchor in protected):
+                    continue
                 if cps_chars(candidate) >= cps_chars(ev.ko):
                     continue
                 if gate is not None and not gate.check("layout", ev.cue_ids, ev.ko, candidate):
@@ -869,7 +919,10 @@ def _condense(gc, events: list[_Ev], settings, gate=None, *, lineage=None, cues=
                     candidate, [fragment for turn in ev.turns for fragment in turn.fragments],
                     stage="layout-condense:semantic-reattribute",
                 )
-                ev.ko = render_retained(attributed.fragments, settings.cpl_limit, settings.cpl_one_line)
+                new = render_retained(attributed.fragments, settings.cpl_limit, settings.cpl_one_line)
+                if any(anchor not in " ".join(new.split()) for anchor in protected):
+                    continue
+                ev.ko = new
                 ev.turns = [
                     _Turn(fragment.speaker.strip().lower() if fragment.speaker else f"?{ev.cue_ids[0]}#{n}",
                           _flat(fragment.text), (fragment,))
@@ -885,6 +938,8 @@ def _condense(gc, events: list[_Ev], settings, gate=None, *, lineage=None, cues=
                 ev.tags = [*ev.tags, "condense", "semantic-reattribute"]
                 continue
             new = rewrap(normalize_punct(item.ko.strip()), settings.cpl_limit, settings.cpl_one_line)
+            if any(anchor not in " ".join(new.split()) for anchor in protected):
+                continue
             new_turns = _speakers(new.split("\n"))
             was_dual = len(ev.turns) == 2
             if (new_turns is not None) != was_dual or cps_chars(new) >= cps_chars(ev.ko):

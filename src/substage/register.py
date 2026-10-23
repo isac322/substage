@@ -1318,9 +1318,10 @@ class RegisterReport(BaseModel):
 
 class RegisterGate:
     """Edit gate: a changed line passes only if each new level is the table
-    level, unknown, or the line's old level, and it brings in no address
-    pronoun other than the table's (none at all when the pair's edge has
-    pronoun "none"). Rejections accumulate in ``rejections``."""
+    level, unknown, or the line's old level. Merged cues with a unanimous
+    table level must retain that level. No edit may introduce an address
+    pronoun other than the table's (none when the edge's pronoun is "none").
+    Rejections accumulate in ``rejections``."""
 
     def __init__(
         self,
@@ -1416,9 +1417,26 @@ class RegisterGate:
             edge = self.table.edge(*pair)
             if edge is not None:
                 allowed_pronouns = set() if edge.pronoun == "none" else {edge.pronoun}
+        merged_level = None
+        if use_table and self.table is not None and len(cue_ids) > 1:
+            member_levels: set[str | None] = set()
+            for cid in cue_ids:
+                member_pairs = self.turn_pairs_by_cue.get(cid) or (self.pairs_by_cue.get(cid),)
+                for member_pair in member_pairs:
+                    if member_pair is None and len(member_pairs) == 1:
+                        member_pair = self.pairs_by_cue.get(cid)
+                    member_levels.add(
+                        binary(self.table.level_at(*member_pair, cid)) if member_pair else None
+                    )
+            if len(member_levels) == 1 and None not in member_levels:
+                merged_level = "haeyo" if "J" in member_levels else "hae"
+                table_level = merged_level
         old, new = _turn_levels(old_ko), _turn_levels(new_ko)
         reason = None
-        if len(old) == 1 and len(new) == 1:
+        if merged_level is not None:
+            if any(level is not None and not same_level(level, merged_level) for level in new):
+                reason = "level"
+        elif len(old) == 1 and len(new) == 1:
             if not turn_levels_match(new[0], table_level, old[0]):
                 reason = "level"
         else:

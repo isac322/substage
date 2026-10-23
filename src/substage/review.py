@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import resources
@@ -51,7 +52,7 @@ from .translate import (
     detect_syntactic_spans,
     enforce_echo_and_moniker_anchors,
 )
-from .validate import is_translated_lyric, ost_kind, rewrap
+from .validate import classify_lyric_cue, is_translated_lyric, ost_kind, rewrap
 
 WINDOW_SCENES = 3
 
@@ -513,17 +514,18 @@ def diagnose_with_decisions(
     levels: dict[str, tuple[str, str]] | None = None,
     scene_images: dict[str, list[Path]] | None = None,
     threshold: float = 0.55,
+    observations=(),
 ) -> list[ReadFlag]:
-    """Decomposed 6-axis System One diagnosis (60 atomic questions per 10-cue batch).
+    """Diagnose dialogue, on-screen text, and lyrics with atomic Clef questions.
 
-    Evaluates each translated cue across 6 orthogonal atomic axes (`omission`,
-    `mistrans`, `translat`, `register`, `verbose`, `dash_err`) in a single
-    forward pass (`output_tokens = 0`) over the bilingual scene context,
-    ``PRO_SUBTITLE_LAWS``, and optional scene keyframes. Emits ``ReadFlag``
-    items carrying the structured diagnosis vector for surgical regeneration.
+    Dialogue uses six error axes; OST uses five positive quality axes and
+    lyrics use three positive lyric-policy axes. Ten cues keep every mixed
+    batch within the 64-question limit. Emit structured ``ReadFlag`` items
+    with the bilingual scene context and optional scene keyframes.
     """
     levels = levels or {}
     rev_map = _reverse_level_map(levels, ws)
+    obs_map = _obs_by_id(observations)
     scene_images = scene_images or {}
     cp = Checkpoints(ws, "review")
     flags: list[ReadFlag] = []
@@ -554,6 +556,14 @@ def diagnose_with_decisions(
                     "en": en_txt,
                     "ko": ko_txt,
                 })
+                if c.source == "ost" or c.id.startswith("ost-"):
+                    questions.update(build_clef_ost_quality_questions([cues_state[-1]]))
+                    continue
+                if c.lyric:
+                    scene_cues = [cues_by_id[cid] for cid in scene.cue_ids if cid in cues_by_id]
+                    cues_state[-1]["lyric_mode"] = classify_lyric_cue(c, obs_map, scene_cues)
+                    questions.update(build_clef_lyric_questions([cues_state[-1]]))
+                    continue
                 questions[f"{cid}_omission"] = {
                     "type": "noul",
                     "instructions": (
@@ -644,6 +654,22 @@ def diagnose_with_decisions(
         cues_meta = {item_c["id"]: item_c for item_c in state_obj.get("cues", [])}
         for c in sub:
             cid = c.id
+            if c.source == "ost" or c.id.startswith("ost-") or c.lyric:
+                axes = (
+                    ("complete", "accurate", "register_ok", "layout_ok", "prop_gag_caption_ok")
+                    if c.source == "ost" or c.id.startswith("ost-")
+                    else ("no_bgm_leak", "rhyme_or_sense_ok", "no_note_and_clean_format")
+                )
+                problems = [
+                    f"{axis}(P_bad={1.0 - score:.2f})"
+                    for axis in axes
+                    if (score := float((answers.get(f"{cid}_{axis}") or {}).get("noul", 1.0))) <= 1.0 - threshold
+                ]
+                if problems:
+                    chunk_flags.append(ReadFlag(
+                        cue_id=cid, problem="[Clef OST/Lyric Diagnosis] " + "; ".join(problems),
+                    ))
+                continue
             p_om = float((answers.get(f"{cid}_omission") or {}).get("noul", 0.0))
             p_mi = float((answers.get(f"{cid}_mistrans") or {}).get("noul", 0.0))
             p_tr = float((answers.get(f"{cid}_translat") or {}).get("noul", 0.0))
@@ -1521,8 +1547,11 @@ def evaluate_clef_ost_intent(
     """Run the 4-question divide-and-conquer Clef intent gate and combine verdicts."""
     if not items:
         return {}
-    questions = build_clef_ost_intent_questions(items)
-    ans = gate_client.decide(stage=stage, state={"items": list(items)}, questions=questions)
+    ans: dict[str, Any] = {}
+    for start in range(0, len(items), 16):
+        batch = list(items[start : start + 16])
+        questions = build_clef_ost_intent_questions(batch)
+        ans.update(gate_client.decide(stage=stage, state={"items": batch}, questions=questions))
     verdicts: dict[str, dict[str, Any]] = {}
     for it in items:
         cid = str(it["id"])
@@ -1875,7 +1904,7 @@ def build_clef_echo_register_questions(windows: Sequence[dict[str, Any]]) -> dic
 def repair_echo_and_register_windows(
     ws: Workspace,
     txt_client: Any,
-    gate_client: ClefDecisionsClient,
+    gate_client: ClefDecisionsClient | None,
     scenes: list[Scene],
     cues_by_id: dict[str, Cue],
     ko: dict[str, str],
@@ -1886,7 +1915,7 @@ def repair_echo_and_register_windows(
     """Repair cross-cue/cross-scene lexical echo links, moniker payoffs, and intra-scene register oscillations."""
     levels = levels or {}
     settings = txt_client.settings
-    obs_map = _obs_by_id(observations)
+    rev_map = _reverse_level_map(levels, ws)
     ordered_cues = [cues_by_id[cid] for sc in scenes for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
     echo_links = detect_echo_and_moniker_chains(ordered_cues)
     if not echo_links:
@@ -1925,6 +1954,27 @@ def repair_echo_and_register_windows(
             continue
         anchored = enforce_echo_and_moniker_anchors(ordered_cues, {**ko, **by_id})
         by_id = {cid: anchored[cid] for cid in cids}
+        if any(
+            _violates_target_level(
+                by_id[cid],
+                _effective_cue_level(cues_by_id[cid], by_id[cid], *levels.get(cid, ("-", "-")), rev_map)[1],
+            )
+            for cid in cids
+        ):
+            continue
+        if gate_client is not None:
+            window = {
+                "window_id": el.unit_id,
+                "en": [cues_by_id[cid].text for cid in cids],
+                "ko": [by_id[cid] for cid in cids],
+                "previous_ko": [ko.get(cid, "") for cid in cids],
+            }
+            questions = build_clef_echo_register_questions([window])
+            answers = gate_client.decide(
+                stage="s4b_echo_register_gate", state={"windows": [window]}, questions=questions,
+            )
+            if any(float((answers.get(key) or {}).get("noul", 0.0)) < 0.50 for key in questions):
+                continue
         for cid in cids:
             if by_id[cid] != ko.get(cid, "").strip():
                 accepted.append(CueEdit(cue_id=cid, new_ko=by_id[cid], reason=f"echo_link:{el.kind}", kind="polish"))
@@ -1950,6 +2000,21 @@ def repair_scene_register_oscillations(
     or whose Sejong POS ``EF`` level oscillates against the scene's locked directed
     ``(speaker -> addressee)`` dyad register, and rewrites only the oscillating cues.
     """
+    if table is not None and any(
+        shift.at_cue == shift.until_cue for edge in table.map.edges for shift in edge.shifts
+    ):
+        # A zero-length shift cannot establish a change in the addressed register.
+        table = RegisterTable(
+            table.map.model_copy(update={
+                "edges": [
+                    edge.model_copy(update={
+                        "shifts": [shift for shift in edge.shifts if shift.at_cue != shift.until_cue],
+                    })
+                    for edge in table.map.edges
+                ],
+            }),
+            [cue.id for cue in sorted(cues_by_id.values(), key=lambda cue: cue.start_ms)],
+        )
     raw_pairs = dict(pairs_by_cue or {})
     accepted: list[CueEdit] = []
     sys_prompt = (
@@ -2001,7 +2066,7 @@ def repair_scene_register_oscillations(
             target = dyad_lvls.get(pair, "-") if pair else "-"
             flag = " [FIX REGISTER]" if cid in bad_cids else ""
             rows_txt.append(
-                f"- {cid}{flag} ({pair[0]}>{pair[1]}={target if pair else '-'}): "
+                f"- {cid}{flag} ({pair[0] + '>' + pair[1] if pair else '-'}={target}): "
                 f"EN={cues_by_id[cid].text.replace(chr(10), ' / ')!r} | KO={ko.get(cid, '').replace(chr(10), ' / ')!r}"
             )
         prompt = (
@@ -2014,7 +2079,10 @@ def repair_scene_register_oscillations(
             res = txt_client.generate(stage=_STAGE_REGEN, prompt=prompt, schema=_EchoRegisterWindowRewrite, system=sys_prompt)
         except GeminiBlocked:
             continue
-        by_id = {s.cue_id: rewrap(s.ko.replace("\\n", "\n").strip(), 14, 12) for s in res.cues if s.ko.strip()}
+        by_id = {
+            s.cue_id: rewrap(s.ko.replace("\\n", "\n").strip(), txt_client.settings.cpl_limit, txt_client.settings.cpl_one_line)
+            for s in res.cues if s.ko.strip()
+        }
         for cid in bad_cids:
             cand_ko = by_id.get(cid)
             if not cand_ko or cand_ko == ko.get(cid, "").strip():
@@ -2022,7 +2090,13 @@ def repair_scene_register_oscillations(
             if has_internal_register_clash(cand_ko):
                 continue
             pair = locked_pairs.get(cid)
-            if pair and pair in dyad_lvls and _violates_target_level(cand_ko, dyad_lvls[pair]):
+            target = dyad_lvls.get(pair, "-") if pair else "-"
+            if cid in dash_pairs:
+                p1, p2 = dash_pairs[cid]
+                w1, w2 = dyad_lvls.get(p1), dyad_lvls.get(p2)
+                if w1 and w2:
+                    target = f"{p1[0]}:{w1}/{p2[0]}:{w2}" if not same_level(w1, w2) else w1
+            if _violates_target_level(cand_ko, target):
                 continue
             accepted.append(CueEdit(cue_id=cid, new_ko=cand_ko, reason="scene_register_coherence", kind="register"))
     return accepted
