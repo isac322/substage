@@ -1111,6 +1111,8 @@ def _enforce_series_phrase_locks(en_text: str, ko_text: str) -> str:
         ):
             if v in out:
                 out = out.replace(v, "성장 아니면 사장")
+    if "with you or against you" in en_low:
+        out = out.replace("무버에서 그딴 건 절대 안 잊어요", "내 편인지 아닌지는 절대 안 잊는다")
     if any(k in en_low for k in ("heaven, hell", "heaven,\nhell", "expose heaven", "through heaven", "look at heaven")):
         out = out.replace("천국이든 지옥이든", "헤븐이든 헬이든").replace("천국과 지옥", "헤븐과 헬").replace("천국", "헤븐").replace("지옥", "헬")
     return out

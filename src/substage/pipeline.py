@@ -1826,6 +1826,15 @@ def run(
         for cid, tc in tc_by_id.items()
     }
     srt, _sidecar = emit_mod.emit(ws, video, cues, ko, meta, events)
+    translations_changed = False
+    for st in translations_list:
+        for tc in st.cues:
+            final_ko = ko.get(tc.cue_id, tc.ko)
+            if tc.ko != final_ko:
+                tc.ko = final_ko
+                translations_changed = True
+    if translations_changed:
+        save_model(ws.path("translations.json"), translations_list)
     if lineage is not None:
         payload = json.loads(_sidecar.read_text(encoding="utf-8"))
         payload["semantic"] = {
