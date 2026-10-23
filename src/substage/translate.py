@@ -588,7 +588,29 @@ def detect_echo_and_moniker_chains(
         if _ECHO_COND_PAYOFF_RE.search(t_cur):
             token = "unless" if "unless" in t_cur.lower() else "if"
             pat = re.compile(rf"\b{token}\b", re.IGNORECASE)
-            setups = tuple(p.id for p in prior if pat.search(p.text))
+            setup_ids = [p.id for p in prior if pat.search(p.text)]
+            # A setup may continue into an immediately following cue (for
+            # example, "If they can fix your world..." -> "what's the first
+            # thing ...?"). Keep that continuation in the same echo unit so
+            # the Korean conditional anchor is preserved across both cues.
+            setup_set = set(setup_ids)
+            cue_index = {cue.id: pos for pos, cue in enumerate(spoken)}
+            for setup_id in tuple(setup_ids):
+                setup_pos = cue_index.get(setup_id)
+                if setup_pos is None or setup_pos + 1 >= idx:
+                    continue
+                continuation = spoken[setup_pos + 1]
+                setup_text = spoken[setup_pos].text.rstrip()
+                continuation_text = continuation.text.lstrip()
+                if (
+                    setup_text.endswith(("...", "…", ",", "—"))
+                    or (
+                        bool(re.match(r"[a-z]", continuation_text))
+                        and continuation.start_ms - spoken[setup_pos].end_ms <= 800
+                    )
+                ):
+                    setup_set.add(continuation.id)
+            setups = tuple(cue.id for cue in spoken[win_start:idx] if cue.id in setup_set)
             if setups:
                 used_payoffs.add(cur.id)
                 links.append(
@@ -671,6 +693,63 @@ def detect_echo_and_moniker_chains(
                         )
                     )
     return links
+
+
+def enforce_echo_and_moniker_anchors(
+    cues: Sequence[Cue], ko: Mapping[str, str],
+) -> dict[str, str]:
+    """Keep quoted conditionals and explained nickname stems without an LLM.
+
+    Conditional anchors belong on every linked setup/continuation and payoff.
+    Nickname glosses belong to the chain, not every explanatory reply: replace
+    phonetic spellings wherever present and ensure a source-name cue carries
+    the literal Korean name if the whole chain otherwise lacks it.
+    """
+    out = dict(ko)
+    cues_by_id = {cue.id: cue for cue in cues}
+
+    def prefix_anchor(text: str, anchor: str) -> str:
+        text = text.strip()
+        if text.startswith("-"):
+            return f"- {anchor} {text[1:].lstrip()}".rstrip()
+        return f"{anchor} {text}".rstrip()
+
+    for link in detect_echo_and_moniker_chains(cues):
+        if link.kind == "conditional_echo" and link.anchor_en.lower() == "if":
+            for cid in link.cue_ids:
+                text = out.get(cid, "")
+                if "만약" not in text:
+                    out[cid] = prefix_anchor(text, "만약")
+            continue
+        if link.kind != "moniker_gloss":
+            continue
+        anchor_en = link.anchor_en.lower()
+        if re.search(r"\bblind\s+al\b", anchor_en):
+            anchor_ko = "장님 알"
+            phonetic = r"(?:블라인드\s*알|장님\s+알)"
+            source_name = r"\bblind\s+al\b"
+        elif "chastity" in anchor_en:
+            anchor_ko = "순결이"
+            phonetic = r"채스티티"
+            source_name = r"\bchastity\b"
+        else:
+            continue
+        for cid in link.cue_ids:
+            text = out.get(cid, "")
+            repaired = re.sub(phonetic, anchor_ko, text)
+            if repaired != text:
+                out[cid] = repaired
+        if any(anchor_ko in out.get(cid, "") for cid in link.cue_ids):
+            continue
+        name_id = next(
+            (
+                cid for cid in link.cue_ids
+                if re.search(source_name, cues_by_id[cid].text, re.IGNORECASE)
+            ),
+            link.setup_ids[0],
+        )
+        out[name_id] = prefix_anchor(out.get(name_id, ""), anchor_ko)
+    return out
 
 
 _PRAGMA_PARTITIVE_RE = re.compile(

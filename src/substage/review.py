@@ -49,6 +49,7 @@ from .translate import (
     detect_echo_and_moniker_chains,
     detect_pragmatic_risk_cues,
     detect_syntactic_spans,
+    enforce_echo_and_moniker_anchors,
 )
 from .validate import is_translated_lyric, ost_kind, rewrap
 
@@ -1829,7 +1830,7 @@ class _EchoRegisterWindowRewrite(BaseModel):
         description="Identify the exact shared Korean anchor stem for any echoed English word/condition ('만약' for quoted 'if', semantic trait gloss like '장님 알'/'순결이' for explained monikers) and the single locked interpersonal speech level (해체 vs 해요체) across the conversation."
     )
     cues: list[_DiscourseCueSlice] = Field(
-        description="Rewritten Korean subtitle for each cue_id in the window (<=2 lines, <=14 chars/line)."
+        description="Rewritten Korean subtitle for each cue_id in the window (<=2 lines, obey configured character limit)."
     )
 
 
@@ -1884,6 +1885,7 @@ def repair_echo_and_register_windows(
 ) -> list[CueEdit]:
     """Repair cross-cue/cross-scene lexical echo links, moniker payoffs, and intra-scene register oscillations."""
     levels = levels or {}
+    settings = txt_client.settings
     obs_map = _obs_by_id(observations)
     ordered_cues = [cues_by_id[cid] for sc in scenes for cid in sc.cue_ids if cid in cues_by_id and ko.get(cid, "").strip()]
     echo_links = detect_echo_and_moniker_chains(ordered_cues)
@@ -1909,15 +1911,20 @@ def repair_echo_and_register_windows(
             f"{rows_txt}\n\n"
             f"Rewrite `cues` for {cids} so every setup and payoff shares one consistent Korean anchor stem "
             f"('만약' on all setups & payoffs when 'if' is echoed; semantic trait gloss like '장님 알'/'순결이' when moniker meaning is explained) "
-            f"and consistent interpersonal speech level."
+            f"and consistent interpersonal speech level (<=2 lines, <={settings.cpl_limit} chars/line)."
         )
         try:
             res = txt_client.generate(stage=_STAGE_REGEN, prompt=prompt, schema=_EchoRegisterWindowRewrite, system=sys_prompt)
         except GeminiBlocked:
             continue
-        by_id = {s.cue_id: rewrap(s.ko.replace("\\n", "\n").strip(), 14, 12) for s in res.cues if s.ko.strip()}
+        by_id = {
+            s.cue_id: rewrap(s.ko.replace("\\n", "\n").strip(), settings.cpl_limit, settings.cpl_one_line)
+            for s in res.cues if s.ko.strip()
+        }
         if set(by_id.keys()) != set(cids):
             continue
+        anchored = enforce_echo_and_moniker_anchors(ordered_cues, {**ko, **by_id})
+        by_id = {cid: anchored[cid] for cid in cids}
         for cid in cids:
             if by_id[cid] != ko.get(cid, "").strip():
                 accepted.append(CueEdit(cue_id=cid, new_ko=by_id[cid], reason=f"echo_link:{el.kind}", kind="polish"))

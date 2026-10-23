@@ -1106,7 +1106,7 @@ def test_detect_echo_and_moniker_chains_and_scene_register_lock():
     links = detect_echo_and_moniker_chains([c1128, c1129, c1134, c1135])
     cond_links = [el for el in links if el.kind == "conditional_echo"]
     assert len(cond_links) == 1
-    assert cond_links[0].setup_ids == ("c1128", "c1134")
+    assert cond_links[0].setup_ids == ("c1128", "c1129", "c1134")
     assert cond_links[0].payoff_ids == ("c1135",)
 
     # 2. Descriptive moniker gloss ('Blind Al' -> 'You call her "Blind Al?"' -> "Well, she's blind.")

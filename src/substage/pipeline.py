@@ -4,7 +4,7 @@ run() order (contract):
   ingest -> scenes -> upload proxy -> viewing_pass -> context_map -> timeline
   -> register (S2r) -> snapshots -> ost cues -> translate_video (+ firm-register
   retry when Settings.register_retry) -> review_windows -> finale_audit (applied) -> blind_read
-  -> regenerate -> run_s5 -> picture_check(changed ∪ edited ∪ special cues)
+  -> regenerate -> span/discourse/echo repair -> run_s5 -> picture_check(changed ∪ edited ∪ special cues)
   -> normalize/rewrap edited -> validate.check -> layout (S5c: split/merge/
   retime/condense) -> emit
 
@@ -1541,6 +1541,47 @@ def run(
         )
     semantic_stage("s4-regeneration")
     edits += finale_edits + regen_edits
+    if decisions_cfg:
+        repair_gate = llm.ClefDecisionsClient(
+            ws, settings, review.resolve_decisions_model(decisions_cfg, has_images=False),
+        )
+        for repair_stage, repair_fn in (
+            ("span_calques", review.repair_span_calques),
+            ("discourse_units", review.repair_discourse_units),
+            ("echo_and_register", review.repair_echo_and_register_windows),
+        ):
+            repair_raw = _ck(
+                ck,
+                repair_stage,
+                input_hash(
+                    _hash_ko(ko), _Cues(items=cues), _Scenes(items=scenes),
+                    _Observations(items=observations), register_map, levels,
+                    txt.settings.model_main, repair_gate.model,
+                    settings.cpl_limit, settings.cpl_one_line, "gen1-discourse-echo-v1",
+                    *([lineage.model_dump_json()] if lineage is not None else []),
+                ),
+                _Edits,
+                lambda: _Edits(items=repair_fn(
+                    _semantic_workspace(ws, lineage, repair_stage), txt, repair_gate,
+                    scenes, cues_by_id, ko, observations, levels=levels,
+                )),
+            ).items
+            ko, repair_edits = _apply_edits(
+                ko, list(repair_raw), gate, repair_stage, allow_omission=lineage is not None,
+            )
+            edits += repair_edits
+            semantic_stage(f"s4-{repair_stage}")
+    anchored_ko = translate.enforce_echo_and_moniker_anchors(cues, ko)
+    edits += [
+        CueEdit(cue_id=cid, new_ko=text, reason="echo_moniker_anchor", kind="polish")
+        for cid, text in anchored_ko.items() if text != ko.get(cid, "")
+    ]
+    ko = anchored_ko
+    semantic_stage("s4-echo-moniker-anchors")
+    for st in translations_list:
+        for tc in st.cues:
+            tc.ko = ko.get(tc.cue_id, tc.ko)
+    save_model(ws.path("translations.json"), translations_list)
     save_model(ws.path("edits.json"), edits)
     _save_report()
     if _stopped(stop_after, "review", ws):
