@@ -2719,11 +2719,6 @@ def _normalize_chunk_ost_mmss(items: list[OnScreenText], start_ms: int, end_ms: 
 
 
 _FRAME_MS_23976 = 1000.0 * 1001.0 / 24000.0
-# ffmpeg showinfo shot boundaries of the Deadpool & Wolverine "SPAM" insert
-# (01:16:34.465 --> 01:16:38.469); the S2v report lands at a wall-clock second.
-_SPAM_INSERT_WINDOW_MS = (4_589_000, 4_635_000)
-_SPAM_INSERT_SHOT_MS = (4_594_465, 4_598_469)
-
 
 def snap_ost_ms_to_frame(ms: int, *, is_end: bool = False) -> int:
     """Snap a raw integer-second OST estimate onto a 23.976 fps frame boundary.
@@ -2807,15 +2802,13 @@ def realign_ost_to_anchors_and_gaps(
                 # minute and _absolute_ost added the clip start on top: the
                 # span drifted later by ``sec_in_min``. Accept the wall-clock
                 # reading only when it lands in a dialogue-free visual gap.
-                cand_start = o.start_ms - sec_in_min
-                cand_end = min(o.end_ms - sec_in_min, ch.end_ms)
+                dur = max(1000, o.end_ms - o.start_ms)
+                cand_start = ((o.start_ms - sec_in_min + 500) // 1000) * 1000
+                cand_end = min(cand_start + dur, ch.end_ms)
                 if ch.start_ms <= cand_start < ch.end_ms and not any(
                     c.start_ms < cand_end and c.end_ms > cand_start for c in chunk_cues
                 ):
                     start, end = cand_start, cand_end
-            lo, hi = _SPAM_INSERT_WINDOW_MS
-            if _norm_text(clean_text) == "spam" and lo <= start < hi:
-                start, end = _SPAM_INSERT_SHOT_MS
             if (start, end) != (o.start_ms, o.end_ms):
                 offset = start - o.start_ms
                 beats = [
@@ -3046,8 +3039,11 @@ def ost_cues(
 
 
 def _is_frame_exact_cue(c: Cue) -> bool:
+    near_whole_start = min(c.start_ms % 1000, 1000 - (c.start_ms % 1000)) <= 45
+    near_whole_end = min(c.end_ms % 1000, 1000 - (c.end_ms % 1000)) <= 45
+    if near_whole_start and near_whole_end:
+        return False
     return (c.start_ms % 10 != 0) or (c.end_ms % 10 != 0)
-
 
 def _is_half_sec_cue(c: Cue) -> bool:
     return (c.start_ms % 500 == 0) and (c.end_ms % 500 == 0)

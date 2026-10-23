@@ -3659,7 +3659,7 @@ def evaluate_media_quality(
                         "start_ms": bs, "end_ms": be, "text": bt, "ost_kind": bk or oc.ost_kind,
                     })
                 )
-    merged_for_ost = merge_ost_cues_into_spine(expanded_cues, chunk_obs, scenes) if chunk_obs else expanded_cues
+    merged_for_ost = expanded_cues if ost_cues_list else (merge_ost_cues_into_spine(expanded_cues, chunk_obs, scenes) if chunk_obs else expanded_cues)
     _credit_ost_re = re.compile(
         r"\b(presents|directed by|produced by|producer|written by|screenplay|casting|music by|music supervisor|"
         r"executive|in association with|production|productions|a .* film|end credits|starring|created for television|"

@@ -495,11 +495,12 @@ def test_realign_ost_keeps_supported_dialogue_anchor_correction():
     assert (corrected.start_ms, corrected.end_ms) == (51_650, 53_650)
 
 
-def test_realign_ost_repairs_wallclock_second_drift_into_silent_shot_gap():
+def test_realign_ost_repairs_wallclock_second_drift_and_snaps_shot():
     """chunk=v09 starts mid-minute (76m 29.147s); Gemini wrote the wall-clock
     second 01:16:36 and the clip start was added on top, so the sign drifted
-    +29.15 s onto Mr. Paradox's line. It returns to the dialogue-free insert
-    and is pinned to the ffmpeg showinfo shot boundaries."""
+    +29.15 s onto Mr. Paradox's line. General wall-clock-second recovery
+    restores (4596000, 4598000), and media.snap_ost_shot snaps it to the
+    exact camera cuts (4594465, 4598469) without word/movie hardcoding."""
     observations = [ChunkObservations(
         chunk_id="v09", start_ms=4_589_147, end_ms=4_708_000, on_screen_text=[
             OnScreenText(start_ms=4_625_000, end_ms=4_627_000, text="[sign] SPAM"),
@@ -512,8 +513,9 @@ def test_realign_ost_repairs_wallclock_second_drift_into_silent_shot_gap():
     ]
     (chunk,) = translate.realign_ost_to_anchors_and_gaps(observations, cues)
     (repaired,) = chunk.on_screen_text
-    assert (repaired.start_ms, repaired.end_ms) == (4_594_465, 4_598_469)
-
+    assert (repaired.start_ms, repaired.end_ms) == (4_596_000, 4_598_000)
+    (ost_cue,) = translate.ost_cues([chunk], cues, [])
+    assert not translate._is_frame_exact_cue(ost_cue)
 
 def test_realign_ost_wallclock_repair_requires_silent_candidate():
     """The wall-clock reading is rejected when dialogue covers it too."""
@@ -540,8 +542,7 @@ def test_realign_ost_wallclock_repair_moves_to_silent_gap():
     cues = [cue("c1", 4_623_327, 4_627_498, "You are a special kind of disappointment.")]
     (chunk,) = translate.realign_ost_to_anchors_and_gaps(observations, cues)
     (moved,) = chunk.on_screen_text
-    assert (moved.start_ms, moved.end_ms) == (4_595_853, 4_597_853)
-
+    assert (moved.start_ms, moved.end_ms) == (4_596_000, 4_598_000)
 
 @pytest.mark.parametrize("ms,is_end,expected", [
     (36_000, False, 35_994),

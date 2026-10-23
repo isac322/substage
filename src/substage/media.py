@@ -498,24 +498,33 @@ def slice_proxy_clip(ws: Workspace, video: Path, start_s: float, end_s: float) -
     end = max(start + 0.1, float(end_s))
     st = video.stat()
     key = hashlib.sha256(
-        f"vertex-clip-v1|{video}|{st.st_size}|{st.st_mtime_ns}|{start:.3f}|{end:.3f}".encode()
+        f"vertex-clip-v2-tc|{video}|{st.st_size}|{st.st_mtime_ns}|{start:.3f}|{end:.3f}".encode()
     ).hexdigest()[:24]
     out = ws.cache(f"vertex-clips/{key}.mp4")
     if out.is_file() and out.stat().st_size > 0:
         return out
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = _partial(out)
-    _run(
-        [
-            ffmpeg_bin(), "-nostdin", "-v", "error", "-y",
+    ff = ffmpeg_bin()
+    base_cmd = [
+        ff, "-nostdin", "-v", "error", "-y",
+        "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-copyts",
+        "-i", str(video),
+    ]
+    tail_cmd = [
+        "-c:v", "libx264", "-crf", "32", "-preset", "ultrafast",
+        "-c:a", "aac", "-ac", "1", "-ar", "48000",
+        "-movflags", "+faststart", str(tmp),
+    ]
+    tc_vf = ["-vf", r"drawtext=text='%{pts\:hms}':x=8:y=8:fontsize=16:fontcolor=white:box=1:boxcolor=black@0.65"]
+    try:
+        _run([*base_cmd, *tc_vf, *tail_cmd], what=f"slice_proxy_clip (timecode) {video.name} {start:.1f}-{end:.1f}s")
+    except MediaError:
+        _run([
+            ff, "-nostdin", "-v", "error", "-y",
             "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-            "-i", str(video),
-            "-c:v", "libx264", "-crf", "32", "-preset", "ultrafast",
-            "-c:a", "aac", "-ac", "1", "-ar", "48000",
-            "-movflags", "+faststart", str(tmp),
-        ],
-        what=f"slice_proxy_clip {video.name} {start:.1f}-{end:.1f}s",
-    )
+            "-i", str(video), *tail_cmd,
+        ], what=f"slice_proxy_clip {video.name} {start:.1f}-{end:.1f}s")
     tmp.replace(out)
     return out
 
@@ -536,8 +545,8 @@ def snap_ost_shot(
     except ImportError:
         return obs_start_ms, obs_end_ms
 
-    pad_before = 1500
-    pad_after = 2000
+    pad_before = 2500
+    pad_after = 2500
     w_start_s = max(0.0, (obs_start_ms - pad_before) / 1000.0)
     w_dur_s = max(0.5, (obs_end_ms + pad_after) / 1000.0 - w_start_s)
     ff = ffmpeg_bin()
@@ -546,7 +555,7 @@ def snap_ost_shot(
             [
                 ff, "-nostdin", "-hide_banner", "-ss", f"{w_start_s:.3f}", "-t", f"{w_dur_s:.3f}",
                 "-i", str(video),
-                "-vf", "scale=320:180,scdet=threshold=8:sc_pass=1,metadata=print:file=-",
+                "-vf", "scale=320:180,scdet=threshold=4.5",
                 "-an", "-f", "null", "-",
             ],
             capture_output=True, text=True, timeout=15, check=False,
@@ -562,6 +571,8 @@ def snap_ost_shot(
         t_ms = int(round((w_start_s + float(m.group(2))) * 1000))
         cuts.append((t_ms, score))
 
+    if not cuts:
+        return obs_start_ms, obs_end_ms
     mid_ms = (obs_start_ms + obs_end_ms) // 2
     before_cuts = [t for t, _ in cuts if t <= mid_ms]
     after_cuts = [t for t, _ in cuts if t > mid_ms]
