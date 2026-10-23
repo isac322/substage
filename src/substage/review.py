@@ -1950,6 +1950,21 @@ def repair_scene_register_oscillations(
     or whose Sejong POS ``EF`` level oscillates against the scene's locked directed
     ``(speaker -> addressee)`` dyad register, and rewrites only the oscillating cues.
     """
+    if table is not None and any(
+        shift.at_cue == shift.until_cue for edge in table.map.edges for shift in edge.shifts
+    ):
+        # Zero-length shift spans are not evidence for a register change.
+        table = RegisterTable(
+            table.map.model_copy(update={
+                "edges": [
+                    edge.model_copy(update={
+                        "shifts": [s for s in edge.shifts if s.at_cue != s.until_cue],
+                    })
+                    for edge in table.map.edges
+                ],
+            }),
+            [cue.id for cue in sorted(cues_by_id.values(), key=lambda cue: cue.start_ms)],
+        )
     raw_pairs = dict(pairs_by_cue or {})
     accepted: list[CueEdit] = []
     sys_prompt = (
@@ -2001,7 +2016,7 @@ def repair_scene_register_oscillations(
             target = dyad_lvls.get(pair, "-") if pair else "-"
             flag = " [FIX REGISTER]" if cid in bad_cids else ""
             rows_txt.append(
-                f"- {cid}{flag} ({pair[0]}>{pair[1]}={target if pair else '-'}): "
+                f"- {cid}{flag} ({pair[0] + '>' + pair[1] if pair else '-'}={target}): "
                 f"EN={cues_by_id[cid].text.replace(chr(10), ' / ')!r} | KO={ko.get(cid, '').replace(chr(10), ' / ')!r}"
             )
         prompt = (

@@ -3142,8 +3142,9 @@ def evaluate_media_quality(
     srt_path: Path | str | None = None, ref_path: Path | str | None = None,
     sync_delta_ms: float | None = None, settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """Audit displayed subtitles without an official translation or model calls.
+    """Audit displayed subtitles without model calls.
 
+    An overlapping official event provides bounded CPL/CPS safe harbor.
     Completeness measures time coverage and untranslated output, not an LLM
     judgment of semantic fidelity. Missing narrative artifacts are disclosed.
     """
@@ -3182,10 +3183,14 @@ def evaluate_media_quality(
             (
                 p
                 for p in (
-                    dirs[0] / "official.ko.srt",
-                    dirs[0].parent / video_id / "official.ko.srt",
-                    Path("/Users/bhyoo/.local/share/substage-review") / video_id / "official.ko.srt",
-                    Path("/home/bhyoo/.local/share/substage-review") / video_id / "official.ko.srt",
+                    (dirs[0] / "official.ko.srt",)
+                    if ws_dir is not None
+                    else (
+                        dirs[0] / "official.ko.srt",
+                        dirs[0].parent / video_id / "official.ko.srt",
+                        Path("/Users/bhyoo/.local/share/substage-review") / video_id / "official.ko.srt",
+                        Path("/home/bhyoo/.local/share/substage-review") / video_id / "official.ko.srt",
+                    )
                 )
                 if p.is_file()
             ),
@@ -3325,14 +3330,48 @@ def evaluate_media_quality(
             "end_ms": event["end_ms"], "text": event["text"], **extra,
         })
 
+    official_lines = load_ko(official_ref) if official_ref is not None else []
+    official_limits = [
+        (
+            line,
+            min(16, max(settings.cpl_limit, max(map(len, line.text.splitlines()), default=0))),
+            min(12.0, max(settings.cps_max, cps_chars(line.text) / max((line.end_ms - line.start_ms) / 1000, 0.001))),
+        )
+        for line in official_lines
+    ]
+    official_left = 0
+
     _sep_slash_re = re.compile(r"(?:^|\s)/|/(?:\s|$)")
     cpl_over = cps_over = slash_count = over_two_lines_count = 0
     for event in events:
         text = event["text"]
+        event_cpl = max(map(len, text.splitlines()), default=0)
+        event_cps = cps_chars(text) / max((event["end_ms"] - event["start_ms"]) / 1000, 0.001)
+        # Official Harbor Rule: both limits must hold against the same event,
+        # with at least 150 ms of actual overlap, never just timing proximity.
+        while (
+            official_left < len(official_limits)
+            and official_limits[official_left][0].end_ms < event["start_ms"] + 150
+        ):
+            official_left += 1
+        harbor = False
+        right = official_left
+        while right < len(official_limits):
+            official, cpl_limit, cps_limit = official_limits[right]
+            if official.start_ms > event["end_ms"] - 150:
+                break
+            if (
+                min(event["end_ms"], official.end_ms) - max(event["start_ms"], official.start_ms) >= 150
+                and event_cpl <= cpl_limit
+                and event_cps <= cps_limit
+            ):
+                harbor = True
+                break
+            right += 1
         slash_hits = len(_sep_slash_re.findall(text))
         for kind, bad in (
-            ("cpl_over", any(len(part) > settings.cpl_limit for part in text.splitlines())),
-            ("cps_over", cps_chars(text) / max((event["end_ms"] - event["start_ms"]) / 1000, 0.001) > settings.cps_max),
+            ("cpl_over", not harbor and event_cpl > settings.cpl_limit),
+            ("cps_over", not harbor and event_cps > settings.cps_max),
             ("slash_separator", slash_hits > 0),
             ("over_two_lines", len(text.splitlines()) > 2),
         ):
@@ -3746,7 +3785,7 @@ def evaluate_media_quality(
         "pragmatic_eval": para_res, "actionable_defects": defects,
     }
     if ref_path is not None and Path(ref_path).is_file():
-        gold = load_ko(Path(ref_path))
+        gold = official_lines
         groups = align(cues, gold, {"quality": srt_lines})
         metrics = arm_metrics(groups, "quality", settings)
         off_sim_res = evaluate_official_similarity(groups, arm_key="quality")

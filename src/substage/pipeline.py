@@ -1571,6 +1571,26 @@ def run(
             )
             edits += repair_edits
             semantic_stage(f"s4-{repair_stage}")
+        pragmatic_raw = review.repair_pragmatic_literal_traps(
+            _semantic_workspace(ws, lineage, "pragmatic_literal_traps"), txt, dedicated_av or gc,
+            repair_gate, scenes, cues_by_id, snapshots, ko, observations,
+            levels=levels, proxy_video=Path(video.proxy_path) if video.proxy_path else None,
+        )
+        ko, pragmatic_edits = _apply_edits(
+            ko, pragmatic_raw, gate, "pragmatic_literal_traps", allow_omission=lineage is not None,
+        )
+        edits += pragmatic_edits
+        semantic_stage("s4-pragmatic_literal_traps")
+        register_raw = review.repair_scene_register_oscillations(
+            _semantic_workspace(ws, lineage, "scene_register_oscillations"), txt, repair_gate,
+            scenes, cues_by_id, ko, observations, table=table,
+            pairs_by_cue=pairs_by_cue, context_map=context_map,
+        )
+        ko, register_edits = _apply_edits(
+            ko, register_raw, gate, "scene_register_oscillations", allow_omission=lineage is not None,
+        )
+        edits += register_edits
+        semantic_stage("s4-scene_register_oscillations")
     anchored_ko = translate.enforce_echo_and_moniker_anchors(cues, ko)
     edits += [
         CueEdit(cue_id=cid, new_ko=text, reason="echo_moniker_anchor", kind="polish")
@@ -1701,17 +1721,24 @@ def run(
             events, cues, ko, active_bible, series_pins, context_map=context_map,
             register_map=register_map, observations=observations, scenes=scenes,
         )
+        protected_anchors = ("만약", "장님 알", "순결")
         for ev in events:
             clean_ev = ev.ko.removeprefix("{\\an8}")
+            normalized_ev = " ".join(clean_ev.split())
             if len(ev.cue_ids) == 1 and ev.cue_ids[0] in ko:
-                ko[ev.cue_ids[0]] = clean_ev
+                cid = ev.cue_ids[0]
+                previous = " ".join(ko[cid].split())
+                if not any(anchor in previous and anchor not in normalized_ev for anchor in protected_anchors):
+                    ko[cid] = clean_ev
             elif len(ev.cue_ids) == 2 and all(cid in ko for cid in ev.cue_ids):
                 c0_id, c1_id = ev.cue_ids
                 c0_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", ko[c0_id])
                 ev_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", clean_ev)
                 if c0_alnum and c0_alnum not in ev_alnum:
-                    ko[c0_id] = clean_ev
-                    ko[c1_id] = clean_ev
+                    for cid in (c0_id, c1_id):
+                        previous = " ".join(ko[cid].split())
+                        if not any(anchor in previous and anchor not in normalized_ev for anchor in protected_anchors):
+                            ko[cid] = clean_ev
     if lineage is not None:
         semantic_trace.append({
             "stage": "s5c-layout", "kind": "actual-display-events",

@@ -208,15 +208,18 @@ def _speakers(lines: list[str]) -> list[str] | None:
     return [turns[0], " ".join(turns[1:])]
 
 
+_KOREAN_BREAK = re.compile(r"(?:면|서|고|는데|지만|니까|거든|잖아)(?:요)?$|[,!?…~.]$")
+
+
 def _wrap_line(text: str, cpl: int, one_line: int) -> list[str]:
     """Split a single line at 어절 (space) boundaries into <=2 lines.
 
-    Text of <= `one_line` characters stays one line. Otherwise the break
-    minimizing the maximum line length is chosen; among those the split with
-    line2 >= line1 is preferred (bottom-heavy), then the most balanced one.
-    When no bottom-heavy minimizer exists, the split with the smallest line1
-    (heaviest line2) is used. A single 어절 is never split, so a word longer
-    than cpl is kept whole and reported by check().
+    Text of <= `one_line` characters stays one line. Among splits fitting
+    `cpl`, prefer Korean connective, particle, or punctuation boundaries so
+    balancing does not split a noun phrase. Then minimize the maximum line
+    length, preferring bottom-heavy splits and finally the most balanced one.
+    A single 어절 is never split, so a word longer than cpl is kept whole and
+    reported by check().
     """
     if len(text) <= one_line:
         return [text]
@@ -229,8 +232,11 @@ def _wrap_line(text: str, cpl: int, one_line: int) -> list[str]:
         l2 = len(text) - l1 - 1
         splits.append((i, l1, l2))
         l1 += 1 + len(words[i])
-    min_max = min(max(l1, l2) for _, l1, l2 in splits)
-    cands = [(i, l1, l2) for i, l1, l2 in splits if max(l1, l2) == min_max]
+    fitting = [split for split in splits if max(split[1], split[2]) <= cpl]
+    boundaries = [split for split in fitting if _KOREAN_BREAK.search(words[split[0] - 1])]
+    pool = boundaries or fitting or splits
+    min_max = min(max(l1, l2) for _, l1, l2 in pool)
+    cands = [(i, l1, l2) for i, l1, l2 in pool if max(l1, l2) == min_max]
     pref = [c for c in cands if c[2] >= c[1]]
     i = max(pref, key=lambda c: c[1])[0] if pref else min(cands, key=lambda c: c[1])[0]
     return [" ".join(words[:i]), " ".join(words[i:])]
@@ -242,10 +248,10 @@ def rewrap(ko: str, cpl: int, one_line: int | None = None) -> str:
     `one_line` (default `cpl`) is the longest text kept on a single line;
     official subtitles break anything longer into two lines of <= `cpl`.
     Never splits inside a word: a single 어절 longer than `cpl` stays whole
-    (check() reports it). A break chosen by the translator is kept when both
-    lines already fit, since it usually sits at a phrase boundary; otherwise
-    two-line splits prefer line2 >= line1. Dual-speaker cues keep exactly two
-    '- text' lines, one speaker each, even when a line exceeds `cpl` (check()
+    (check() reports it). Keep a fitting translator break unless a Korean
+    connective, particle, or punctuation boundary avoids splitting a phrase;
+    otherwise two-line splits prefer line2 >= line1. Dual-speaker cues keep
+    exactly two '- text' lines, one speaker each, even above `cpl` (check()
     then flags cpl).
     """
     lines = [" ".join(line.split()) for line in strip_clause_slashes(ko).strip().splitlines() if line.strip()]
@@ -256,8 +262,12 @@ def rewrap(ko: str, cpl: int, one_line: int | None = None) -> str:
         if turns is not None:
             return "\n".join(_dual_line(t) for t in turns)
     if len(lines) == 2 and all(len(line) <= cpl for line in lines):
-        return "\n".join(lines)
-    return "\n".join(_wrap_line(" ".join(lines), cpl, cpl if one_line is None else one_line))
+        w0 = lines[0].split(" ")
+        stray_tail = len(w0) >= 2 and bool(_KOREAN_BREAK.search(w0[-2])) and not bool(_KOREAN_BREAK.search(w0[-1]))
+        if not stray_tail:
+            return "\n".join(lines)
+    wrapped = _wrap_line(" ".join(lines), cpl, cpl if one_line is None else one_line)
+    return "\n".join(wrapped)
 
 
 # Sentence end inside a line: terminal punctuation followed by a space.
@@ -339,12 +349,10 @@ _CLAUSE_SLASH = re.compile(r"(?<=\S)\s+/\s*(?=\S)|(?<=\S)\s*/\s+(?=\S)")
 
 
 def strip_clause_slashes(text: str) -> str:
-    """Replace spaced or line-break clause separators, preserving unspaced fixed tokens."""
+    """Turn spaced clause separators into line breaks, preserving fixed tokens."""
     text = re.sub(r"[ \t]*/[ \t]*\n[ \t]*", "\n", text)
     text = re.sub(r"[ \t]*\n[ \t]*/[ \t]*", "\n", text)
     text = re.sub(r"^\s*/\s*|\s*/\s*$", "", text)
-    if "\n" not in text and len(text.strip()) > 14:
-        text = _CLAUSE_SLASH.sub("\n", text, count=1)
     return _CLAUSE_SLASH.sub(" ", text)
 
 
