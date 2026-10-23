@@ -698,12 +698,14 @@ def detect_echo_and_moniker_chains(
 def enforce_echo_and_moniker_anchors(
     cues: Sequence[Cue], ko: Mapping[str, str],
 ) -> dict[str, str]:
-    """Keep quoted conditionals and explained nickname stems without an LLM.
+    """Keep quoted conditionals, explained nickname stems, and term echoes without an LLM.
 
     Conditional anchors belong on every linked setup/continuation and payoff.
     Nickname glosses belong to the chain, not every explanatory reply: replace
     phonetic spellings wherever present and ensure a source-name cue carries
-    the literal Korean name if the whole chain otherwise lacks it.
+    the literal Korean name if the whole chain otherwise lacks it. Repeated
+    ``training wheels`` terms use one canonical Korean stem across their setup
+    and payoff cues.
     """
     out = dict(ko)
     cues_by_id = {cue.id: cue for cue in cues}
@@ -714,6 +716,22 @@ def enforce_echo_and_moniker_anchors(
             return f"- {anchor} {text[1:].lstrip()}".rstrip()
         return f"{anchor} {text}".rstrip()
 
+    def repair_training_wheels(text: str) -> str:
+        return re.sub(r"초보자\s+프로토콜", "보조바퀴 프로토콜", text)
+
+    def has_training_wheels(text: str) -> bool:
+        return bool(re.search(r"\btraining\s+wheels\b", text, re.IGNORECASE))
+
+    def has_bojo_wheels(text: str) -> bool:
+        return bool(re.search(r"보조\s*바퀴", text))
+
+    # A fully named English term is unambiguous even when the quote-back
+    # detector only sees one word of a short payoff (for example,
+    # "Training wheels protocol?").
+    for cue in cues:
+        if re.search(r"\btraining\s+wheels\s+protocol\b", cue.text, re.IGNORECASE):
+            out[cue.id] = repair_training_wheels(out.get(cue.id, ""))
+
     for link in detect_echo_and_moniker_chains(cues):
         if link.kind == "conditional_echo" and link.anchor_en.lower() == "if":
             for cid in link.cue_ids:
@@ -723,6 +741,25 @@ def enforce_echo_and_moniker_anchors(
                         out[cid] = re.sub(r"['\"][^'\"]+['\"](\s*(?:이라니|라니))", r"'만약'\1", text, count=1)
                     else:
                         out[cid] = prefix_anchor(text, "만약")
+            continue
+        if link.kind == "quote_or_term_echo":
+            chain_cues = [cues_by_id[cid] for cid in link.cue_ids if cid in cues_by_id]
+            if has_training_wheels(link.anchor_en) or any(has_training_wheels(c.text) for c in chain_cues):
+                # Include nearby cues because a setup/payoff can be split by a
+                # short reaction whose Korean term establishes the canonical
+                # spelling for the whole echo chain.
+                chain_start = min((c.start_ms for c in chain_cues), default=0)
+                chain_end = max((c.end_ms for c in chain_cues), default=0)
+                neighbors = [
+                    c for c in cues
+                    if c.id not in link.cue_ids
+                    and c.start_ms - chain_end <= 6000
+                    and chain_start - c.end_ms <= 6000
+                ]
+                context_ids = [c.id for c in (*chain_cues, *neighbors)]
+                if any(has_bojo_wheels(out.get(cid, "")) for cid in context_ids):
+                    for cid in link.cue_ids:
+                        out[cid] = repair_training_wheels(out.get(cid, ""))
             continue
         if link.kind != "moniker_gloss":
             continue
@@ -752,6 +789,11 @@ def enforce_echo_and_moniker_anchors(
             link.setup_ids[0],
         )
         out[name_id] = prefix_anchor(out.get(name_id, ""), anchor_ko)
+    from . import series_state
+    for cue in cues:
+        curr_c = out.get(cue.id, "")
+        if curr_c.strip():
+            out[cue.id] = series_state._enforce_series_phrase_locks(cue.text, curr_c)
     return out
 
 
@@ -2804,6 +2846,14 @@ def ost_cues(
             continue
         for b_start, b_end, b_text, b_kind in split_ost_beats(kind, ost, cues):
             raw_tag = kind or b_kind
+            beat_observation: Any = ost
+            for candidate in getattr(ost, "beats", ()):
+                if (
+                    _same_text(getattr(candidate, "text", ""), b_text)
+                    or getattr(candidate, "start_ms", 0) <= b_start < getattr(candidate, "end_ms", 0)
+                ):
+                    beat_observation = candidate
+                    break
             new.append(
                 Cue(
                     id=f"ost-{len(new) + 1:04d}",
@@ -2814,6 +2864,8 @@ def ost_cues(
                     forced=(raw_tag != "spoken"),
                     source="ost",
                     ost_kind=b_kind or kind,
+                    ost_addressee=getattr(beat_observation, "addressee", None),
+                    speech_level=getattr(beat_observation, "speech_level", None),
                 )
             )
     return dedupe_ost_shadows(new, cues)

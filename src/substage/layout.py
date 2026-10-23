@@ -110,6 +110,15 @@ class _Ev:
     channel: Literal["dialogue", "ost"] = "dialogue"
     position: Literal["an2", "an8"] = "an2"
 
+_AN_PREFIX = re.compile(r"^(?:\{\\an\d\})+")
+
+
+def _collapse_an_prefix(text: str) -> str:
+    """Collapse any leading ASS alignment-tag run to one top-position tag."""
+    return _AN_PREFIX.sub(lambda _: r"{\an8}", text, count=1)
+
+
+
 # ---------------------------------------------------------------- timing
 
 
@@ -180,9 +189,20 @@ def _retime(events: list[_Ev], settings) -> None:
         for ev in chain:
             ev.position = "an8" if top else "an2"
             if top:
-                s_ko = ev.ko.strip()
-                if s_ko and not (len(s_ko) >= 2 and s_ko[0] in "'\"“”‘’[" and s_ko[-1] in "'\"“”‘’]"):
+                s_ko = _collapse_an_prefix(ev.ko.strip())
+                an8 = r"{\an8}"
+                if s_ko.startswith(an8):
+                    body = s_ko[len(an8):].strip()
+                    if body and not (len(body) >= 2 and body[0] in "'\"“”‘’[" and body[-1] in "'\"“”‘’]"):
+                        ev.ko = f"{an8}'{body}'"
+                    else:
+                        ev.ko = an8 + body
+                elif s_ko and not (len(s_ko) >= 2 and s_ko[0] in "'\"“”‘’[" and s_ko[-1] in "'\"“”‘’]"):
                     ev.ko = f"'{s_ko}'"
+                else:
+                    ev.ko = s_ko
+            else:
+                ev.ko = _collapse_an_prefix(ev.ko)
     # One top-channel display at a time: combine readable pairs, else sequence.
     top_ost = [ev for ev in ost if ev.position == "an8"]
     i = 0
@@ -392,7 +412,7 @@ def _initial(
     ordered = sorted(cues, key=lambda cue: (cue.start_ms, cue.id))
     absorbed = _absorbed_timing_cues(ordered, ko, scene_of, lineage, source_cue)
     for cue in ordered:
-        text = strip_clause_slashes(ko.get(cue.id, "").strip())
+        text = _collapse_an_prefix(strip_clause_slashes(ko.get(cue.id, "").strip()))
         fragments = lineage.fragments_by_cue.get(cue.id) if lineage is not None else None
         if not text or (fragments is None and not _is_fixed(cue) and is_filler(cue, text)):
             continue
@@ -993,7 +1013,7 @@ def layout(
         _retime(events, settings)
     return [
         OutEvent(
-            start_ms=e.start, end_ms=e.end, ko=e.ko, cue_ids=e.cue_ids,
+            start_ms=e.start, end_ms=e.end, ko=_collapse_an_prefix(e.ko), cue_ids=e.cue_ids,
             fragments=[fragment for turn in e.turns for fragment in turn.fragments],
             omissions=e.omissions,
             attribution_passes=e.attribution_passes,

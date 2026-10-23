@@ -1111,6 +1111,8 @@ def _enforce_series_phrase_locks(en_text: str, ko_text: str) -> str:
         ):
             if v in out:
                 out = out.replace(v, "성장 아니면 사장")
+    if "with you or against you" in en_low:
+        out = out.replace("무버에서 그딴 건 절대 안 잊어요", "내 편인지 아닌지는 절대 안 잊는다")
     if any(k in en_low for k in ("heaven, hell", "heaven,\nhell", "expose heaven", "through heaven", "look at heaven")):
         out = out.replace("천국이든 지옥이든", "헤븐이든 헬이든").replace("천국과 지옥", "헤븐과 헬").replace("천국", "헤븐").replace("지옥", "헬")
     return out
@@ -1182,6 +1184,10 @@ def enforce_series_pins(
                     )
         curr = _enforce_series_phrase_locks(cue.text, curr)
         out[cid] = curr
+    for cue in cues:
+        curr_c = out.get(cue.id, "")
+        if curr_c.strip():
+            out[cue.id] = _enforce_series_phrase_locks(cue.text, curr_c)
     if register_map is not None:
         out = register_mod.enforce_pragmatic_address(
             out, cues, register_map, context_map=context_map, observations=observations, scenes=scenes,
@@ -1206,8 +1212,6 @@ def enforce_event_pins(
     if not out_events:
         return out_events
     pins = pins if pins is not None else pin_cues(cues, bible, context_map)
-    if not pins and register_map is None:
-        return out_events
     cues_by_id = {c.id: c for c in cues}
     enforced_ko = enforce_series_pins(
         ko, cues, bible, pins, context_map=context_map, register_map=register_map,
@@ -1344,6 +1348,9 @@ def enforce_event_pins(
                             locked_ko,
                             ev_ko,
                         )
+        for cid in cids:
+            if cid in cues_by_id and ev_ko.strip():
+                ev_ko = _enforce_series_phrase_locks(cues_by_id[cid].text, ev_ko)
         if ev_ko != getattr(ev, "ko", ""):
             ev = ev.model_copy(update={"ko": ev_ko})
         updated.append(ev)

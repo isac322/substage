@@ -4010,10 +4010,21 @@ def check_session_invariants(
         carnival_ko = ko_in_window(705000, 725000)
         if any(bad in carnival_ko for bad in ("미니밴이 아니야", "MPV지", "- 오딧세이?", "- 오디세이?")):
             failures.append({"req": "R05_carnival_polite", "video_id": video_id, "got": carnival_ko, "expected": "100% polite 해요체 across 11:45..12:05"})
-        # Nicepool scenes (57:40..59:50, 95:10..99:15): Wade <-> Nicepool 100% banmal
-        nicepool_ko = ko_in_window(3460000, 3590000) + "\n" + ko_in_window(5710000, 5735000)
-        if any(bad in nicepool_ko for bad in ("방금은 죄송해요", "전 데드풀이에요", "티도 안 나요", "괜찮아요", "페미니스트거든요", "돈 안 받아요", "그만하죠", "돌려주셔야 해요", "- 미안해요!")):
-            failures.append({"req": "R05_nicepool_banmal", "video_id": video_id, "got": nicepool_ko[:200], "expected": "Wade <-> Nicepool 100% banmal across all scenes"})
+        # Nicepool scenes (57:40..59:50, 95:10..99:15): morphological check via analyze_turn_morphemes across all clauses & turns (exempting 58:26 courtroom '재판장님')
+        from .levels import analyze_turn_morphemes, speaker_turns
+        np_polite = [
+            ev["text"]
+            for ev in dlg_evs
+            if ((3460000 <= ev["start_ms"] <= 3590000) or (5710000 <= ev["start_ms"] <= 5955000))
+            and "재판장님" not in ev["text"]
+            and any(
+                lv in ("haeyo", "hasipsio")
+                for turn in speaker_turns(ev["text"])
+                for lv in analyze_turn_morphemes(turn).addressed_levels
+            )
+        ]
+        if np_polite:
+            failures.append({"req": "R05_nicepool_banmal", "video_id": video_id, "got": np_polite[:5], "expected": "Wade <-> Nicepool 100% banmal (0 polite turns)"})
         # 42:57 "Not all of you was asleep"
         asleep_ko = ko_in_window(2577000, 2580500)
         if "다 잔 건 아니" in asleep_ko or not any(tok in asleep_ko for tok in ("거시기", "깨어 있는", "안 자던데", "서 있던데")):
@@ -4085,9 +4096,10 @@ def check_session_invariants(
         if "차 열쇠" not in car_ko and "훔쳐서" not in car_ko and "타고" not in car_ko:
             failures.append({"req": "R13_fabelmans_stole_car_lyric", "video_id": video_id, "got": car_ko, "expected": "'차 열쇠 훔쳐서\\n몰래 타고 다녔어'"})
         # Turn 107: 28:12 'Do it. Do it! / I will scratch you!' must not be missing
-        scr_ko = ko_in_window(1691500, 1696000)
-        if not scr_ko.strip():
-            failures.append({"req": "R13_fabelmans_scratch_dialogue", "video_id": video_id, "got": scr_ko, "expected": "non-empty Korean for 'Do it! / I will scratch you!'"})
+        do_it_ko = "\n".join(ev["text"] for ev in dlg_evs if 1692000 <= ev["start_ms"] <= 1693430)
+        scr_ko = "\n".join(ev["text"] for ev in dlg_evs if 1693435 <= ev["start_ms"] <= 1695234)
+        if "해 봐" not in do_it_ko or "할퀴" not in scr_ko:
+            failures.append({"req": "R13_fabelmans_scratch_dialogue", "video_id": video_id, "got": f"{do_it_ko} | {scr_ko}", "expected": "'해 봐, 해 봐!' and '할퀴어 버릴 거야!'"})
     elif video_id.startswith("super-pumped-"):
         if any(bad in full_ko_all for bad in ("크든가 죽든가", "크든지 죽든지", "크거나 죽거나", "무버에서 그딴")):
             failures.append({"req": "R10_super_pumped_idioms", "video_id": video_id, "got": "found banned calque", "expected": "'성장 아니면 사장' and '내 편인지 아닌지'"})
@@ -4101,8 +4113,24 @@ def check_session_invariants(
             "expected": {"missing_ost": 0, "collision_free_score": 100.0},
         })
 
-    total_checks = 25
+    base_reqs = {
+        "R03_zero_slash", "R03_max_two_lines", "R03_no_duplicate_an8_tags",
+        "R05_zero_scene_oscillation", "R05_zero_stranger_banmal", "R11_R12_ost_and_collision_free",
+    }
+    by_vid = {
+        "deadpool-and-wolverine-2024": {"R05_carnival_polite", "R05_nicepool_banmal", "R06_conditional_echo_if", "R07_moniker_blind_al", "R08_stripper_sov_inversion", "R10_not_all_of_you_asleep", "R11_sacred_timeline_ost"},
+        "deadpool-2016": {"R04_deadpool_two_speaker_dashes", "R05_colossus_banmal", "R07_moniker_chastity", "R10_deadpool_fuck_me_exclamation", "R10_deadpool_no_truncated_predicate"},
+        "kingsman-the-secret-service-2014": {"R05_kingsman_rest_assured", "R09_kingsman_discourse_unit", "R10_kingsman_mother_to_son"},
+        "spider-man-homecoming-2017": {"R07_training_wheels_echo"},
+        "spider-man-far-from-home-2019": {"R10_ffh_pretty_value_split_and_speech_act"},
+        "logan-2017": {"R10_logan_blow_on_pills", "R11_logan_sleepwalking_and_id_ost", "R12_logan_no_phantom_title"},
+        "the-fabelmans-2022": {"R13_fabelmans_stole_car_lyric", "R13_fabelmans_scratch_dialogue"},
+    }
+    applicable_reqs = set(base_reqs) | by_vid.get(video_id, set())
+    if video_id.startswith("super-pumped-"):
+        applicable_reqs.add("R10_super_pumped_idioms")
     failed_reqs = len({f["req"] for f in failures})
+    total_checks = max(len(applicable_reqs), failed_reqs, 1)
     pass_rate = round(max(0.0, (total_checks - failed_reqs) / total_checks * 100.0), 2)
     return {
         "video_id": video_id,

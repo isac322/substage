@@ -7,7 +7,7 @@
 """
 
 from __future__ import annotations
-
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -16,6 +16,21 @@ from .models import Cue, CueEdit, VideoInfo, OutEvent, TranslatedCue
 from .store import save_model
 from .subs import write_srt
 from .validate import strip_clause_slashes
+
+
+_AN_PREFIX = re.compile(r"^(?:\{\\an\d\})+")
+
+
+def _collapse_an_prefix(text: str) -> str:
+    """Collapse any leading ASS alignment-tag run to one top-position tag."""
+    return _AN_PREFIX.sub(lambda _: r"{\an8}", text, count=1)
+
+
+def _event_text(event: OutEvent) -> str:
+    text = _collapse_an_prefix(strip_clause_slashes(event.ko))
+    if event.position == "an8" and not text.startswith(r"{\an8}"):
+        text = r"{\an8}" + text
+    return text
 
 
 class SidecarCue(TranslatedCue):
@@ -47,23 +62,26 @@ def emit(
     sidecar_path = ws.path(f"{video.video_id}.ko.json")
 
     shown = [
-        e.model_copy(update={"ko": strip_clause_slashes(e.ko)})
+        e.model_copy(update={"ko": _event_text(e)})
         for e in events if e.ko.strip()
     ]
     rows: list[SidecarCue] = []
     for cue in cues:
         m = meta.get(cue.id)
         if m is not None:
-            rows.append(m if isinstance(m, SidecarCue) else SidecarCue(**m.model_dump()))
+            row = m if isinstance(m, SidecarCue) else SidecarCue(**m.model_dump())
+            rows.append(row.model_copy(update={"ko": _collapse_an_prefix(row.ko)}))
         elif cue.text.strip():
-            rows.append(SidecarCue(cue_id=cue.id, ko=ko.get(cue.id, "")))
+            rows.append(
+                SidecarCue(cue_id=cue.id, ko=_collapse_an_prefix(ko.get(cue.id, "")))
+            )
 
     write_srt(
         [
             (
                 e.start_ms,
                 e.end_ms,
-                f"{{\\an8}}{e.ko}" if e.position == "an8" and not e.ko.startswith("{\\an8}") else e.ko,
+                e.ko,
             )
             for e in shown
         ],

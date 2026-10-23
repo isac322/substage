@@ -1,0 +1,10 @@
+{
+  "generation": "gen5-full-session-poc",
+  "branch": "ga/gen5-full-session-poc",
+  "tag": "ga-gen5-full-session-poc",
+  "official_gold_fitness": 100.0,
+  "mean_fitness": 83.45,
+  "mean_quality_score": 99.84,
+  "flash_invariants_passed": "27/27 (0 failures across all applicable per-title 147-turn checks)",
+  "opus_invariants_passed": "27/27 (0 failures across all applicable per-title 147-turn checks)"
+}

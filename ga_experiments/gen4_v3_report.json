@@ -1,0 +1,8 @@
+{
+  "generation": "gen4-v3",
+  "branch": "ga/gen4-v3-opus-convergence",
+  "tag": "ga-gen4-v3-opus-convergence",
+  "description": "Gen-4 V3 Opus & Series Convergence: Series phrase locks, post-emit translations.json sync, 27/27 Opus 147-turn convergence",
+  "flash_passed": "27/27",
+  "opus_passed": "27/27"
+}

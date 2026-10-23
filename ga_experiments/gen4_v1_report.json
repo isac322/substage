@@ -1,0 +1,8 @@
+{
+  "generation": "gen4-v1",
+  "branch": "ga/gen4-v1-pipeline-code",
+  "tag": "ga-gen4-v1-pipeline-code",
+  "description": "Gen-4 V1 Pipeline Code: Strict Clef +0.05/+0.08 gate, duplicate {\\an8} tag collapse in layout/emit",
+  "flash_passed": "27/27",
+  "opus_passed": "27/27"
+}
