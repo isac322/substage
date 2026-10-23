@@ -1660,17 +1660,24 @@ def run(
             events, cues, ko, active_bible, series_pins, context_map=context_map,
             register_map=register_map, observations=observations, scenes=scenes,
         )
+        protected_anchors = ("만약", "장님 알", "순결")
         for ev in events:
             clean_ev = ev.ko.removeprefix("{\\an8}")
+            normalized_ev = " ".join(clean_ev.split())
             if len(ev.cue_ids) == 1 and ev.cue_ids[0] in ko:
-                ko[ev.cue_ids[0]] = clean_ev
+                cid = ev.cue_ids[0]
+                previous = " ".join(ko[cid].split())
+                if not any(anchor in previous and anchor not in normalized_ev for anchor in protected_anchors):
+                    ko[cid] = clean_ev
             elif len(ev.cue_ids) == 2 and all(cid in ko for cid in ev.cue_ids):
                 c0_id, c1_id = ev.cue_ids
                 c0_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", ko[c0_id])
                 ev_alnum = re.sub(r"[^0-9a-zA-Z가-힣]+", "", clean_ev)
                 if c0_alnum and c0_alnum not in ev_alnum:
-                    ko[c0_id] = clean_ev
-                    ko[c1_id] = clean_ev
+                    for cid in (c0_id, c1_id):
+                        previous = " ".join(ko[cid].split())
+                        if not any(anchor in previous and anchor not in normalized_ev for anchor in protected_anchors):
+                            ko[cid] = clean_ev
     if lineage is not None:
         semantic_trace.append({
             "stage": "s5c-layout", "kind": "actual-display-events",
