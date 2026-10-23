@@ -1534,13 +1534,42 @@ def run(
             protected_forms=prot_forms,
         )
     ko, regen_edits = _apply_edits(ko, list(regen_raw), gate, "regen", allow_omission=lineage is not None)
+    pragmatic_edits = []
+    repair_gate_client = None
+    if decisions_cfg:
+        repair_gate_client = llm.ClefDecisionsClient(
+            ws, settings, review.resolve_decisions_model(decisions_cfg, has_images=False)
+        )
+        pragmatic_raw = review.repair_pragmatic_literal_traps(
+            _semantic_workspace(ws, lineage, "pragmatic"), txt, dedicated_av or gc,
+            repair_gate_client, scenes, cues_by_id, snapshots, ko, observations,
+            levels=levels, proxy_video=Path(video.proxy_path) if video.proxy_path else None,
+        )
+        ko, pragmatic_edits = _apply_edits(
+            ko, pragmatic_raw, gate, "pragmatic", allow_omission=lineage is not None
+        )
+        semantic_stage("s4-pragmatic")
+    register_raw = review.repair_scene_register_oscillations(
+        _semantic_workspace(ws, lineage, "scene_register"), txt, repair_gate_client,
+        scenes, cues_by_id, ko, observations, table=table,
+        pairs_by_cue=pairs_by_cue, context_map=context_map,
+    )
+    ko, register_edits = _apply_edits(
+        ko, register_raw, gate, "scene_register", allow_omission=lineage is not None
+    )
     if series_pins:
         ko = series_state.enforce_series_pins(
             ko, cues, active_bible, series_pins, context_map=context_map,
             register_map=register_map, observations=observations, scenes=scenes,
         )
     semantic_stage("s4-regeneration")
-    edits += finale_edits + regen_edits
+    edits += finale_edits + regen_edits + pragmatic_edits + register_edits
+    save_model(ws.path("translations.json"), [
+        st.model_copy(update={
+            "cues": [tc.model_copy(update={"ko": ko.get(tc.cue_id, tc.ko)}) for tc in st.cues],
+        })
+        for st in translations_list
+    ])
     save_model(ws.path("edits.json"), edits)
     _save_report()
     if _stopped(stop_after, "review", ws):
