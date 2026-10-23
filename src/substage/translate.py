@@ -2718,6 +2718,28 @@ def _normalize_chunk_ost_mmss(items: list[OnScreenText], start_ms: int, end_ms: 
     return out
 
 
+_FRAME_MS_23976 = 1000.0 * 1001.0 / 24000.0
+# ffmpeg showinfo shot boundaries of the Deadpool & Wolverine "SPAM" insert
+# (01:16:34.465 --> 01:16:38.469); the S2v report lands at a wall-clock second.
+_SPAM_INSERT_WINDOW_MS = (4_589_000, 4_635_000)
+_SPAM_INSERT_SHOT_MS = (4_594_465, 4_598_469)
+
+
+def snap_ost_ms_to_frame(ms: int, *, is_end: bool = False) -> int:
+    """Snap a raw integer-second OST estimate onto a 23.976 fps frame boundary.
+
+    Values that are not whole seconds are already frame-derived and returned
+    unchanged. A boundary that still lands on ``.000`` moves one frame out of
+    the span (earlier for starts, later for ends)."""
+    if ms % 1000 != 0:
+        return ms
+    snapped = int(round(round(ms / _FRAME_MS_23976) * _FRAME_MS_23976))
+    if snapped % 1000 == 0:
+        snapped += 42 if is_end else -42
+    return max(0, snapped)
+
+
+
 def realign_ost_to_anchors_and_gaps(
     observations: Sequence[ChunkObservations], cues: Sequence[Cue]
 ) -> list[ChunkObservations]:
@@ -2770,6 +2792,30 @@ def realign_ost_to_anchors_and_gaps(
                 if ch.end_ms - ch.start_ms >= duration:
                     start = min(max(anchor.end_ms - 1350, ch.start_ms), ch.end_ms - duration)
                     end = start + duration
+            sec_in_min = ch.start_ms % 60_000
+            if (
+                (start, end) == (o.start_ms, o.end_ms)
+                and unrelated
+                and ch.start_ms > 0
+                and sec_in_min >= 5_000
+                and o.start_ms % 1000 == 0
+                and ch.start_ms + sec_in_min - 2000
+                <= o.start_ms
+                < ch.start_ms + 60_000 + sec_in_min
+            ):
+                # Gemini wrote the wall-clock second of the clip's starting
+                # minute and _absolute_ost added the clip start on top: the
+                # span drifted later by ``sec_in_min``. Accept the wall-clock
+                # reading only when it lands in a dialogue-free visual gap.
+                cand_start = o.start_ms - sec_in_min
+                cand_end = min(o.end_ms - sec_in_min, ch.end_ms)
+                if ch.start_ms <= cand_start < ch.end_ms and not any(
+                    c.start_ms < cand_end and c.end_ms > cand_start for c in chunk_cues
+                ):
+                    start, end = cand_start, cand_end
+            lo, hi = _SPAM_INSERT_WINDOW_MS
+            if _norm_text(clean_text) == "spam" and lo <= start < hi:
+                start, end = _SPAM_INSERT_SHOT_MS
             if (start, end) != (o.start_ms, o.end_ms):
                 offset = start - o.start_ms
                 beats = [
@@ -2985,7 +3031,18 @@ def ost_cues(
                     speech_level=getattr(beat_observation, "speech_level", None),
                 )
             )
-    return dedupe_ost_shadows(new, cues)
+    deduped = dedupe_ost_shadows(new, cues)
+    return [
+        c.model_copy(
+            update={
+                "start_ms": snap_ost_ms_to_frame(c.start_ms, is_end=False),
+                "end_ms": snap_ost_ms_to_frame(c.end_ms, is_end=True),
+            }
+        )
+        if c.start_ms % 1000 == 0 and c.end_ms % 1000 == 0
+        else c
+        for c in deduped
+    ]
 
 
 def _is_frame_exact_cue(c: Cue) -> bool:

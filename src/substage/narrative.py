@@ -140,6 +140,15 @@ def _decode_mmss_ms(ms: int) -> int:
     return ms
 
 
+def _wallclock_minute_base_ms(start_ms: int) -> int:
+    """Video-clock start of the minute containing ``start_ms``.
+
+    Gemini sometimes reports a mid-minute clip's OST as the wall-clock
+    second of that minute rather than clip-relative; this is the base such a
+    value is measured from."""
+    return (start_ms // 60_000) * 60_000
+
+
 def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
     """Put on-screen-text times on the video clock inside the clip window.
 
@@ -183,7 +192,15 @@ def _absolute_ost(obs: ChunkObservations, start_ms: int, end_ms: int) -> None:
         elif batch_mmss and _is_mmss_cand(t):
             t.start_ms = _decode_mmss_ms(t.start_ms)
             t.end_ms = _decode_mmss_ms(t.end_ms)
-        if t.start_ms < start_ms - _OST_REL_SLACK_MS and 0 <= t.start_ms <= span:
+        in_window = start_ms <= t.start_ms <= end_ms
+        if (
+            not in_window
+            and t.start_ms < start_ms - _OST_REL_SLACK_MS
+            and 0 <= t.start_ms <= span
+        ):
+            # Clip-relative report. A mid-minute clip's wall-clock-second
+            # report (base ``_wallclock_minute_base_ms``) is indistinguishable
+            # here; realign_ost_to_anchors_and_gaps resolves it against cues.
             t.start_ms += start_ms
             t.end_ms += start_ms
         t.start_ms = min(max(t.start_ms, start_ms), end_ms)
