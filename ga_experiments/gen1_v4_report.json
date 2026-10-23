@@ -1,0 +1,382 @@
+{
+  "generation": "gen1",
+  "variant": "v4",
+  "branch": "ga/gen1-v4-official-style-compression",
+  "tag": "ga-gen1-v4-official-style-compression",
+  "description": "Gene 5B: Official Harbor Rule in refeval.py and Korean connective-boundary rewrap in validate.py",
+  "mean_fitness": 83.22,
+  "mean_official_similarity": 44.32,
+  "mean_quality_score": 99.81,
+  "mean_invariant_pass_rate": 99.21,
+  "invariants_passed_media": 25,
+  "total_media": 27,
+  "total_invariant_failures": 6,
+  "failures": [
+    {
+      "req": "R07_moniker_chastity",
+      "video_id": "deadpool-2016",
+      "unit_id": "c1369..c1371",
+      "got": "자, 지금 무대에\n오를 아가씨는\n채스티티에게 박수를!\n일명 '아이러니'지",
+      "expected": "must contain '순결'"
+    },
+    {
+      "req": "R07_moniker_blind_al",
+      "video_id": "deadpool-and-wolverine-2024",
+      "unit_id": "c1032..c1037",
+      "got": "룸메이트인 눈먼 흑인 노인\n블라인드 알이 그러는데\n룸메이트인 눈먼 흑인 노인\n블라인드 알이 그러는데\n고통을 겪어야\n나를 안대\n- 기막히네\n- 현명하지?\n이름이 그래?\n'블라인드 알'이라고?\n이름이 그래?\n'블라인드 알'이라고?\n진짜 앞이 안 보이거든",
+      "expected": "must contain '장님 알'"
+    },
+    {
+      "req": "R06_conditional_echo_if",
+      "video_id": "deadpool-and-wolverine-2024",
+      "cue_id": "c1128",
+      "unit_id": "c1128..c1135",
+      "got": "세상 고쳐주면\n나가면 뭐부터 할래?",
+      "expected": "must contain '만약'"
+    },
+    {
+      "req": "R06_conditional_echo_if",
+      "video_id": "deadpool-and-wolverine-2024",
+      "cue_id": "c1134",
+      "unit_id": "c1128..c1135",
+      "got": "네 세상...\n고쳐주면?",
+      "expected": "must contain '만약'"
+    },
+    {
+      "req": "R06_conditional_echo_if",
+      "video_id": "deadpool-and-wolverine-2024",
+      "cue_id": "c1129",
+      "unit_id": "c1128..c1135",
+      "got": "세상 고쳐주면\n나가면 뭐부터 할래?",
+      "expected": "must contain '만약'"
+    },
+    {
+      "req": "R06_conditional_echo_if",
+      "video_id": "deadpool-and-wolverine-2024",
+      "cue_id": "c1135",
+      "unit_id": "c1128..c1135",
+      "got": "'고쳐주면'이라니?",
+      "expected": "must contain '만약'"
+    }
+  ],
+  "media": {
+    "super-pumped-s01e01": {
+      "video_id": "super-pumped-s01e01",
+      "fitness": 99.96,
+      "official_similarity": null,
+      "quality_score": 99.94,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "super-pumped-s01e02": {
+      "video_id": "super-pumped-s01e02",
+      "fitness": 99.93,
+      "official_similarity": null,
+      "quality_score": 99.89,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "super-pumped-s01e03": {
+      "video_id": "super-pumped-s01e03",
+      "fitness": 99.92,
+      "official_similarity": null,
+      "quality_score": 99.86,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "super-pumped-s01e04": {
+      "video_id": "super-pumped-s01e04",
+      "fitness": 99.91,
+      "official_similarity": null,
+      "quality_score": 99.85,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "super-pumped-s01e05": {
+      "video_id": "super-pumped-s01e05",
+      "fitness": 99.74,
+      "official_similarity": null,
+      "quality_score": 99.57,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "super-pumped-s01e06": {
+      "video_id": "super-pumped-s01e06",
+      "fitness": 99.57,
+      "official_similarity": null,
+      "quality_score": 99.28,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "super-pumped-s01e07": {
+      "video_id": "super-pumped-s01e07",
+      "fitness": 99.87,
+      "official_similarity": null,
+      "quality_score": 99.79,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e01": {
+      "video_id": "only-murders-in-the-building-s01e01",
+      "fitness": 78.76,
+      "official_similarity": 46.97,
+      "quality_score": 99.92,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e02": {
+      "video_id": "only-murders-in-the-building-s01e02",
+      "fitness": 76.09,
+      "official_similarity": 40.25,
+      "quality_score": 99.98,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e03": {
+      "video_id": "only-murders-in-the-building-s01e03",
+      "fitness": 75.87,
+      "official_similarity": 39.72,
+      "quality_score": 99.94,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e04": {
+      "video_id": "only-murders-in-the-building-s01e04",
+      "fitness": 76.76,
+      "official_similarity": 41.91,
+      "quality_score": 100.0,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e05": {
+      "video_id": "only-murders-in-the-building-s01e05",
+      "fitness": 77.65,
+      "official_similarity": 44.18,
+      "quality_score": 99.95,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e06": {
+      "video_id": "only-murders-in-the-building-s01e06",
+      "fitness": 77.55,
+      "official_similarity": 44.05,
+      "quality_score": 99.8,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e07": {
+      "video_id": "only-murders-in-the-building-s01e07",
+      "fitness": 76.67,
+      "official_similarity": 42.07,
+      "quality_score": 99.55,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e08": {
+      "video_id": "only-murders-in-the-building-s01e08",
+      "fitness": 76.73,
+      "official_similarity": 41.89,
+      "quality_score": 99.92,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e09": {
+      "video_id": "only-murders-in-the-building-s01e09",
+      "fitness": 76.56,
+      "official_similarity": 41.42,
+      "quality_score": 99.98,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "only-murders-in-the-building-s01e10": {
+      "video_id": "only-murders-in-the-building-s01e10",
+      "fitness": 78.66,
+      "official_similarity": 46.85,
+      "quality_score": 99.78,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "deadpool-2016": {
+      "video_id": "deadpool-2016",
+      "fitness": 77.52,
+      "official_similarity": 48.51,
+      "quality_score": 99.71,
+      "invariant_pass_rate": 92.86,
+      "passes_invariants": false,
+      "passes_targets": false,
+      "failures": [
+        {
+          "req": "R07_moniker_chastity",
+          "video_id": "deadpool-2016",
+          "unit_id": "c1369..c1371",
+          "got": "자, 지금 무대에\n오를 아가씨는\n채스티티에게 박수를!\n일명 '아이러니'지",
+          "expected": "must contain '순결'"
+        }
+      ]
+    },
+    "deadpool-and-wolverine-2024": {
+      "video_id": "deadpool-and-wolverine-2024",
+      "fitness": 72.54,
+      "official_similarity": 40.36,
+      "quality_score": 99.9,
+      "invariant_pass_rate": 85.71,
+      "passes_invariants": false,
+      "passes_targets": false,
+      "failures": [
+        {
+          "req": "R07_moniker_blind_al",
+          "video_id": "deadpool-and-wolverine-2024",
+          "unit_id": "c1032..c1037",
+          "got": "룸메이트인 눈먼 흑인 노인\n블라인드 알이 그러는데\n룸메이트인 눈먼 흑인 노인\n블라인드 알이 그러는데\n고통을 겪어야\n나를 안대\n- 기막히네\n- 현명하지?\n이름이 그래?\n'블라인드 알'이라고?\n이름이 그래?\n'블라인드 알'이라고?\n진짜 앞이 안 보이거든",
+          "expected": "must contain '장님 알'"
+        },
+        {
+          "req": "R06_conditional_echo_if",
+          "video_id": "deadpool-and-wolverine-2024",
+          "cue_id": "c1128",
+          "unit_id": "c1128..c1135",
+          "got": "세상 고쳐주면\n나가면 뭐부터 할래?",
+          "expected": "must contain '만약'"
+        },
+        {
+          "req": "R06_conditional_echo_if",
+          "video_id": "deadpool-and-wolverine-2024",
+          "cue_id": "c1134",
+          "unit_id": "c1128..c1135",
+          "got": "네 세상...\n고쳐주면?",
+          "expected": "must contain '만약'"
+        },
+        {
+          "req": "R06_conditional_echo_if",
+          "video_id": "deadpool-and-wolverine-2024",
+          "cue_id": "c1129",
+          "unit_id": "c1128..c1135",
+          "got": "세상 고쳐주면\n나가면 뭐부터 할래?",
+          "expected": "must contain '만약'"
+        },
+        {
+          "req": "R06_conditional_echo_if",
+          "video_id": "deadpool-and-wolverine-2024",
+          "cue_id": "c1135",
+          "unit_id": "c1128..c1135",
+          "got": "'고쳐주면'이라니?",
+          "expected": "must contain '만약'"
+        }
+      ]
+    },
+    "kingsman-the-secret-service-2014": {
+      "video_id": "kingsman-the-secret-service-2014",
+      "fitness": 74.22,
+      "official_similarity": 35.61,
+      "quality_score": 99.94,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "kingsman-the-golden-circle-2017": {
+      "video_id": "kingsman-the-golden-circle-2017",
+      "fitness": 76.08,
+      "official_similarity": 40.25,
+      "quality_score": 99.93,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "knives-out-2019": {
+      "video_id": "knives-out-2019",
+      "fitness": 75.59,
+      "official_similarity": 39.16,
+      "quality_score": 99.79,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "logan-2017": {
+      "video_id": "logan-2017",
+      "fitness": 82.94,
+      "official_similarity": 57.7,
+      "quality_score": 99.59,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "spider-man-homecoming-2017": {
+      "video_id": "spider-man-homecoming-2017",
+      "fitness": 80.35,
+      "official_similarity": 51.03,
+      "quality_score": 99.83,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "spider-man-far-from-home-2019": {
+      "video_id": "spider-man-far-from-home-2019",
+      "fitness": 77.55,
+      "official_similarity": 43.98,
+      "quality_score": 99.89,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "spider-man-no-way-home-2021": {
+      "video_id": "spider-man-no-way-home-2021",
+      "fitness": 80.85,
+      "official_similarity": 52.29,
+      "quality_score": 99.81,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    },
+    "the-fabelmans-2022": {
+      "video_id": "the-fabelmans-2022",
+      "fitness": 79.11,
+      "official_similarity": 48.13,
+      "quality_score": 99.59,
+      "invariant_pass_rate": 100.0,
+      "passes_invariants": true,
+      "passes_targets": true,
+      "failures": []
+    }
+  }
+}
