@@ -2962,3 +2962,69 @@ def test_render_observations_carries_accent_sdh():
     assert "d1: accent_sdh=(IN BRITISH ACCENT)" in block
     assert "h2: accent_sdh=[In New York accent]" in block
     assert "x1" not in block
+
+
+def _synthetic_clean_quality_report(srt):
+    """A cached report claiming a perfect track: live invariants must still re-check the SRT."""
+    return {
+        "srt_path": str(srt),
+        "collision_free_score": 100.0,
+        "counts": {
+            "slash_count": 0, "over_two_lines_count": 0, "scene_oscillations": 0,
+            "stranger_banmal_count": 0, "missing_ost": 0,
+        },
+    }
+
+
+def _invariant_reqs(video_id, ws, srt):
+    from substage import refeval
+
+    inv = refeval.check_session_invariants(
+        video_id, ws_dir=ws, srt_path=srt, settings=Settings(), quality_report=_synthetic_clean_quality_report(srt),
+    )
+    return {f["req"] for f in inv["failures"]}
+
+
+def test_gen8_session_invariants_dpw_spam_ost_timing(tmp_path):
+    vid = "deadpool-and-wolverine-2024"
+    cues = [cue("c1", 4594465, 4598469, "SPAM")]
+
+    bad_ws = tmp_path / "bad"
+    bad = _write_quality_track(bad_ws, [(4625000, 4627000, "{\\an8}'스팸'")], cues, video_id=vid)
+    assert "R20_dpw_spam_ost_timing" in _invariant_reqs(vid, bad_ws, bad)
+
+    an8_ws = tmp_path / "an8"
+    an8 = _write_quality_track(an8_ws, [(4594465, 4598469, "{\\an8}'스팸'")], cues, video_id=vid)
+    assert "R20_dpw_spam_ost_timing" in _invariant_reqs(vid, an8_ws, an8)
+
+    good_ws = tmp_path / "good"
+    good = _write_quality_track(good_ws, [(4594465, 4598469, "'스팸'")], cues, video_id=vid)
+    reqs = _invariant_reqs(vid, good_ws, good)
+    assert "R20_dpw_spam_ost_timing" not in reqs
+    assert "R11_R12_ost_and_collision_free" not in reqs
+
+
+def test_gen8_session_invariants_live_ost_position_and_same_channel_overlap(tmp_path):
+    cues = [cue("c1", 1000, 3000), cue("c2", 5000, 7000)]
+    req = "R11_R12_ost_and_collision_free"
+
+    clean_ws = tmp_path / "clean"
+    clean = _write_quality_track(clean_ws, [(1000, 3000, "{\\an8}'간판'"), (1200, 2800, "대사")], cues)
+    assert req not in _invariant_reqs("sample", clean_ws, clean)
+
+    # {\an8} OST with no overlapping dialogue: ost_pos < 100 despite a perfect cached report.
+    lone_ws = tmp_path / "lone_an8"
+    lone = _write_quality_track(lone_ws, [(1000, 2000, "{\\an8}'출구'"), (5000, 7000, "대사")], cues)
+    assert req in _invariant_reqs("sample", lone_ws, lone)
+
+    # Two bottom (an2) dialogue events overlapping in time.
+    an2_ws = tmp_path / "an2_overlap"
+    an2 = _write_quality_track(an2_ws, [(1000, 3000, "첫 대사"), (2000, 4000, "둘째 대사")], cues)
+    assert req in _invariant_reqs("sample", an2_ws, an2)
+
+    # Two top (an8) OST events overlapping in time, both over dialogue.
+    an8_ws = tmp_path / "an8_overlap"
+    an8 = _write_quality_track(
+        an8_ws, [(1000, 4000, "{\\an8}'간판'"), (1100, 4900, "대사"), (2000, 5000, "{\\an8}'표지'")], cues,
+    )
+    assert req in _invariant_reqs("sample", an8_ws, an8)

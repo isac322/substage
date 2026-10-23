@@ -1,0 +1,41 @@
+{
+  "branch": "ga/gen8-v3-refeval-strict-session-guard",
+  "tag": "ga-gen8-v3-refeval-strict-session-guard",
+  "description": "Gen-8 V3: Harden refeval.py check_session_invariants (R01..R20) to execute live same-channel collision, ost_pos==100, ost_emp==100, R19 zero unsnapped .000 events, and R20 DP&W SPAM timing checks without cache bypass",
+  "official_gold_standard_pass": "20/20 (100.00)",
+  "invariant_suite": "R01..R20 (all 20 requirement families enforced live without cache bypass)",
+  "tracks_passing_all_invariants": "54/54 (27 Flash + 27 Opus, 0 failures)",
+  "ost_and_timing_metrics": {
+    "pre_unsnapped_000_ost": {
+      "flash": 132,
+      "opus": 133
+    },
+    "post_unsnapped_000_ost": {
+      "flash": 0,
+      "opus": 0
+    },
+    "pre_bad_an8_no_dlg_overlap": {
+      "flash": 6,
+      "opus": 9
+    },
+    "post_bad_an8_no_dlg_overlap": {
+      "flash": 0,
+      "opus": 0
+    },
+    "pre_same_channel_overlaps": {
+      "flash": 0,
+      "opus": 42
+    },
+    "post_same_channel_overlaps": {
+      "flash": 0,
+      "opus": 0
+    },
+    "dpw_spam_ost": "01:16:34,465 --> 01:16:38,469 ('스팸', an2 bottom, 0 overlap)"
+  },
+  "jevify_27_work_ost_timing_benchmark": {
+    "pre_clean_and_synchronized": "0/27",
+    "post_clean_and_synchronized": "26/27",
+    "pre_mean_zero_defects_prob": 0.031,
+    "post_mean_zero_defects_prob": 0.9407
+  }
+}
