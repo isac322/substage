@@ -2839,3 +2839,57 @@ def test_ga_gen3_echo_anchor_harbor_and_condense_veto(tmp_path):
     cand_fit = refeval.evaluate_ga_fitness("sample", ws_dir=tmp_path, srt_path=srt, ref_path=off_srt)
     assert cand_fit["passes_invariants"] is True
     assert cand_fit["failures"] == []
+
+
+def test_gen6_materialize_snapshots_lean_timeline_keeps_names_personas_voice_cards():
+    """Lean pipelines pass Timeline(scenes=[]): cue speaker/addressee pairs must
+    still populate names, personas and voice cards for every scene."""
+    from substage import narrative
+    from substage.models import Timeline, VoiceCard
+
+    cues = [
+        Cue(id=f"c{n:04d}", start_ms=n * 10_000, end_ms=n * 10_000 + 2000, text="line", raw="line")
+        for n in range(1, 5)
+    ]
+    scenes = [
+        Scene(id="s001", start_ms=10_000, end_ms=22_000, cue_ids=["c0001", "c0002"]),
+        Scene(id="s002", start_ms=30_000, end_ms=42_000, cue_ids=["c0003", "c0004"]),
+    ]
+    fm = ContextMap(
+        synopsis="s",
+        tone_baseline="t",
+        characters=[
+            Character(id="gambit", en_name="Gambit", ko_name="갬빗", persona="cajun card thrower",
+                      voice=VoiceCard(idiolect="thick Cajun drawl")),
+            Character(id="wade", en_name="Wade", ko_name="웨이드", persona="merc",
+                      voice=VoiceCard(idiolect="wisecracks")),
+            Character(id="logan", en_name="Logan", ko_name="로건", persona="grump",
+                      voice=VoiceCard(idiolect="gruff")),
+        ],
+    )
+    pairs = {"c0001": ("gambit", "wade"), "c0003": ("logan", "group")}
+    snaps = narrative.materialize_snapshots(fm, Timeline(scenes=[]), scenes, cues, None, pairs)
+
+    s1 = snaps["s001"]
+    assert s1.character_names == {"gambit": "갬빗", "wade": "웨이드"}
+    assert set(s1.personas) == {"gambit", "wade"}
+    assert "cajun card thrower" in s1.personas["gambit"]
+    assert s1.voice_cards["gambit"].idiolect == "thick Cajun drawl"
+    assert set(s1.voice_cards) == {"gambit", "wade"}
+    assert set(s1.characters) == {"gambit", "wade"}
+    # "group" is not a character: only logan surfaces in s002
+    s2 = snaps["s002"]
+    assert s2.character_names == {"logan": "로건"}
+    assert set(s2.personas) == {"logan"} and set(s2.voice_cards) == {"logan"}
+
+
+def test_gen6_extract_accent_sdh_hint():
+    from substage.subs import _parse_event_text, extract_accent_sdh_hint
+
+    _, _, sounds, _ = _parse_event_text("(IN BRITISH ACCENT) Right, then.")
+    assert extract_accent_sdh_hint(sounds) == "british accent"
+    _, _, sounds, _ = _parse_event_text("[In New York accent] Don't worry about it.")
+    assert extract_accent_sdh_hint(sounds) == "new york accent"
+    assert extract_accent_sdh_hint(["(speaking in a Long Island accent)"]) == "long island accent"
+    assert extract_accent_sdh_hint(["(grunts)", "[explosion]"]) is None
+    assert extract_accent_sdh_hint([]) is None
