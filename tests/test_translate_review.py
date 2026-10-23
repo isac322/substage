@@ -495,6 +495,78 @@ def test_realign_ost_keeps_supported_dialogue_anchor_correction():
     assert (corrected.start_ms, corrected.end_ms) == (51_650, 53_650)
 
 
+def test_realign_ost_repairs_wallclock_second_drift_into_silent_shot_gap():
+    """chunk=v09 starts mid-minute (76m 29.147s); Gemini wrote the wall-clock
+    second 01:16:36 and the clip start was added on top, so the sign drifted
+    +29.15 s onto Mr. Paradox's line. It returns to the dialogue-free insert
+    and is pinned to the ffmpeg showinfo shot boundaries."""
+    observations = [ChunkObservations(
+        chunk_id="v09", start_ms=4_589_147, end_ms=4_708_000, on_screen_text=[
+            OnScreenText(start_ms=4_625_000, end_ms=4_627_000, text="[sign] SPAM"),
+        ],
+    )]
+    cues = [
+        cue("c1", 4_589_500, 4_593_900, "Get back here, you idiot."),
+        cue("c2", 4_602_265, 4_605_000, "That was not part of the plan."),
+        cue("c3", 4_623_327, 4_627_498, "You are a special kind of disappointment."),
+    ]
+    (chunk,) = translate.realign_ost_to_anchors_and_gaps(observations, cues)
+    (repaired,) = chunk.on_screen_text
+    assert (repaired.start_ms, repaired.end_ms) == (4_594_465, 4_598_469)
+
+
+def test_realign_ost_wallclock_repair_requires_silent_candidate():
+    """The wall-clock reading is rejected when dialogue covers it too."""
+    observations = [ChunkObservations(
+        chunk_id="v09", start_ms=4_589_147, end_ms=4_708_000, on_screen_text=[
+            OnScreenText(start_ms=4_625_000, end_ms=4_627_000, text="[sign] EXIT ONLY"),
+        ],
+    )]
+    cues = [
+        cue("c1", 4_594_000, 4_599_000, "Keep moving, nobody stops."),
+        cue("c2", 4_623_327, 4_627_498, "You are a special kind of disappointment."),
+    ]
+    (chunk,) = translate.realign_ost_to_anchors_and_gaps(observations, cues)
+    (kept,) = chunk.on_screen_text
+    assert (kept.start_ms, kept.end_ms) == (4_625_000, 4_627_000)
+
+
+def test_realign_ost_wallclock_repair_moves_to_silent_gap():
+    observations = [ChunkObservations(
+        chunk_id="v09", start_ms=4_589_147, end_ms=4_708_000, on_screen_text=[
+            OnScreenText(start_ms=4_625_000, end_ms=4_627_000, text="[sign] EXIT ONLY"),
+        ],
+    )]
+    cues = [cue("c1", 4_623_327, 4_627_498, "You are a special kind of disappointment.")]
+    (chunk,) = translate.realign_ost_to_anchors_and_gaps(observations, cues)
+    (moved,) = chunk.on_screen_text
+    assert (moved.start_ms, moved.end_ms) == (4_595_853, 4_597_853)
+
+
+@pytest.mark.parametrize("ms,is_end,expected", [
+    (36_000, False, 35_994),
+    (38_000, True, 37_996),
+    (90_000, False, 90_007),
+    (91_000, True, 91_008),
+    (4_625_000, False, 4_624_995),
+    (4_594_465, False, 4_594_465),  # already frame-derived: unchanged
+    (0, False, 0),
+    (0, True, 42),
+])
+def test_snap_ost_ms_to_frame(ms, is_end, expected):
+    snapped = translate.snap_ost_ms_to_frame(ms, is_end=is_end)
+    assert snapped == expected
+    if ms:
+        assert snapped % 1000 != 0
+        assert abs(snapped - ms) <= 42
+
+
+def test_ost_cues_never_emit_integer_second_spans():
+    obs = [OnScreenText(start_ms=36_000, end_ms=38_000, text="[sign] NO EXIT", plot_critical=True)]
+    (c,) = translate.ost_cues(obs, [], [])
+    assert (c.start_ms, c.end_ms) == (35_994, 37_996)
+
+
 @pytest.mark.parametrize("kind", ["callout", "headline"])
 @pytest.mark.parametrize("linked", [None, "c1"])
 def test_ost_callout_and_headline_survive_partial_dialogue_coverage(kind, linked):
@@ -643,14 +715,14 @@ def test_ost_cues_duplicate_reports_merged():
     new = translate.ost_cues(obs, [], [])
     assert [(c.start_ms, c.end_ms, c.text) for c in new] == [
         (58_000, 61_500, "THE LONG ROAD"),
-        (90_000, 91_000, "THE LONG ROAD"),  # 1 s floor
+        (90_007, 91_008, "THE LONG ROAD"),  # 1 s floor, frame-snapped
     ]
 
 
 def test_ost_cues_duration_capped():
     obs = [OnScreenText(start_ms=0, end_ms=20_000, text="[dedication] For my father")]
     (c,) = translate.ost_cues(obs, [], [])
-    assert (c.start_ms, c.end_ms) == (0, 6000)
+    assert (c.start_ms, c.end_ms) == (0, 6006)
 
 
 def test_ost_cues_skip_logos_and_credit_scrolls():
@@ -680,10 +752,10 @@ def test_ost_cues_normalizes_v01_mmss_timestamps():
     ]
     new = translate.ost_cues(obs, [], [])
     assert [(c.start_ms, c.end_ms, c.text) for c in new] == [
-        (58_000, 61_000, "SOME DOUCHEBAG'S VIDEO"),
-        (61_000, 65_000, "STARRING GOD'S PERFECT IDIOT"),
-        (127_000, 130_000, "PRODUCED BY ASSHATS"),
-        (465_000, 468_000, "HI, I'M FRANCIS!"),
+        (58_016, 61_019, "SOME DOUCHEBAG'S VIDEO"),
+        (61_019, 64_982, "STARRING GOD'S PERFECT IDIOT"),
+        (127_002, 130_005, "PRODUCED BY ASSHATS"),
+        (465_006, 468_009, "HI, I'M FRANCIS!"),
     ]
 
 
@@ -699,8 +771,8 @@ def test_ost_cues_normalizes_100ms_and_mixed_mmss_and_drops_clamped_boundary():
     new = translate.ost_cues(obs, [], [])
     assert [(c.start_ms, c.end_ms, c.text) for c in new] == [
         (60_400, 63_000, "A MAXIMUM EFFORT PRODUCTION"),
-        (199_000, 204_000, "LOGAN"),
-        (244_000, 246_000, "A FILM BY SHAWN LEVY"),
+        (198_990, 203_995, "LOGAN"),
+        (243_994, 245_996, "A FILM BY SHAWN LEVY"),
     ]
 
 
@@ -2962,3 +3034,70 @@ def test_render_observations_carries_accent_sdh():
     assert "d1: accent_sdh=(IN BRITISH ACCENT)" in block
     assert "h2: accent_sdh=[In New York accent]" in block
     assert "x1" not in block
+
+
+
+def _synthetic_clean_quality_report(srt):
+    """A cached report claiming a perfect track: live invariants must still re-check the SRT."""
+    return {
+        "srt_path": str(srt),
+        "collision_free_score": 100.0,
+        "counts": {
+            "slash_count": 0, "over_two_lines_count": 0, "scene_oscillations": 0,
+            "stranger_banmal_count": 0, "missing_ost": 0,
+        },
+    }
+
+
+def _invariant_reqs(video_id, ws, srt):
+    from substage import refeval
+
+    inv = refeval.check_session_invariants(
+        video_id, ws_dir=ws, srt_path=srt, settings=Settings(), quality_report=_synthetic_clean_quality_report(srt),
+    )
+    return {f["req"] for f in inv["failures"]}
+
+
+def test_gen8_session_invariants_dpw_spam_ost_timing(tmp_path):
+    vid = "deadpool-and-wolverine-2024"
+    cues = [cue("c1", 4594465, 4598469, "SPAM")]
+
+    bad_ws = tmp_path / "bad"
+    bad = _write_quality_track(bad_ws, [(4625000, 4627000, "{\\an8}'스팸'")], cues, video_id=vid)
+    assert "R20_dpw_spam_ost_timing" in _invariant_reqs(vid, bad_ws, bad)
+
+    an8_ws = tmp_path / "an8"
+    an8 = _write_quality_track(an8_ws, [(4594465, 4598469, "{\\an8}'스팸'")], cues, video_id=vid)
+    assert "R20_dpw_spam_ost_timing" in _invariant_reqs(vid, an8_ws, an8)
+
+    good_ws = tmp_path / "good"
+    good = _write_quality_track(good_ws, [(4594465, 4598469, "'스팸'")], cues, video_id=vid)
+    reqs = _invariant_reqs(vid, good_ws, good)
+    assert "R20_dpw_spam_ost_timing" not in reqs
+    assert "R11_R12_ost_and_collision_free" not in reqs
+
+
+def test_gen8_session_invariants_live_ost_position_and_same_channel_overlap(tmp_path):
+    cues = [cue("c1", 1000, 3000), cue("c2", 5000, 7000)]
+    req = "R11_R12_ost_and_collision_free"
+
+    clean_ws = tmp_path / "clean"
+    clean = _write_quality_track(clean_ws, [(1000, 3000, "{\\an8}'간판'"), (1200, 2800, "대사")], cues)
+    assert req not in _invariant_reqs("sample", clean_ws, clean)
+
+    # {\an8} OST with no overlapping dialogue: ost_pos < 100 despite a perfect cached report.
+    lone_ws = tmp_path / "lone_an8"
+    lone = _write_quality_track(lone_ws, [(1000, 2000, "{\\an8}'출구'"), (5000, 7000, "대사")], cues)
+    assert req in _invariant_reqs("sample", lone_ws, lone)
+
+    # Two bottom (an2) dialogue events overlapping in time.
+    an2_ws = tmp_path / "an2_overlap"
+    an2 = _write_quality_track(an2_ws, [(1000, 3000, "첫 대사"), (2000, 4000, "둘째 대사")], cues)
+    assert req in _invariant_reqs("sample", an2_ws, an2)
+
+    # Two top (an8) OST events overlapping in time, both over dialogue.
+    an8_ws = tmp_path / "an8_overlap"
+    an8 = _write_quality_track(
+        an8_ws, [(1000, 4000, "{\\an8}'간판'"), (1100, 4900, "대사"), (2000, 5000, "{\\an8}'표지'")], cues,
+    )
+    assert req in _invariant_reqs("sample", an8_ws, an8)

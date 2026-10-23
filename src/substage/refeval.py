@@ -3914,6 +3914,7 @@ def check_session_invariants(
     srt_lines = load_ko(srt) if _decode(srt).strip() else []
     events = _quality_display_events(srt, srt_lines)
     dlg_evs = [ev for ev in events if ev["position"] != "an8" and not ev["ost"]]
+    ost_evs = [ev for ev in events if ev["position"] == "an8" or ev["ost"]]
 
     def ko_for_cue(cid: str) -> str:
         c = cues_by_id.get(cid)
@@ -4067,6 +4068,20 @@ def check_session_invariants(
             or "접근도 못 할걸" in biggum_ko
         ):
             failures.append({"req": "R15_gambit_cajun_dialect_and_sling_blade", "video_id": video_id, "got": biggum_ko or "(missing cue at 01:17:47)", "expected": "01:17:47 Gambit 'biggum hands' line kept in dialect (no standard '들어가요')"})
+        # R20: 01:16:34 '스팸' OST belongs at 01:16:34.465..01:16:38.469 (an2), not 01:17:05; no '공존' at 12:12
+        spam_right = ko_in_window(4594000, 4599000, include_ost=True)
+        spam_wrong = ko_in_window(4620000, 4630000, include_ost=True)
+        coexist_wrong = ko_in_window(730000, 736000, include_ost=True)
+        spam_an8 = any("스팸" in ev["text"] and ev["position"] == "an8" for ev in events if 4594000 <= ev["start_ms"] <= 4599000)
+        if (
+            window_in_scope(4594000, 4630000) and ("스팸" not in spam_right or "스팸" in spam_wrong or spam_an8)
+        ) or (window_in_scope(730000, 736000) and "공존" in coexist_wrong):
+            failures.append({
+                "req": "R20_dpw_spam_ost_timing",
+                "video_id": video_id,
+                "got": {"spam_at_76m35s": spam_right, "spam_at_77m05s": spam_wrong, "coexist_at_12m12s": coexist_wrong},
+                "expected": "'스팸' at 01:16:34.465..01:16:38.469 (an2, no \\an8), absent at 01:17:05, and no '공존' at 12:12",
+            })
     elif video_id == "deadpool-2016":
         # 00:03:58 truncation check ("그러니까 사랑을" without verb)
         if re.search(r"^그러니까 사랑을$", ko_in_window(237000, 242000), re.M):
@@ -4155,20 +4170,61 @@ def check_session_invariants(
             failures.append({"req": "R10_super_pumped_idioms", "video_id": video_id, "got": "found banned calque", "expected": "'성장 아니면 사장' and '내 편인지 아닌지'"})
 
     # R11 & R12: Missing OST or collisions
-    if cnt["missing_ost"] > 0 or rep["collision_free_score"] < 100.0:
+    # Live checks from displayed events: a cached/synthetic quality_report cannot hide timing or OST defects.
+    live_same_ch_overlaps = 0
+    for channel in (
+        [ev for ev in events if ev["position"] == "an8"],
+        [ev for ev in events if ev["position"] != "an8"],
+    ):
+        ordered = sorted(channel, key=lambda ev: (ev["start_ms"], ev["end_ms"]))
+        for i, a in enumerate(ordered):
+            for b in ordered[i + 1:]:
+                if b["start_ms"] >= a["end_ms"]:
+                    break
+                if min(a["end_ms"], b["end_ms"]) > max(a["start_ms"], b["start_ms"]):
+                    live_same_ch_overlaps += 1
+    live_ost_sync = evaluate_ost_and_sync(ost_evs, dlg_evs)
+    if (
+        cnt["missing_ost"] > 0
+        or rep["collision_free_score"] < 100.0
+        or live_same_ch_overlaps > 0
+        or live_ost_sync["ost_pos"] < 100.0
+        or live_ost_sync["ost_emp"] < 100.0
+    ):
         failures.append({
             "req": "R11_R12_ost_and_collision_free",
             "video_id": video_id,
-            "got": {"missing_ost": cnt["missing_ost"], "collision_free_score": rep["collision_free_score"]},
-            "expected": {"missing_ost": 0, "collision_free_score": 100.0},
+            "got": {
+                "missing_ost": cnt["missing_ost"],
+                "collision_free_score": rep["collision_free_score"],
+                "same_channel_overlaps": live_same_ch_overlaps,
+                "ost_pos": live_ost_sync["ost_pos"],
+                "ost_emp": live_ost_sync["ost_emp"],
+            },
+            "expected": {
+                "missing_ost": 0, "collision_free_score": 100.0, "same_channel_overlaps": 0,
+                "ost_pos": 100.0, "ost_emp": 100.0,
+            },
         })
+
+    # R19: Full-length tracks must not keep raw integer-second (.000) S2v OST timestamps.
+    if len(events) >= 50:
+        unsnapped_000 = [ev for ev in events if ev["start_ms"] % 1000 == 0 and ev["end_ms"] % 1000 == 0]
+        if unsnapped_000:
+            failures.append({
+                "req": "R19_zero_unsnapped_000_ost",
+                "video_id": video_id,
+                "got": [(ev["start_ms"], ev["end_ms"], ev["text"]) for ev in unsnapped_000[:5]],
+                "expected": "0 unsnapped .000 integer-second OST events (all OSTs frame-snapped)",
+            })
 
     base_reqs = {
         "R03_zero_slash", "R03_max_two_lines", "R03_no_duplicate_an8_tags",
         "R05_zero_scene_oscillation", "R05_zero_stranger_banmal", "R11_R12_ost_and_collision_free",
+        "R19_zero_unsnapped_000_ost",
     }
     by_vid = {
-        "deadpool-and-wolverine-2024": {"R05_carnival_polite", "R05_nicepool_banmal", "R06_conditional_echo_if", "R07_moniker_blind_al", "R08_stripper_sov_inversion", "R10_not_all_of_you_asleep", "R11_sacred_timeline_ost", "R15_gambit_cajun_dialect_and_sling_blade"},
+        "deadpool-and-wolverine-2024": {"R05_carnival_polite", "R05_nicepool_banmal", "R06_conditional_echo_if", "R07_moniker_blind_al", "R08_stripper_sov_inversion", "R10_not_all_of_you_asleep", "R11_sacred_timeline_ost", "R15_gambit_cajun_dialect_and_sling_blade", "R20_dpw_spam_ost_timing"},
         "deadpool-2016": {"R04_deadpool_two_speaker_dashes", "R05_colossus_banmal", "R07_moniker_chastity", "R10_deadpool_fuck_me_exclamation", "R10_deadpool_no_truncated_predicate", "R16_deadpool_british_accent_basil_fawlty"},
         "kingsman-the-secret-service-2014": {"R05_kingsman_rest_assured", "R09_kingsman_discourse_unit", "R10_kingsman_mother_to_son", "R18_kingsman_cockney_mug_slang"},
         "spider-man-homecoming-2017": {"R07_training_wheels_echo", "R17_homecoming_delmar_and_ny_accent"},

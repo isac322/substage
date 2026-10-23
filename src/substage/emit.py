@@ -26,11 +26,61 @@ def _collapse_an_prefix(text: str) -> str:
     return _AN_PREFIX.sub(lambda _: r"{\an8}", text, count=1)
 
 
+def _strip_an_prefix(text: str) -> str:
+    """Drop any leading ASS alignment-tag run (bottom-position text)."""
+    return _AN_PREFIX.sub("", text).lstrip()
+
+
 def _event_text(event: OutEvent) -> str:
-    text = _collapse_an_prefix(strip_clause_slashes(event.ko))
-    if event.position == "an8" and not text.startswith(r"{\an8}"):
-        text = r"{\an8}" + text
+    text = strip_clause_slashes(event.ko)
+    if event.position == "an8":
+        text = _collapse_an_prefix(text)
+        if not text.startswith(r"{\an8}"):
+            text = r"{\an8}" + text
+    else:
+        text = _strip_an_prefix(text)
     return text
+
+
+def _sort_key(event: OutEvent) -> tuple[int, int]:
+    return event.start_ms, event.end_ms
+
+
+def _sanitize_lane(lane: list[OutEvent]) -> list[OutEvent]:
+    """Resolve overlaps among events sharing one screen position."""
+    pending = sorted(lane, key=_sort_key)
+    out: list[OutEvent] = []
+    while pending:
+        b = pending.pop(0)
+        if not out or out[-1].end_ms <= b.start_ms:
+            out.append(b)
+            continue
+        a = out[-1]
+        if _strip_an_prefix(a.ko).strip() == _strip_an_prefix(b.ko).strip():
+            out[-1] = a.model_copy(update={
+                "start_ms": min(a.start_ms, b.start_ms),
+                "end_ms": max(a.end_ms, b.end_ms),
+                "cue_ids": list(dict.fromkeys([*a.cue_ids, *b.cue_ids])),
+            })
+            continue
+        if b.start_ms - 1 - a.start_ms >= 200:
+            out[-1] = a.model_copy(update={"end_ms": b.start_ms - 1})
+            out.append(b)
+            continue
+        # Identical or near-simultaneous starts (<200ms gap): share the interval.
+        mid = a.start_ms + max(200, (max(a.end_ms, b.end_ms) - a.start_ms) // 2)
+        out[-1] = a.model_copy(update={"end_ms": mid - 1})
+        pending.append(b.model_copy(update={"start_ms": mid, "end_ms": max(b.end_ms, mid + 200)}))
+        pending.sort(key=_sort_key)
+    return out
+
+
+def sanitize_display_events(events: list[OutEvent]) -> list[OutEvent]:
+    """Guarantee no two displayed events overlap at the same screen position:
+    identical texts merge, otherwise the earlier event ends before the later."""
+    an2 = [e for e in events if e.position != "an8"]
+    an8 = [e for e in events if e.position == "an8"]
+    return sorted([*_sanitize_lane(an2), *_sanitize_lane(an8)], key=_sort_key)
 
 
 class SidecarCue(TranslatedCue):
@@ -61,10 +111,8 @@ def emit(
     srt_path = ws.path(f"{video.video_id}.ko.srt")
     sidecar_path = ws.path(f"{video.video_id}.ko.json")
 
-    shown = [
-        e.model_copy(update={"ko": _event_text(e)})
-        for e in events if e.ko.strip()
-    ]
+    events = sanitize_display_events([e for e in events if e.ko.strip()])
+    shown = [e.model_copy(update={"ko": _event_text(e)}) for e in events]
     rows: list[SidecarCue] = []
     for cue in cues:
         m = meta.get(cue.id)

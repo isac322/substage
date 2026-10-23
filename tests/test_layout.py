@@ -850,3 +850,72 @@ def test_dialogue_echo_dedupe_preserves_both_semantic_source_references():
     assert len(events) == 1
     assert events[0].fragments[0].refs == ["c1:t1:a1", "c2:t1:a1"]
     assert lineage_issues(lineage, events=events) == []
+
+
+def _raw_ev(start, en_end, ko, channel="dialogue"):
+    return lay._Ev(start=start, en_end=en_end, cue_ids=[f"c{start}"], turns=[], ko=ko, fixed=channel == "ost",
+                   scene_first="s", scene_last="s", en_text="x", channel=channel)
+
+
+def test_retime_non_overlapping_ost_drops_stale_top_tag():
+    dlg = _raw_ev(0, 1500, "안녕")
+    ost = _raw_ev(10_000, 12_000, r"{\an8}'소독용 알코올'", channel="ost")
+    lay._retime([dlg, ost], S)
+    assert ost.position == "an2"
+    assert ost.ko == "'소독용 알코올'"
+
+
+def test_retime_non_overlapping_ost_gains_quotes_without_top_tag():
+    ost = _raw_ev(10_000, 12_000, r"{\an8}공존", channel="ost")
+    lay._retime([ost], S)
+    assert ost.position == "an2"
+    assert ost.ko == "'공존'"
+
+
+def test_event_text_an2_never_emits_top_tag():
+    ev = OutEvent(start_ms=0, end_ms=1000, ko=r"{\an8}'공존'", position="an2", channel="ost")
+    assert emit_mod._event_text(ev) == "'공존'"
+    top = OutEvent(start_ms=0, end_ms=1000, ko=r"{\an2}{\an8}'공존'", position="an8", channel="ost")
+    assert emit_mod._event_text(top) == r"{\an8}'공존'"
+
+
+def _lane_overlaps(events):
+    n = 0
+    for pos in ("an2", "an8"):
+        lane = sorted((e for e in events if e.position == pos), key=lambda e: (e.start_ms, e.end_ms))
+        n += sum(1 for a, b in zip(lane, lane[1:]) if a.end_ms > b.start_ms)
+    return n
+
+
+def test_sanitize_display_events_resolves_same_channel_overlaps():
+    events = [
+        OutEvent(start_ms=0, end_ms=3000, ko="첫째"),
+        OutEvent(start_ms=2000, end_ms=4000, ko="둘째"),  # staggered
+        OutEvent(start_ms=5000, end_ms=7000, ko=r"{\an8}'스팸'", position="an8", channel="ost"),
+        OutEvent(start_ms=5000, end_ms=6000, ko="'햄'", position="an8", channel="ost"),  # same start
+        OutEvent(start_ms=8000, end_ms=9000, ko="'같은'", position="an8", channel="ost"),
+        OutEvent(start_ms=8500, end_ms=9500, ko=r"{\an8}'같은'", position="an8", channel="ost"),  # duplicate
+        OutEvent(start_ms=5500, end_ms=6500, ko="대사"),  # other lane: may overlap the top
+    ]
+    out = emit_mod.sanitize_display_events(events)
+    assert _lane_overlaps(out) == 0
+    assert all(e.end_ms > e.start_ms for e in out)
+    assert [(e.start_ms, e.end_ms) for e in out] == sorted((e.start_ms, e.end_ms) for e in out)
+    first = next(e for e in out if e.ko == "첫째")
+    assert (first.start_ms, first.end_ms) == (0, 1999)
+    same = [e for e in out if "같은" in e.ko]
+    assert len(same) == 1 and (same[0].start_ms, same[0].end_ms) == (8000, 9500)
+    assert {e.ko for e in out if e.position == "an8" and e.start_ms < 8000} == {r"{\an8}'스팸'", "'햄'"}
+    assert any(e.ko == "대사" and e.start_ms == 5500 for e in out)
+
+
+def test_sanitize_display_events_preserves_positive_duration_on_1ms_start_gap():
+    events = [
+        OutEvent(start_ms=1000, end_ms=2000, ko="앞대사", position="an2"),
+        OutEvent(start_ms=1001, end_ms=3000, ko="뒤대사", position="an2"),
+        OutEvent(start_ms=4000, end_ms=5000, ko=r"{\an8}'앞자막'", position="an8", channel="ost"),
+        OutEvent(start_ms=4001, end_ms=6000, ko=r"{\an8}'뒤자막'", position="an8", channel="ost"),
+    ]
+    out = emit_mod.sanitize_display_events(events)
+    assert _lane_overlaps(out) == 0
+    assert all(e.end_ms - e.start_ms >= 199 for e in out)

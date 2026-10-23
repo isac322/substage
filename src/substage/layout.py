@@ -202,7 +202,15 @@ def _retime(events: list[_Ev], settings) -> None:
                 else:
                     ev.ko = s_ko
             else:
-                ev.ko = _collapse_an_prefix(ev.ko)
+                # Bottom position: never keep a stale top tag, but still quote screen text.
+                body = _AN_PREFIX.sub("", ev.ko.strip()).strip()
+                if (
+                    ev.channel == "ost"
+                    and body
+                    and not (len(body) >= 2 and body[0] in "'\"“”‘’[" and body[-1] in "'\"“”‘’]")
+                ):
+                    body = f"'{body}'"
+                ev.ko = body
     # One top-channel display at a time: combine readable pairs, else sequence.
     top_ost = [ev for ev in ost if ev.position == "an8"]
     i = 0
