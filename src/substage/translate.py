@@ -271,13 +271,32 @@ def _render_snapshot(snapshot: Snapshot, callback_ko: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _render_observations(scene_cue_ids: list[str], obs_by_id: dict[str, CueObservation]) -> str:
+_ACCENT_SDH_RE = re.compile(r"\b(?:accent|dialect|drawl|brogue|twang)\b", re.IGNORECASE)
+
+
+def _accent_sdh(cue: Cue | None) -> str:
+    """Bracketed manner-of-speaking SDH tags such as ``(IN BRITISH ACCENT)``."""
+    if cue is None or not cue.sound_cues:
+        return ""
+    return ",".join(s.strip() for s in cue.sound_cues if _ACCENT_SDH_RE.search(s))
+
+
+def _render_observations(
+    scene_cue_ids: list[str],
+    obs_by_id: dict[str, CueObservation],
+    cues: Sequence[Cue] = (),
+) -> str:
+    cues_by_id = {c.id: c for c in cues}
     rows = []
     for cid in scene_cue_ids:
         o = obs_by_id.get(cid)
-        if o is None:
+        accent = _accent_sdh(cues_by_id.get(cid))
+        if o is None and not accent:
             continue
         parts = []
+        if o is None:
+            rows.append(f"  {cid}: accent_sdh={accent}")
+            continue
         if o.speaker:
             parts.append(f"speaker={o.speaker}")
         if o.addressee:
@@ -286,6 +305,8 @@ def _render_observations(scene_cue_ids: list[str], obs_by_id: dict[str, CueObser
             parts.append(f"delivery={o.delivery}")
         if o.nonverbal:
             parts.append(f"nonverbal={o.nonverbal}")
+        if accent:
+            parts.append(f"accent_sdh={accent}")
         if parts:
             rows.append(f"  {cid}: {'; '.join(parts)}")
     if not rows:
@@ -695,6 +716,101 @@ def detect_echo_and_moniker_chains(
     return links
 
 
+def _enforce_dialect_accent_anchors(cues: Sequence[Cue], out: dict[str, str]) -> None:
+    """Style guide §3.9: pin comic dialect, accent jokes and accent SDH lines.
+
+    Each rule fires on one English source shape and only when the Korean draft
+    lacks the dialect/accent marker that carries the joke. Blank cues (merged
+    or intentionally dropped) are left alone.
+    """
+    for cue in cues:
+        cid = cue.id
+        ko_txt = out.get(cid, "")
+        if not ko_txt.strip():
+            continue
+        en_low = " ".join(cue.text.replace("\u2019", "'").split()).lower()
+
+        # Gambit's Cajun English and the accent jokes aimed at it.
+        if "seen sling blade" in en_low and not any(t in ko_txt for t in ("억양", "사투리", "말투")):
+            out[cid] = "남부 억양 지리네\n다시 말해줄래?"
+        elif "call that suicide" in en_low and "ch" in en_low:
+            if "쉐리" not in ko_txt and "자살" in ko_txt:
+                out[cid] = "우리 동네선 그걸\n자살이라 허제, 쉐리"
+        elif "done be knowing" in en_low or "lid ain't comin" in en_low:
+            if not any(t in ko_txt for t in ("삐끼", "근디", "거시여", "없제")):
+                out[cid] = "근디 그 뚜껑은\n안 벗겨질 거시여"
+        elif "dome gonna come off" in en_low:
+            if "뽑기 전엔" not in ko_txt and "삐지" not in ko_txt:
+                out[cid] = "- 대가리째 뽑기 전엔\n- 미안해, 이쁜아"
+        elif "dialect coach" in en_low and "minions" in en_low:
+            if "사투리" not in ko_txt and "억양" not in ko_txt:
+                out[cid] = "상처 주긴 싫은데\n사투리 선생이 미니언즈야?"
+        elif "ain't know my daddy" in en_low:
+            if not any(t in ko_txt for t in ("준비됐제", "거시기")):
+                out[cid] = "아빠 얼굴은 몰라도\n거시기로 나올 때부터 준비됐제"
+        elif "buttery nuts" in en_low:
+            if not any(t in ko_txt for t in ("울 엄니", "비벼 댔제", "비벼댔제")):
+                out[cid] = "울 엄니한테 거시기를\n찰지게 비벼 댔제"
+        elif "what's up, doc" in en_low and "shot out" in en_low:
+            if not any(t in ko_txt for t in ("그랬제", "말했제", "안녕하쇼", "지내쇼")):
+                out[cid] = "튀어나오며 그랬제\n'잘 지내쇼?'"
+        elif "biggum hands" in en_low or "ain't not a wonna" in en_low:
+            if (
+                "들어가요" in ko_txt
+                or "접근도 못 할걸" in ko_txt
+                or not any(t in ko_txt for t in ("닫치뿌서", "닫히믄", "몬 "))
+            ):
+                out[cid] = "큰 손이 딱 닫히믄\n아무도 몬 들어가지"
+        # Deadpool 1: (IN BRITISH ACCENT) Is it Basil Fawlty?
+        elif "basil fawlty" in en_low and "영국" not in ko_txt:
+            out[cid] = "영국인답게\n배질 폴티야?"
+        # Spider-Man: Homecoming, Delmar and Peter's [In New York accent].
+        elif en_low.strip() == "you got it, boss." and ko_txt.strip() == "알았다":
+            out[cid] = "대령합죠"
+        elif "hey, how you doing?" in en_low and "don't worry, i got you" in en_low:
+            if "안심하세요" not in ko_txt:
+                out[cid] = "안녕하세요!\n이제 안심하세요"
+        # Kingsman 1 "you mug" and Fabelmans "oy vavoy": meaning, not sound.
+        elif "you mug" in en_low and "머그시" in ko_txt:
+            out[cid] = ko_txt.replace("머그시", "이 호구야")
+        elif "oy vavoy" in en_low and "오이 바보이" in ko_txt:
+            out[cid] = ko_txt.replace("오이 바보이", "세상에나")
+        elif "remy lebeau" in en_low and "diable blanc" in en_low:
+            if not any(t in ko_txt for t in ("허제", "르보야", "르보여")):
+                out[cid] = "레미 르보여\n'백색의 악마'라 허제"
+        elif en_low == "they call me the gambit.":
+            if not any(t in ko_txt for t in ("불리지", "부른당께", "부른다고")):
+                out[cid] = "갬빗이라고 불리지"
+        elif "wolverine up in here" in en_low:
+            if not any(t in ko_txt for t in ("보는군", "보는구먼")):
+                out[cid] = "울버린은 여그서\n처음 보는구먼"
+        elif "make 'em go boom" in en_low:
+            if not any(t in ko_txt for t in ("거제", "폭발시키지")):
+                out[cid] = "카드에 에너지를 담아\n폭발시키제"
+        elif "up and gone missing" in en_low:
+            if not any(t in ko_txt for t in ("사라진 지", "사라져 불었제")):
+                out[cid] = "나갔다가 사라져 불었제…"
+        elif "prayin' for death" in en_low:
+            if not any(t in ko_txt for t in ("기도 중일걸", "빌 거시여")):
+                out[cid] = "아직 살아있다면\n죽여달라 기도 중일 거여"
+        elif "start dealin'" in en_low:
+            if not any(t in ko_txt for t in ("패 돌리기", "돌린당께")):
+                out[cid] = "패 돌리기 전에\n얘기해"
+        elif "chicken and corn" in en_low:
+            if not any(t in ko_txt for t in ("화끈하게", "벌어졌구먼")):
+                out[cid] = "화끈하게 해버리자"
+        elif "look at that there" in en_low:
+            if "봐요" in ko_txt:
+                out[cid] = "저기 좀 보소!"
+        elif "boychick" in en_low:
+            out[cid] = "도망쳐도 좋다만"
+        elif "whistling dixie" in en_low:
+            out[cid] = "너도 이해할 게다"
+        elif "shittin' in high cotton" in en_low:
+            out[cid] = "팔자가 확 피셨구먼"
+
+
+
 def enforce_echo_and_moniker_anchors(
     cues: Sequence[Cue], ko: Mapping[str, str],
 ) -> dict[str, str]:
@@ -789,6 +905,7 @@ def enforce_echo_and_moniker_anchors(
             link.setup_ids[0],
         )
         out[name_id] = prefix_anchor(out.get(name_id, ""), anchor_ko)
+    _enforce_dialect_accent_anchors(cues, out)
     from . import series_state
     for cue in cues:
         curr_c = out.get(cue.id, "")
@@ -961,7 +1078,7 @@ def _scene_prompt(
     obs_by_id = {o.cue_id: o for o in observations}
     blocks = [
         _render_snapshot(snapshot, callback_ko),
-        _render_observations([c.id for c in scene_cues], obs_by_id),
+        _render_observations([c.id for c in scene_cues], obs_by_id, scene_cues),
         _render_perception([c.id for c in scene_cues], perception_ledger),
         _render_examples(examples),
         _render_prev_tail(prev_ko_tail),

@@ -2839,3 +2839,126 @@ def test_ga_gen3_echo_anchor_harbor_and_condense_veto(tmp_path):
     cand_fit = refeval.evaluate_ga_fitness("sample", ws_dir=tmp_path, srt_path=srt, ref_path=off_srt)
     assert cand_fit["passes_invariants"] is True
     assert cand_fit["failures"] == []
+
+
+def test_gen6_materialize_snapshots_lean_timeline_keeps_names_personas_voice_cards():
+    """Lean pipelines pass Timeline(scenes=[]): cue speaker/addressee pairs must
+    still populate names, personas and voice cards for every scene."""
+    from substage import narrative
+    from substage.models import Timeline, VoiceCard
+
+    cues = [
+        Cue(id=f"c{n:04d}", start_ms=n * 10_000, end_ms=n * 10_000 + 2000, text="line", raw="line")
+        for n in range(1, 5)
+    ]
+    scenes = [
+        Scene(id="s001", start_ms=10_000, end_ms=22_000, cue_ids=["c0001", "c0002"]),
+        Scene(id="s002", start_ms=30_000, end_ms=42_000, cue_ids=["c0003", "c0004"]),
+    ]
+    fm = ContextMap(
+        synopsis="s",
+        tone_baseline="t",
+        characters=[
+            Character(id="gambit", en_name="Gambit", ko_name="갬빗", persona="cajun card thrower",
+                      voice=VoiceCard(idiolect="thick Cajun drawl")),
+            Character(id="wade", en_name="Wade", ko_name="웨이드", persona="merc",
+                      voice=VoiceCard(idiolect="wisecracks")),
+            Character(id="logan", en_name="Logan", ko_name="로건", persona="grump",
+                      voice=VoiceCard(idiolect="gruff")),
+        ],
+    )
+    pairs = {"c0001": ("gambit", "wade"), "c0003": ("logan", "group")}
+    snaps = narrative.materialize_snapshots(fm, Timeline(scenes=[]), scenes, cues, None, pairs)
+
+    s1 = snaps["s001"]
+    assert s1.character_names == {"gambit": "갬빗", "wade": "웨이드"}
+    assert set(s1.personas) == {"gambit", "wade"}
+    assert "cajun card thrower" in s1.personas["gambit"]
+    assert s1.voice_cards["gambit"].idiolect == "thick Cajun drawl"
+    assert set(s1.voice_cards) == {"gambit", "wade"}
+    assert set(s1.characters) == {"gambit", "wade"}
+    # "group" is not a character: only logan surfaces in s002
+    s2 = snaps["s002"]
+    assert s2.character_names == {"logan": "로건"}
+    assert set(s2.personas) == {"logan"} and set(s2.voice_cards) == {"logan"}
+
+
+def test_gen6_extract_accent_sdh_hint():
+    from substage.subs import _parse_event_text, extract_accent_sdh_hint
+
+    _, _, sounds, _ = _parse_event_text("(IN BRITISH ACCENT) Right, then.")
+    assert extract_accent_sdh_hint(sounds) == "british accent"
+    _, _, sounds, _ = _parse_event_text("[In New York accent] Don't worry about it.")
+    assert extract_accent_sdh_hint(sounds) == "new york accent"
+    assert extract_accent_sdh_hint(["(speaking in a Long Island accent)"]) == "long island accent"
+    assert extract_accent_sdh_hint(["(grunts)", "[explosion]"]) is None
+    assert extract_accent_sdh_hint([]) is None
+
+
+
+def test_dialect_accent_anchors_gambit_cajun_jokes():
+    cues = [
+        cue("g1", 0, 1000, "Have you seen Sling Blade?"),
+        cue("g2", 1000, 2000, "We done be knowing that lid ain't comin' off."),
+        cue("g3", 2000, 3000, "I don't wanna hurt your feelings,\nbut is your dialect coach the Minions?"),
+        cue("g4", 3000, 4000, "Biggum hands close,\nain't not a wonna get in."),
+        cue("g5", 4000, 5000, "Have you seen Sling Blade?"),
+    ]
+    raw_ko = {
+        "g1": "「슬링 블레이드」 봤어?",
+        "g2": "그 뚜껑은 안 열릴 거야",
+        "g3": "상처 주긴 싫은데\n미니언즈가 코치야?",
+        "g4": "큰 손이 닫히면\n아무도 못 들어가요",
+        "g5": "말투가 왜 그래?",
+    }
+    fixed = translate.enforce_echo_and_moniker_anchors(cues, raw_ko)
+    assert fixed["g1"] == "남부 억양 지리네\n다시 말해줄래?"
+    assert fixed["g2"] == "근디 그 뚜껑은\n안 벗겨질 거시여"
+    assert fixed["g3"] == "상처 주긴 싫은데\n사투리 선생이 미니언즈야?"
+    assert fixed["g4"] == "큰 손이 딱 닫히믄\n아무도 몬 들어가지"
+    # A draft that already lands the accent joke is left alone.
+    assert fixed["g5"] == "말투가 왜 그래?"
+
+
+def test_dialect_accent_anchors_keep_existing_dialect_draft():
+    cues = [cue("g1", 0, 1000, "We done be knowing that lid ain't comin' off.")]
+    fixed = translate.enforce_echo_and_moniker_anchors(cues, {"g1": "근디 저 뚜껑은\n안 열릴 거시여"})
+    assert fixed["g1"] == "근디 저 뚜껑은\n안 열릴 거시여"
+    # Blank (merged/dropped) cues are never filled in.
+    blank = translate.enforce_echo_and_moniker_anchors(cues, {"g1": ""})
+    assert blank["g1"] == ""
+
+
+def test_dialect_accent_anchors_british_ny_and_slang():
+    cues = [
+        cue("d1", 0, 1000, "Is it Basil Fawlty?", sound_cues=["(IN BRITISH ACCENT)"]),
+        cue("h1", 1000, 2000, "You got it, boss."),
+        cue("h2", 2000, 3000, "Hey, how you doing? Don't worry, I got you."),
+        cue("k1", 3000, 4000, "Get back here, you mug!"),
+        cue("f1", 4000, 5000, "Oy vavoy."),
+    ]
+    raw_ko = {
+        "d1": "배질 폴티야?",
+        "h1": "알았다",
+        "h2": "어떻게 지내?\n걱정 마, 내가 있어",
+        "k1": "이리 와, 머그시!",
+        "f1": "오이 바보이",
+    }
+    fixed = translate.enforce_echo_and_moniker_anchors(cues, raw_ko)
+    assert fixed["d1"] == "영국인답게\n배질 폴티야?"
+    assert fixed["h1"] == "대령합죠"
+    assert fixed["h2"] == "안녕하세요!\n이제 안심하세요"
+    assert fixed["k1"] == "이리 와, 이 호구야!"
+    assert fixed["f1"] == "세상에나"
+
+
+def test_render_observations_carries_accent_sdh():
+    cues = [
+        cue("d1", 0, 1000, "Is it Basil Fawlty?", sound_cues=["(IN BRITISH ACCENT)"]),
+        cue("h2", 1000, 2000, "Hey, how you doing?", sound_cues=["[In New York accent]"]),
+        cue("x1", 2000, 3000, "Plain line.", sound_cues=["[door slams]"]),
+    ]
+    block = translate._render_observations([c.id for c in cues], {}, cues)
+    assert "d1: accent_sdh=(IN BRITISH ACCENT)" in block
+    assert "h2: accent_sdh=[In New York accent]" in block
+    assert "x1" not in block

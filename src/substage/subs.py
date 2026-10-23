@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from collections.abc import Sequence
 from pathlib import Path
 
 import pysubs2
@@ -45,6 +46,29 @@ _SPEAKER_DASH_RE = re.compile(r"^\s*[-–—]\s+")
 
 # Pure-bracket label fallback: "[WADE]:" / "(WADE):" conventions.
 _BRACKET_LABEL_RE = re.compile(r"^\s*[\(\[](?P<name>[^\(\)\[\]:]{1,40}?)[\)\]]\s*:\s*")
+
+# Manner-of-speaking SDH tags: "(IN BRITISH ACCENT)", "[In New York accent]",
+# "(speaking in a Cajun dialect)". Groups 1/2 hold the descriptor, 3/4 the kind.
+_ACCENT_SDH_RE = re.compile(
+    r"[\(\[]\s*(?:in\s+(?:a\s+|an\s+)?([a-z][a-z\s-]{1,25}?)\s+(accent|dialect|voice)"
+    r"|speaking\s+in\s+(?:a\s+|an\s+)?([a-z][a-z\s-]{1,25}?)\s+(accent|dialect))\s*[\)\]]",
+    re.I,
+)
+
+
+def extract_accent_sdh_hint(sound_cues: Sequence[str]) -> str | None:
+    """Return the first manner-of-speaking SDH tag as ``"<descriptor> <kind>"``.
+
+    ``["(in british accent)"]`` -> ``"british accent"``; ``None`` when absent.
+    """
+    for cue in sound_cues:
+        m = _ACCENT_SDH_RE.search(cue)
+        if m is None:
+            continue
+        desc = m.group(1) or m.group(3)
+        kind = m.group(2) or m.group(4)
+        return f"{' '.join(desc.lower().split())} {kind.lower()}"
+    return None
 
 
 def _norm_space(line: str) -> str:

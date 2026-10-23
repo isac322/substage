@@ -68,6 +68,109 @@ _FINAL_ADDRESSED_EC = frozenset({
     "다니까", "라니까", "잖아", "잖니", "잖나", "야", "이야", "어", "아", "래", "대",
 })
 
+# Regional polite endings Kiwi mis-tags as 해체 EF, bare EC, or nouns: Chungcheong ~유/~슈/~쥬,
+# Gyeongsang ~예/~더예/~니더, Jeolla ~께요/~구먼요/~거시여요, archaic servant ~합죠/~습죠
+_POLITE_DIALECT_EF_FORMS = frozenset({
+    "유", "슈", "쥬", "구유", "세유", "대유", "네유", "어유", "아유", "여유", "지유", "거든유",
+    "잖아유", "는데유", "은데유", "있슈", "없슈", "했슈", "지냈슈", "겠슈", "주슈", "봐유", "해유",
+    "가유", "와유", "려구유", "보려구유", "합죠", "습죠", "대령합죠", "시더예", "보입시더예",
+    "입시더", "입니더", "습니더", "당께요", "랑께요", "구먼요", "거시여요", "들어가예",
+})
+_POLITE_DIALECT_EF_ENDINGS = (
+    "구유", "세유", "어유", "아유", "네유", "대유", "지유", "잖아유", "거든유", "는데유", "있슈", "없슈",
+    "했슈", "겠슈", "합죠", "습죠", "시더예", "입니더", "습니더", "당께요", "랑께요",
+)
+_POLITE_DIALECT_SURFACE_SUFFIXES = (
+    "보려구유", "려구유", "거든유", "잖아유", "는데유", "은데유", "구유", "세유", "대유", "네유", "어유",
+    "아유", "여유", "지유", "래유", "께유", "게유", "봐유", "해유", "가유", "와유", "지냈슈", "있슈", "없슈",
+    "했슈", "겠슈", "주슈", "쥬", "대령합죠", "합죠", "습죠", "보입시더예", "시더예", "입시더", "입니더",
+    "습니더", "당께요", "랑께요", "구먼요", "거시여요", "들어가예",
+)
+# Regional 반말 endings (Jeolla ~제/~랑께/~거시여, Gyeongsang ~데이/~뿌서/~삐지/~몬 V-지;
+# standard miratives 구먼/구만/겠군 remain in _MIRATIVE_UNADDRESSED_EF)
+_BANMAL_DIALECT_EF_FORMS = frozenset({
+    "제", "없제", "됐제", "했제", "맞제", "그랬제", "말했제", "있제", "댔제", "허제", "거시여", "거시다",
+    "랑께", "당께", "데이", "르보데이", "뿌서", "닫치뿌서", "삐지", "몬 들어가지",
+})
+_BANMAL_DIALECT_SURFACE_SUFFIXES = (
+    "그랬제", "말했제", "없제", "됐제", "했제", "맞제", "있제", "댔제", "허제", "거시여", "거시다",
+    "랑께", "당께", "르보데이", "데이", "닫치뿌서", "뿌서", "삐지", "몬 들어가지",
+)
+# Whole words that are dialect endings by themselves; other short suffixes must follow a stem
+# in the same word so nouns like 여유, 구만 (90,000) and the interjection 아유 stay standard
+_STANDALONE_DIALECT_WORDS = frozenset({
+    "있슈", "없슈", "했슈", "겠슈", "주슈", "봐유", "해유", "가유", "와유", "합죠", "랑께", "당께",
+    "닫치뿌서", "삐지", "들어가예", "그랬제", "말했제", "없제", "됐제", "했제", "맞제", "있제", "댔제", "허제",
+})
+# Loanword nouns ending in 데이 (day) that are not the Gyeongsang ~데이 ending
+_DEI_LOANWORDS = (
+    "디데이", "원데이", "버스데이", "생일데이", "홀리데이", "페이데이", "먼데이", "튜즈데이", "웬즈데이",
+    "써스데이", "프라이데이", "새터데이", "선데이",
+)
+_SURFACE_TRAILING = ".?!…\"'\u201d\u2019~ \t"
+_DIALECT_MARKER_RE = re.compile(
+    "|".join(
+        [
+            re.escape(m)
+            for m in (
+                "근디", "거시여", "거시기", "없제", "됐제", "했제", "말했제", "댔제", "허제", "울 엄니",
+                "닫치뿌서", "닫히믄", "뛰들기", "삐끼", "몬 들어", "랑께", "당께", "있슈", "지냈슈",
+                "보려구유", "대령합죠", "시더예", "들어가예",
+            )
+        ]
+        + [r"(?<![가-힣])삐지(?![가-힣])", r"[가-힣]믄(?=$|[\s,.?!…])"]
+    )
+)
+
+
+def _surface_dialect_level(segment: str) -> Level | None:
+    """Addressed level a sentence's regional dialect ending carries, read off the surface text."""
+    s = segment.rstrip(_SURFACE_TRAILING)
+    if not s:
+        return None
+    last_word = s.split()[-1]
+    for suffixes, level in (
+        (_POLITE_DIALECT_SURFACE_SUFFIXES, "haeyo"),
+        (_BANMAL_DIALECT_SURFACE_SUFFIXES, "hae"),
+    ):
+        for suf in suffixes:
+            if " " in suf:
+                if s.endswith(suf):
+                    return level
+            elif last_word.endswith(suf) and (len(last_word) > len(suf) or suf in _STANDALONE_DIALECT_WORDS):
+                if suf == "데이" and last_word.endswith(_DEI_LOANWORDS):
+                    continue
+                return level
+    return None
+
+
+def has_dialect_marker(text: str) -> bool:
+    """True when *text* carries a recognizable Korean regional dialect marker
+    (Jeolla 근디/거시여/~제/~랑께, Gyeongsang ~뿌서/~믄/몬 V/~데이, Chungcheong ~슈/~유, ~합죠)."""
+    clean = strip_bidi(text)
+    if _DIALECT_MARKER_RE.search(clean):
+        return True
+    return any(
+        _surface_dialect_level(_TURN_RE.sub("", seg)) is not None
+        for seg in _SENT_RE.split(clean)
+        if _HANGUL_RE.search(seg)
+    )
+
+
+
+def strips_dialect_marker(old_ko: str, new_ko: str) -> bool:
+    """True when *new_ko* removes a regional dialect marker present in *old_ko*
+    either across the whole cue or on any aligned speaker turn."""
+    if has_dialect_marker(old_ko) and not has_dialect_marker(new_ko):
+        return True
+    old_turns = speaker_turns(old_ko)
+    new_turns = speaker_turns(new_ko)
+    if len(old_turns) == len(new_turns) and len(old_turns) > 1:
+        return any(
+            has_dialect_marker(ot) and not has_dialect_marker(nt)
+            for ot, nt in zip(old_turns, new_turns)
+        )
+    return False
 
 @lru_cache(maxsize=1)
 def _kiwi() -> Kiwi:
@@ -145,6 +248,8 @@ def _classify_ef_token(
         if idx > 0 and tokens[idx - 1].form and jongseong(tokens[idx - 1].form[-1]) == _JONG_L:
             return "hae"
         return None
+    if form in _POLITE_DIALECT_EF_FORMS or form.endswith(_POLITE_DIALECT_EF_ENDINGS):
+        return "haeyo"
     return "hae"
 
 
@@ -232,8 +337,10 @@ def analyze_turn_morphemes(turn_text: str) -> TurnMorphemeAnalysis:
                         elif ltk.form in ("아니야", "아냐"):
                             clause_levels.append("hae")
                     elif s_idx == len(sents) - 1 and ltk.tag == "EC":
-                        if ltk.form in _FINAL_ADDRESSED_EC:
+                        if ltk.form in _FINAL_ADDRESSED_EC or ltk.form in _BANMAL_DIALECT_EF_FORMS:
                             clause_levels.append("hae")
+                        elif ltk.form in _POLITE_DIALECT_EF_FORMS:
+                            clause_levels.append("haeyo")
                         elif ltk.form in ("는데", "은데", "\u11ab데", "던데", "니", "으니", "나", "는가", "던가") and st_has_q:
                             clause_levels.append("hae")
                         elif ltk.form == "나" and li > 0 and st_tokens[li - 1].form == "않":
@@ -269,12 +376,29 @@ def analyze_turn_morphemes(turn_text: str) -> TurnMorphemeAnalysis:
                 elif ltk.form in ("아니야", "아냐"):
                     clause_levels.append("hae")
             elif ltk.tag == "EC":
-                if ltk.form in _FINAL_ADDRESSED_EC:
+                if ltk.form in _FINAL_ADDRESSED_EC or ltk.form in _BANMAL_DIALECT_EF_FORMS:
                     clause_levels.append("hae")
+                elif ltk.form in _POLITE_DIALECT_EF_FORMS:
+                    clause_levels.append("haeyo")
                 elif ltk.form in ("는데", "은데", "\u11ab데", "던데", "니", "으니", "나", "는가", "던가") and has_q:
                     clause_levels.append("hae")
                 elif ltk.form == "나" and last_content_idx > 0 and tokens1[last_content_idx - 1].form == "않":
                     clause_levels.append("hae")
+
+    # Regional dialect endings (있슈, 보려구유, 아니랑께, 닫치뿌서, 오시더예) are mis-split or mis-tagged
+    # by Kiwi's standard-Korean lattice; the sentence-final surface ending decides that sentence's level
+    segments = [seg for seg in _SENT_RE.split(clean) if _HANGUL_RE.search(seg)]
+    dialect_levels = [_surface_dialect_level(seg) for seg in segments]
+    if any(lv is not None for lv in dialect_levels):
+        if len(segments) == 1:
+            clause_levels = [dialect_levels[0]]
+        else:
+            clause_levels = []
+            for seg, dlv in zip(segments, dialect_levels):
+                if dlv is not None:
+                    clause_levels.append(dlv)
+                else:
+                    clause_levels.extend(analyze_turn_morphemes(seg).clause_levels)
 
     addressed = tuple(lv for lv in clause_levels if lv in ("hae", "haeyo", "hasipsio"))
     bins = {"J" if lv in ("haeyo", "hasipsio") else "B" for lv in addressed}

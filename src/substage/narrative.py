@@ -690,6 +690,15 @@ def materialize_snapshots(
             for part in (hint_by_id.get(cid) or "").split("/"):
                 if (r := aliases.get(_norm(part))) is not None:
                     speakers.add(r)
+        # lean pipelines run with Timeline(scenes=[]): fall back to the cue
+        # speakers/addressees so names, personas and voice cards survive
+        for spk, adr in sorted(scene_pairs, key=lambda pr: (pr[0] or "", pr[1] or "")):
+            for ch in (spk, adr):
+                if ch in ko_names and ch not in present:
+                    present.append(ch)
+        for ch in sorted(s for s in speakers if s):
+            if ch in ko_names and ch not in present:
+                present.append(ch)
         for (spk, adr), e in edges.items():
             if (spk, adr) not in scene_pairs and not (spk in speakers and (adr in speakers or adr == "group")):
                 continue

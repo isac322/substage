@@ -32,6 +32,7 @@ Produce the ContextMap — in English EXCEPT ko_name / signature_ko / vocabulary
 Rules:
 - Prefer IDs/names consistently; every cue_id must exist in the transcript.
 - Be selective: a thin accurate map beats a bloated one.
+- Dialect (style guide §3.9): when a character's thick dialect or eye-dialect is itself a running joke or communication barrier, say `comic_dialect` in their persona and give the voice card's example line earthy Korean dialect endings (근디, ~거시여, ~제, ~믄) at their fixed level; record accent-metaphor jokes (Sling Blade, Basil Fawlty) and manner-of-speaking SDH (`[In New York accent]`) as callbacks/notes to localize, never as phonetic glossary entries.
 
 KOREAN REGISTER CONVENTIONS (from the house style guide; examples read EN | literal (bad) | good):
 <<STYLE_GUIDE_REGISTER>>

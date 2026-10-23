@@ -1,0 +1,226 @@
+{
+  "branch": "ga/gen7-dialect-convergence-poc",
+  "tag": "ga-gen7-dialect-convergence-poc",
+  "description": "Gen-7 Dialect Convergence PoC Winner: Full V1+V2+V3 integration + 54/54 Flash & Opus track convergence (R01..R18 0 failures) + 20/20 Jevify dialect/accent benchmark PASS",
+  "official_gold_standard_pass": "20/20 (100.00)",
+  "invariant_suite": "R01..R18 (dynamically scoped per title via applicable_reqs)",
+  "tracks_passing_all_invariants": "54/54 (27 Flash + 27 Opus, 0 failures)",
+  "srt_structural_integrity": {
+    "tracks": 54,
+    "total_events": 60814,
+    "over_two_lines_count": 0,
+    "duplicate_an8_count": 0
+  },
+  "jevify_20_scene_dialect_benchmark": {
+    "pre_both_properly_reflected": "2/20",
+    "post_both_properly_reflected": "20/20",
+    "pre_mean_p_both": 0.1805,
+    "post_mean_p_both": 0.5975,
+    "pre_mean_flash": 0.47,
+    "post_mean_flash": 0.6615,
+    "pre_mean_opus": 0.5245,
+    "post_mean_opus": 0.593,
+    "scenes": {
+      "01_dpw_gambit_intro_sling_blade": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.12,
+        "post_p_both": 0.58,
+        "pre_flash": 0.54,
+        "post_flash": 0.69,
+        "pre_opus": 0.31,
+        "post_opus": 0.64
+      },
+      "02_dpw_gambit_cajun_cards_johnny": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.1,
+        "post_p_both": 0.73,
+        "pre_flash": 0.54,
+        "post_flash": 0.72,
+        "pre_opus": 0.64,
+        "post_opus": 0.61
+      },
+      "03_dpw_gambit_chere_suicide": {
+        "pre_verdict": "one_track_missed_or_inconsistent",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.17,
+        "post_p_both": 0.63,
+        "pre_flash": 0.4,
+        "post_flash": 0.59,
+        "pre_opus": 0.61,
+        "post_opus": 0.57
+      },
+      "04_dpw_gambit_lid_dome_minions": {
+        "pre_verdict": "one_track_missed_or_inconsistent",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.26,
+        "post_p_both": 0.72,
+        "pre_flash": 0.48,
+        "post_flash": 0.68,
+        "pre_opus": 0.65,
+        "post_opus": 0.59
+      },
+      "05_dpw_gambit_daddy_buttery_nuts": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.14,
+        "post_p_both": 0.54,
+        "pre_flash": 0.55,
+        "post_flash": 0.73,
+        "pre_opus": 0.51,
+        "post_opus": 0.56
+      },
+      "06_dpw_gambit_biggum_hands": {
+        "pre_verdict": "one_track_missed_or_inconsistent",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.12,
+        "post_p_both": 0.58,
+        "pre_flash": 0.38,
+        "post_flash": 0.55,
+        "pre_opus": 0.53,
+        "post_opus": 0.67
+      },
+      "07_dpw_gambit_make_a_name": {
+        "pre_verdict": "both_properly_reflected",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.46,
+        "post_p_both": 0.5,
+        "pre_flash": 0.61,
+        "post_flash": 0.68,
+        "pre_opus": 0.7,
+        "post_opus": 0.66
+      },
+      "08_dp1_ajax_british_basil_fawlty": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.06,
+        "post_p_both": 0.66,
+        "pre_flash": 0.3,
+        "post_flash": 0.77,
+        "pre_opus": 0.55,
+        "post_opus": 0.81
+      },
+      "09_dp1_dopinder_polite_taxi": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.2,
+        "post_p_both": 0.56,
+        "pre_flash": 0.54,
+        "post_flash": 0.72,
+        "pre_opus": 0.68,
+        "post_opus": 0.74
+      },
+      "10_dp1_colossus_speech": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.34,
+        "post_p_both": 0.49,
+        "pre_flash": 0.48,
+        "post_flash": 0.51,
+        "pre_opus": 0.59,
+        "post_opus": 0.5
+      },
+      "11_km1_eggsy_pub_cockney": {
+        "pre_verdict": "both_properly_reflected",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.45,
+        "post_p_both": 0.45,
+        "pre_flash": 0.66,
+        "post_flash": 0.66,
+        "pre_opus": 0.64,
+        "post_opus": 0.64
+      },
+      "12_km1_valentine_harry_accent": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.25,
+        "post_p_both": 0.93,
+        "pre_flash": 0.6,
+        "post_flash": 0.68,
+        "pre_opus": 0.64,
+        "post_opus": 0.72
+      },
+      "13_km1_cockney_you_mug": {
+        "pre_verdict": "one_track_missed_or_inconsistent",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.01,
+        "post_p_both": 0.64,
+        "pre_flash": 0.4,
+        "post_flash": 0.66,
+        "pre_opus": 0.04,
+        "post_opus": 0.5
+      },
+      "14_km2_tequila_southern_suits": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.16,
+        "post_p_both": 0.62,
+        "pre_flash": 0.52,
+        "post_flash": 0.71,
+        "pre_opus": 0.59,
+        "post_opus": 0.5
+      },
+      "15_km2_whiskey_slap_your_mama": {
+        "pre_verdict": "one_track_missed_or_inconsistent",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.11,
+        "post_p_both": 0.57,
+        "pre_flash": 0.51,
+        "post_flash": 0.75,
+        "pre_opus": 0.47,
+        "post_opus": 0.45
+      },
+      "16_km2_high_cotton": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.12,
+        "post_p_both": 0.5,
+        "pre_flash": 0.5,
+        "post_flash": 0.58,
+        "pre_opus": 0.26,
+        "post_opus": 0.24
+      },
+      "17_ko_foghorn_leghorn_drawl": {
+        "pre_verdict": "one_track_missed_or_inconsistent",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.24,
+        "post_p_both": 0.67,
+        "pre_flash": 0.37,
+        "post_flash": 0.74,
+        "pre_opus": 0.61,
+        "post_opus": 0.77
+      },
+      "18_smh_delmar_you_got_it_boss": {
+        "pre_verdict": "one_track_missed_or_inconsistent",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.26,
+        "post_p_both": 0.49,
+        "pre_flash": 0.57,
+        "post_flash": 0.6,
+        "pre_opus": 0.59,
+        "post_opus": 0.6
+      },
+      "19_smh_peter_ny_accent": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.01,
+        "post_p_both": 0.57,
+        "pre_flash": 0.22,
+        "post_flash": 0.52,
+        "pre_opus": 0.46,
+        "post_opus": 0.42
+      },
+      "20_fabelmans_uncle_boris_boychick": {
+        "pre_verdict": "both_missed_or_flattened",
+        "post_verdict": "both_properly_reflected",
+        "pre_p_both": 0.03,
+        "post_p_both": 0.52,
+        "pre_flash": 0.23,
+        "post_flash": 0.69,
+        "pre_opus": 0.42,
+        "post_opus": 0.67
+      }
+    }
+  }
+}

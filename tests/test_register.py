@@ -654,3 +654,115 @@ def test_enforce_pragmatic_address_repairs_parent_neohui_and_mentor_dangsin():
     assert "당신" not in fixed["c0201"]
     assert "빌" in fixed["c0201"]
     assert "너희" not in fixed["c0799"]
+
+
+@pytest.mark.parametrize(
+    ("line", "level"),
+    [
+        # Chungcheong ~슈/~유/~쥬: polite, not 해체
+        ("거기 있슈.", "haeyo"),
+        ("잘 지냈슈?", "haeyo"),
+        ("한번 보려구유.", "haeyo"),
+        ("그렇쥬.", "haeyo"),
+        # Jeolla ~랑께/~거시여/~제: 반말
+        ("그건 아니랑께.", "hae"),
+        ("그게 그거시여.", "hae"),
+        ("돈이 없제.", "hae"),
+        # Gyeongsang ~데이/~뿌서/~삐지 반말, ~시더예 polite
+        ("조심하르보데이.", "hae"),
+        ("문 닫치뿌서.", "hae"),
+        ("가만 있그라 삐지.", "hae"),
+        ("이쪽으로 오시더예.", "haeyo"),
+        ("들어가예", "haeyo"),
+        # bodega servant ~합죠
+        ("음식 대령합죠.", "haeyo"),
+    ],
+)
+def test_regional_dialect_endings_get_addressed_level(line, level):
+    from substage.levels import addressed_levels, analyze_turn_morphemes
+
+    analysis = analyze_turn_morphemes(line)
+    assert analysis.turn_level == level
+    assert set(analysis.addressed_levels) == {level}
+    assert not analysis.has_internal_clash
+    assert addressed_levels(line) == [level]
+
+
+def test_dialect_turns_in_dash_line_are_leveled_per_speaker():
+    from substage.levels import addressed_levels
+
+    assert addressed_levels("- 잘 지냈슈?\n- 응, 잘 지냈어.") == ["haeyo", "hae"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "근디 그게 거시기허제",
+        "울 엄니가 그랬당께",
+        "큰 손이 딱 닫히믄 아무도 몬 들어가지",
+        "문 닫치뿌서",
+        "거기 있슈",
+        "한번 보려구유",
+        "음식 대령합죠",
+        "이쪽으로 오시더예",
+        "- 들어가예\n- 그래",
+    ],
+)
+def test_has_dialect_marker_detects_regional_speech(line):
+    from substage.levels import has_dialect_marker
+
+    assert has_dialect_marker(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "저 큰 주먹 봤지? 접근도 못 할걸",
+        "시간 여유가 없어",
+        "마음의 여유",
+        "아유, 깜짝이야",
+        "이슈가 있어요",
+        "오늘은 디데이",
+        "그건 문제야",
+        "삐지지 마",
+        "삐지지 마",
+        "그렇구먼",
+        "힘들겠군",
+    ],
+)
+def test_has_dialect_marker_ignores_standard_korean(line):
+    from substage.levels import has_dialect_marker
+
+    assert not has_dialect_marker(line)
+
+
+def test_gate_rejects_edit_that_strips_dialect():
+    gate = register.RegisterGate(_table(_edge("a", "b", "hae")), {"c0003": ("a", "b")})
+    old = "큰 손이 딱 닫히믄 아무도 몬 들어가지"
+    assert not gate.check("finale", ["c0003"], old, "저 큰 주먹 봤지? 접근도 못 할걸")
+    assert [r.reason for r in gate.rejections] == ["dialect_marker_stripped"]
+    # rewording that keeps the dialect voice still lands
+    assert gate.check("finale", ["c0003"], old, "주먹 딱 닫히믄 아무도 몬 들어가지")
+    # standard lines are unaffected
+    assert gate.check("finale", ["c0003"], "누가 그랬어?", "누가 그런 거야?")
+    # standard lines are unaffected (including standard mirative 그렇구먼 -> 그렇네)
+    assert gate.check("finale", ["c0003"], "누가 그랬어?", "누가 그런 거야?")
+    assert gate.check("finale", ["c0003"], "그렇구먼.", "그렇네.")
+    # per-turn dialect stripping in a 2-speaker cue is also rejected
+    assert not gate.check("finale", ["c0003"], "- 잘 지냈슈?\n- 거기 있슈.", "- 잘 지냈어요?\n- 거기 있슈.")
+
+def test_clef_gate_drops_dialect_stripping_edit_before_asking():
+    from substage.models import CueEdit
+    from substage.review import filter_edits_with_decisions
+
+    cues = {"c0003": _cue(3, "He's gonna close that big fist.")}
+    edits = [CueEdit(cue_id="c0003", new_ko="들어가요", reason="naturalness", kind="naturalness")]
+    # the dialect-stripping edit is dropped before the Clef client is consulted
+    assert filter_edits_with_decisions(None, None, edits, cues, {"c0003": "들어가예"}) == []
+
+
+def test_voice_card_dialect_policy_defaults_to_none():
+    from substage.models import VoiceCard
+
+    assert VoiceCard(idiolect="plain").dialect_policy == "none"
+    assert VoiceCard(idiolect="Cajun drawl", dialect_policy="comic_dialect").dialect_policy == "comic_dialect"

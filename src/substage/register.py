@@ -35,7 +35,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .levels import DASHES, Level, addressed_levels, analyze_turn_morphemes, ending_level, has_internal_register_clash, jongseong, speaker_turns
+from .levels import DASHES, Level, addressed_levels, analyze_turn_morphemes, ending_level, has_dialect_marker, has_internal_register_clash, jongseong, speaker_turns, strips_dialect_marker
 from .models import (
     ChunkObservations,
     Cue,
@@ -1281,7 +1281,7 @@ def _pronouns(ko: str) -> set[str]:
 class GateRejection(BaseModel):
     stage: str
     cue_ids: list[str]
-    reason: str  # level | pronoun | turn_count
+    reason: str  # level | pronoun | turn_count | dialect_marker_stripped
     old_ko: str
     new_ko: str
     pair: str | None = None
@@ -1320,7 +1320,8 @@ class RegisterGate:
     """Edit gate: a changed line passes only if each new level is the table
     level, unknown, or the line's old level. Merged cues with a unanimous
     table level must retain that level. No edit may introduce an address
-    pronoun other than the table's (none when the edge's pronoun is "none").
+    pronoun other than the table's (none when the edge's pronoun is "none"),
+    nor flatten an intentional regional-dialect rendering into standard Korean.
     Rejections accumulate in ``rejections``."""
 
     def __init__(
@@ -1404,6 +1405,15 @@ class RegisterGate:
         which has no register authority) allows only the old level."""
         if new_ko == old_ko:
             return True
+        if strips_dialect_marker(old_ko, new_ko):
+            self.rejections.append(
+                GateRejection(
+                    stage=stage, cue_ids=list(cue_ids), reason="dialect_marker_stripped",
+                    old_ko=old_ko, new_ko=new_ko,
+                    old_levels=_turn_levels(old_ko), new_levels=_turn_levels(new_ko),
+                )
+            )
+            return False
         if len(cue_ids) == 1 and (turn_pairs := self.turn_pairs_by_cue.get(cue_ids[0])):
             return self._check_turns(
                 stage, cue_ids[0], old_ko, new_ko, turn_pairs, use_table=use_table

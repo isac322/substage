@@ -3935,6 +3935,11 @@ def check_session_invariants(
         ]
         return "\n".join(dict.fromkeys(ov))
 
+
+    def window_in_scope(s_ms: int, e_ms: int) -> bool:
+        if cues:
+            return any(s_ms <= c.start_ms <= e_ms for c in cues)
+        return bool(events) and events[0]["start_ms"] <= s_ms and events[-1]["end_ms"] >= e_ms
     failures: list[dict[str, Any]] = []
     cnt = rep["counts"]
     raw_srt_text = _decode(srt)
@@ -4039,6 +4044,29 @@ def check_session_invariants(
                 ko_c = ko_for_cue(c.id)
                 if "스트리퍼" not in ko_c:
                     failures.append({"req": "R08_stripper_sov_inversion", "video_id": video_id, "cue_id": c.id, "got": ko_c, "expected": "first cue must place modifier '스트리퍼' first"})
+        # R15: Gambit's Cajun dialect + Sling Blade / Minions accent jokes
+        sling_ko = ko_in_window(4076000, 4081000)
+        if window_in_scope(4076000, 4081000) and (
+            not sling_ko or not any(tok in sling_ko for tok in ("억양", "사투리", "말투", "방언"))
+        ):
+            failures.append({"req": "R15_gambit_cajun_dialect_and_sling_blade", "video_id": video_id, "got": sling_ko or "(missing cue at 01:07:57)", "expected": "01:07:57 Sling Blade joke names the accent ('억양'/'사투리'/'말투'/'방언')"})
+        lid_ko = ko_in_window(4331000, 4337000)
+        minions_ko = ko_in_window(4337000, 4342000)
+        if window_in_scope(4331000, 4342000) and (
+            not lid_ko
+            or not minions_ko
+            or not any(tok in lid_ko for tok in ("삐끼", "삐지", "근디", "거시여", "없제", "뽑기 전엔"))
+            or ("사투리" not in minions_ko and "억양" not in minions_ko)
+        ):
+            failures.append({"req": "R15_gambit_cajun_dialect_and_sling_blade", "video_id": video_id, "got": f"{lid_ko} | {minions_ko}", "expected": "01:12:13 Gambit lid line in dialect + Minions dialect-coach joke ('사투리'/'억양')"})
+        biggum_ko = ko_in_window(4665000, 4670000)
+        if window_in_scope(4665000, 4670000) and (
+            not biggum_ko
+            or not any(tok in biggum_ko for tok in ("닫치뿌서", "뛰들기", "닫히믄", "몬 ", "못 들어가지", "없제", "거시여"))
+            or "들어가요" in biggum_ko
+            or "접근도 못 할걸" in biggum_ko
+        ):
+            failures.append({"req": "R15_gambit_cajun_dialect_and_sling_blade", "video_id": video_id, "got": biggum_ko or "(missing cue at 01:17:47)", "expected": "01:17:47 Gambit 'biggum hands' line kept in dialect (no standard '들어가요')"})
     elif video_id == "deadpool-2016":
         # 00:03:58 truncation check ("그러니까 사랑을" without verb)
         if re.search(r"^그러니까 사랑을$", ko_in_window(237000, 242000), re.M):
@@ -4056,6 +4084,12 @@ def check_session_invariants(
         # Colossus speech banmal consistency (forbid '약속만 해 줘요')
         if "약속만 해 줘요" in full_ko_all:
             failures.append({"req": "R05_colossus_banmal", "video_id": video_id, "got": "약속만 해 줘요", "expected": "'약속만 해 줘'"})
+        # R16: 44:29..44:35 Basil Fawlty British-accent gag
+        basil_ko = ko_in_window(2669000, 2675000)
+        if window_in_scope(2669000, 2675000) and (
+            not basil_ko or not any(tok in basil_ko for tok in ("영국", "억양", "신사", "말투"))
+        ):
+            failures.append({"req": "R16_deadpool_british_accent_basil_fawlty", "video_id": video_id, "got": basil_ko or "(missing cue at 00:44:31)", "expected": "British-accent gag localized ('영국'/'억양'/'신사'/'말투')"})
     elif video_id == "kingsman-the-secret-service-2014":
         for c in cues:
             if "concrete gesture of our gratitude" in c.text.lower():
@@ -4068,10 +4102,24 @@ def check_session_invariants(
         # Turn 108: Mother to young Eggsy (forbid '고마워, 자기')
         if "고마워, 자기" in full_ko_all:
             failures.append({"req": "R10_kingsman_mother_to_son", "video_id": video_id, "got": "고마워, 자기", "expected": "'고마워, 아들'"})
+        # R18: 121:19 Cockney 'chicken costume's gonna suit you, you mug' must not be dropped or calqued as '머그시'
+        mug_ko = ko_in_window(7278500, 7282000)
+        if window_in_scope(7278500, 7282000) and (
+            not mug_ko or "머그시" in mug_ko or not any(tok in mug_ko for tok in ("등신", "호구", "멍청이", "얼간이"))
+        ):
+            failures.append({"req": "R18_kingsman_cockney_mug_slang", "video_id": video_id, "got": mug_ko or "(missing cue at 121:19)", "expected": "Cockney 'mug' rendered as slang ('등신'/'호구') at 121:19"})
     elif video_id == "spider-man-homecoming-2017":
         # Turn 092: Training Wheels Protocol term-echo consistency (forbid '초보자 프로토콜')
         if "초보자 프로토콜" in full_ko_all:
             failures.append({"req": "R07_training_wheels_echo", "video_id": video_id, "got": "초보자 프로토콜", "expected": "'보조바퀴 프로토콜' matching payoff '보조바퀴'"})
+        # R17: Delmar's deli banter + NY-accent reassurance
+        delmar_ko = ko_in_window(886000, 891000)
+        ny_ko = ko_in_window(3844000, 3848000)
+        if (
+            (window_in_scope(886000, 891000) and (not delmar_ko or "알았다" in delmar_ko))
+            or (window_in_scope(3844000, 3848000) and (not ny_ko or "안심하세요" not in ny_ko))
+        ):
+            failures.append({"req": "R17_homecoming_delmar_and_ny_accent", "video_id": video_id, "got": f"{delmar_ko} | {ny_ko}", "expected": "Delmar banter without stiff '알았다'; NY-accent line as polite reassurance ('안심하세요')"})
     elif video_id == "spider-man-far-from-home-2019":
         # Turn 008 & 009: 48:13 "You look really pretty / And therefore, I have value?" split & speech-act
         ffh_evs = [ev for ev in dlg_evs if 2892500 <= ev["start_ms"] <= 2897000]
@@ -4100,6 +4148,8 @@ def check_session_invariants(
         scr_ko = "\n".join(ev["text"] for ev in dlg_evs if 1693435 <= ev["start_ms"] <= 1695234)
         if "해 봐" not in do_it_ko or "할퀴" not in scr_ko:
             failures.append({"req": "R13_fabelmans_scratch_dialogue", "video_id": video_id, "got": f"{do_it_ko} | {scr_ko}", "expected": "'해 봐, 해 봐!' and '할퀴어 버릴 거야!'"})
+        if "오이 바보이" in full_ko_all:
+            failures.append({"req": "R13_fabelmans_scratch_dialogue", "video_id": video_id, "got": "오이 바보이", "expected": "idiomatic exclamation ('세상에나'), not phonetic '오이 바보이'"})
     elif video_id.startswith("super-pumped-"):
         if any(bad in full_ko_all for bad in ("크든가 죽든가", "크든지 죽든지", "크거나 죽거나", "무버에서 그딴")):
             failures.append({"req": "R10_super_pumped_idioms", "video_id": video_id, "got": "found banned calque", "expected": "'성장 아니면 사장' and '내 편인지 아닌지'"})
@@ -4118,10 +4168,10 @@ def check_session_invariants(
         "R05_zero_scene_oscillation", "R05_zero_stranger_banmal", "R11_R12_ost_and_collision_free",
     }
     by_vid = {
-        "deadpool-and-wolverine-2024": {"R05_carnival_polite", "R05_nicepool_banmal", "R06_conditional_echo_if", "R07_moniker_blind_al", "R08_stripper_sov_inversion", "R10_not_all_of_you_asleep", "R11_sacred_timeline_ost"},
-        "deadpool-2016": {"R04_deadpool_two_speaker_dashes", "R05_colossus_banmal", "R07_moniker_chastity", "R10_deadpool_fuck_me_exclamation", "R10_deadpool_no_truncated_predicate"},
-        "kingsman-the-secret-service-2014": {"R05_kingsman_rest_assured", "R09_kingsman_discourse_unit", "R10_kingsman_mother_to_son"},
-        "spider-man-homecoming-2017": {"R07_training_wheels_echo"},
+        "deadpool-and-wolverine-2024": {"R05_carnival_polite", "R05_nicepool_banmal", "R06_conditional_echo_if", "R07_moniker_blind_al", "R08_stripper_sov_inversion", "R10_not_all_of_you_asleep", "R11_sacred_timeline_ost", "R15_gambit_cajun_dialect_and_sling_blade"},
+        "deadpool-2016": {"R04_deadpool_two_speaker_dashes", "R05_colossus_banmal", "R07_moniker_chastity", "R10_deadpool_fuck_me_exclamation", "R10_deadpool_no_truncated_predicate", "R16_deadpool_british_accent_basil_fawlty"},
+        "kingsman-the-secret-service-2014": {"R05_kingsman_rest_assured", "R09_kingsman_discourse_unit", "R10_kingsman_mother_to_son", "R18_kingsman_cockney_mug_slang"},
+        "spider-man-homecoming-2017": {"R07_training_wheels_echo", "R17_homecoming_delmar_and_ny_accent"},
         "spider-man-far-from-home-2019": {"R10_ffh_pretty_value_split_and_speech_act"},
         "logan-2017": {"R10_logan_blow_on_pills", "R11_logan_sleepwalking_and_id_ost", "R12_logan_no_phantom_title"},
         "the-fabelmans-2022": {"R13_fabelmans_stole_car_lyric", "R13_fabelmans_scratch_dialogue"},
