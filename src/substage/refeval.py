@@ -3937,12 +3937,16 @@ def check_session_invariants(
 
     failures: list[dict[str, Any]] = []
     cnt = rep["counts"]
+    raw_srt_text = _decode(srt)
 
-    # R03: Layout & zero slashes
+    # R03: Layout, zero slashes, and zero duplicate {\an8}{\an8} tags
     if cnt["slash_count"] > 0:
         failures.append({"req": "R03_zero_slash", "video_id": video_id, "got": cnt["slash_count"], "expected": 0})
     if cnt["over_two_lines_count"] > 0:
         failures.append({"req": "R03_max_two_lines", "video_id": video_id, "got": cnt["over_two_lines_count"], "expected": 0})
+    dup_an_hits = len(re.findall(r"\{\\an\d\}\s*\{\\an\d\}", raw_srt_text))
+    if dup_an_hits > 0:
+        failures.append({"req": "R03_no_duplicate_an8_tags", "video_id": video_id, "got": dup_an_hits, "expected": 0})
 
     # R05: Zero register oscillation & stranger banmal
     if cnt["scene_oscillations"] > 0:
@@ -3999,68 +4003,94 @@ def check_session_invariants(
                         "expected": "must contain '순결'",
                     })
 
-    # R08..R12: Concrete session spot-check invariants
+    # R04..R14: Full 147-Turn Raw Session Concrete Invariants
+    full_ko_all = "\n".join(ev["text"] for ev in events)
     if video_id == "deadpool-and-wolverine-2024":
         # Carnival MPV scene (11:45..12:05) polite register
         carnival_ko = ko_in_window(705000, 725000)
         if any(bad in carnival_ko for bad in ("미니밴이 아니야", "MPV지", "- 오딧세이?", "- 오디세이?")):
-            failures.append({
-                "req": "R05_carnival_polite",
-                "video_id": video_id,
-                "got": carnival_ko,
-                "expected": "100% polite 해요체 across 11:45..12:05",
-            })
-        # 42:57 "Not all of you was asleep" (forbid literal calque '다 잔 건 아니던데')
+            failures.append({"req": "R05_carnival_polite", "video_id": video_id, "got": carnival_ko, "expected": "100% polite 해요체 across 11:45..12:05"})
+        # Nicepool scenes (57:40..59:50, 95:10..99:15): Wade <-> Nicepool 100% banmal
+        nicepool_ko = ko_in_window(3460000, 3590000) + "\n" + ko_in_window(5710000, 5735000)
+        if any(bad in nicepool_ko for bad in ("방금은 죄송해요", "전 데드풀이에요", "티도 안 나요", "괜찮아요", "페미니스트거든요", "돈 안 받아요", "그만하죠", "돌려주셔야 해요", "- 미안해요!")):
+            failures.append({"req": "R05_nicepool_banmal", "video_id": video_id, "got": nicepool_ko[:200], "expected": "Wade <-> Nicepool 100% banmal across all scenes"})
+        # 42:57 "Not all of you was asleep"
         asleep_ko = ko_in_window(2577000, 2580500)
         if "다 잔 건 아니" in asleep_ko or not any(tok in asleep_ko for tok in ("거시기", "깨어 있는", "안 자던데", "서 있던데")):
-            failures.append({
-                "req": "R10_not_all_of_you_asleep",
-                "video_id": video_id,
-                "got": asleep_ko,
-                "expected": "situational metaphor ('깨어 있는 데도 있더군' / '네 거시기는 안 자던데'), never literal '다 잔 건 아니던데'",
-            })
+            failures.append({"req": "R10_not_all_of_you_asleep", "video_id": video_id, "got": asleep_ko, "expected": "situational metaphor, never literal '다 잔 건 아니던데'"})
         # 07:24 "THE SACRED TIMELINE"
         sacred_ko = ko_in_window(442000, 446000, include_ost=True)
         if "신성한 시간선" not in sacred_ko:
-            failures.append({
-                "req": "R11_sacred_timeline_ost",
-                "video_id": video_id,
-                "got": sacred_ko,
-                "expected": "must contain '신성한 시간선'",
-            })
-        # 63:12 Stripper SOV clause inversion ("You couldn't even save a relationship… / with a goddamn stripper!")
+            failures.append({"req": "R11_sacred_timeline_ost", "video_id": video_id, "got": sacred_ko, "expected": "must contain '신성한 시간선'"})
+        # 63:12 Stripper SOV clause inversion
         for c in cues:
             if "save a relationship" in c.text.lower():
                 ko_c = ko_for_cue(c.id)
                 if "스트리퍼" not in ko_c:
-                    failures.append({
-                        "req": "R08_stripper_sov_inversion",
-                        "video_id": video_id,
-                        "cue_id": c.id,
-                        "got": ko_c,
-                        "expected": "first cue must place modifier '스트리퍼' first in Korean SOV order",
-                    })
+                    failures.append({"req": "R08_stripper_sov_inversion", "video_id": video_id, "cue_id": c.id, "got": ko_c, "expected": "first cue must place modifier '스트리퍼' first"})
+    elif video_id == "deadpool-2016":
+        # 00:03:58 truncation check ("그러니까 사랑을" without verb)
+        if re.search(r"^그러니까 사랑을$", ko_in_window(237000, 242000), re.M):
+            failures.append({"req": "R10_deadpool_no_truncated_predicate", "video_id": video_id, "got": "그러니까 사랑을", "expected": "complete predicate ('그러니까 사랑을 지켜야지')"})
+        # 00:09:24 & 00:20:24 two-speaker dashes
+        suit_ko = ko_in_window(563000, 567000)
+        if "빨간 슈트입니다\n빨간 슈트" in suit_ko:
+            failures.append({"req": "R04_deadpool_two_speaker_dashes", "video_id": video_id, "got": suit_ko, "expected": "'- 빨간 슈트입니다\\n- 빨간 슈트'"})
+        van_ko = ko_in_window(1223000, 1227000)
+        if "바네사\n웨이드" in van_ko and "- 바네사" not in van_ko:
+            failures.append({"req": "R04_deadpool_two_speaker_dashes", "video_id": video_id, "got": van_ko, "expected": "'- 바네사\\n- 웨이드'"})
+        # "Fuck me!" taxi exclamation (Turn 110: forbid '나랑 자 줘')
+        if "나랑 자 줘" in full_ko_all:
+            failures.append({"req": "R10_deadpool_fuck_me_exclamation", "video_id": video_id, "got": "나랑 자 줘", "expected": "exclamation ('아오, 씨발!')"})
+        # Colossus speech banmal consistency (forbid '약속만 해 줘요')
+        if "약속만 해 줘요" in full_ko_all:
+            failures.append({"req": "R05_colossus_banmal", "video_id": video_id, "got": "약속만 해 줘요", "expected": "'약속만 해 줘'"})
     elif video_id == "kingsman-the-secret-service-2014":
         for c in cues:
             if "concrete gesture of our gratitude" in c.text.lower():
                 ko_c = ko_for_cue(c.id)
                 if not any(tok in ko_c for tok in ("표시로", "의미에서", "뜻으로", "보답으로", "감사의")):
-                    failures.append({
-                        "req": "R09_kingsman_discourse_unit",
-                        "video_id": video_id,
-                        "cue_id": c.id,
-                        "got": ko_c,
-                        "expected": "connective discourse unit phrasing ('감사의 표시로' / '의미에서')",
-                    })
+                    failures.append({"req": "R09_kingsman_discourse_unit", "video_id": video_id, "cue_id": c.id, "got": ko_c, "expected": "connective discourse phrasing ('감사의 표시로')"})
+        # Turn 105: 05:13 "Rest assured" to widow (forbid '안심돼?')
+        if "안심돼?" in ko_in_window(311000, 316000, include_ost=True):
+            failures.append({"req": "R05_kingsman_rest_assured", "video_id": video_id, "got": "안심돼?", "expected": "polite assurance ('걱정 마세요' / '안심하셔도 됩니다')"})
+        # Turn 108: Mother to young Eggsy (forbid '고마워, 자기')
+        if "고마워, 자기" in full_ko_all:
+            failures.append({"req": "R10_kingsman_mother_to_son", "video_id": video_id, "got": "고마워, 자기", "expected": "'고마워, 아들'"})
+    elif video_id == "spider-man-homecoming-2017":
+        # Turn 092: Training Wheels Protocol term-echo consistency (forbid '초보자 프로토콜')
+        if "초보자 프로토콜" in full_ko_all:
+            failures.append({"req": "R07_training_wheels_echo", "video_id": video_id, "got": "초보자 프로토콜", "expected": "'보조바퀴 프로토콜' matching payoff '보조바퀴'"})
+    elif video_id == "spider-man-far-from-home-2019":
+        # Turn 008 & 009: 48:13 "You look really pretty / And therefore, I have value?" split & speech-act
+        ffh_evs = [ev for ev in dlg_evs if 2892500 <= ev["start_ms"] <= 2897000]
+        ffh_txt = "\n".join(ev["text"] for ev in ffh_evs)
+        if len(ffh_evs) < 2 or "예쁘면 가치가 생겨" in ffh_txt or "그래야 가치가 있고" in ffh_txt:
+            failures.append({"req": "R10_ffh_pretty_value_split_and_speech_act", "video_id": video_id, "got": ffh_txt, "expected": "2 split speaker events + speech-act ('넌 외모로 사람 평가해?' / '예뻐야만 가치가 있는 거야?')"})
+    elif video_id == "logan-2017":
+        # Turn 121: 01:55..02:02 phantom '로건'
+        if "로건" in ko_in_window(118000, 122000, include_ost=True):
+            failures.append({"req": "R12_logan_no_phantom_title", "video_id": video_id, "got": "로건 at 01:59", "expected": "no phantom '로건' during Spanish SDH"})
+        # Turn 122: 04:52 'Sleepwalking. Between the ice caps' must contain '몽유병'
+        sleep_ko = ko_in_window(290000, 297000)
+        if "몽유병" not in sleep_ko or "빙하와 포르노" in sleep_ko:
+            failures.append({"req": "R11_logan_sleepwalking_and_id_ost", "video_id": video_id, "got": sleep_ko, "expected": "must contain '몽유병' and not '빙하와 포르노'"})
+        # Turn 013: 14:05 'How about you blow on them to make them safe?'
+        blow_ko = ko_in_window(844000, 849000)
+        if "안심되게" in blow_ko or "호 불어 드려요" in blow_ko:
+            failures.append({"req": "R10_logan_blow_on_pills", "video_id": video_id, "got": blow_ko, "expected": "sarcastic polite remark ('후 불어서라도 잡수시지 그래요?' / '일단 후 불어서라도 드시죠')"})
+    elif video_id == "the-fabelmans-2022":
+        # Turn 101: 35:44 'And stole the car and took it for a ride' must not be missing
+        car_ko = ko_in_window(2144000, 2148000)
+        if "차 열쇠" not in car_ko and "훔쳐서" not in car_ko and "타고" not in car_ko:
+            failures.append({"req": "R13_fabelmans_stole_car_lyric", "video_id": video_id, "got": car_ko, "expected": "'차 열쇠 훔쳐서\\n몰래 타고 다녔어'"})
+        # Turn 107: 28:12 'Do it. Do it! / I will scratch you!' must not be missing
+        scr_ko = ko_in_window(1691500, 1696000)
+        if not scr_ko.strip():
+            failures.append({"req": "R13_fabelmans_scratch_dialogue", "video_id": video_id, "got": scr_ko, "expected": "non-empty Korean for 'Do it! / I will scratch you!'"})
     elif video_id.startswith("super-pumped-"):
-        full_ko = "\n".join(ev["text"] for ev in dlg_evs)
-        if "크든가 죽든가" in full_ko or "무버에서 그딴" in full_ko:
-            failures.append({
-                "req": "R10_super_pumped_idioms",
-                "video_id": video_id,
-                "got": "found banned calque ('크든가 죽든가' or '무버에서 그딴')",
-                "expected": "'성장 아니면 사장' and '내 편인지 아닌지'",
-            })
+        if any(bad in full_ko_all for bad in ("크든가 죽든가", "크든지 죽든지", "크거나 죽거나", "무버에서 그딴")):
+            failures.append({"req": "R10_super_pumped_idioms", "video_id": video_id, "got": "found banned calque", "expected": "'성장 아니면 사장' and '내 편인지 아닌지'"})
 
     # R11 & R12: Missing OST or collisions
     if cnt["missing_ost"] > 0 or rep["collision_free_score"] < 100.0:
@@ -4071,7 +4101,7 @@ def check_session_invariants(
             "expected": {"missing_ost": 0, "collision_free_score": 100.0},
         })
 
-    total_checks = 14
+    total_checks = 25
     failed_reqs = len({f["req"] for f in failures})
     pass_rate = round(max(0.0, (total_checks - failed_reqs) / total_checks * 100.0), 2)
     return {
