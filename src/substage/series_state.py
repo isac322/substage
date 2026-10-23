@@ -1058,6 +1058,58 @@ def pin_cues(
     return pins
 
 
+_JOSA_SUFFIX_RE = re.compile(
+    r"^(을|를|이|가|은|는|과|와|으로|로|이라고|라고|이면|면|이고|고|이라서|라서|이라니|라니|이란|란|이라|라)(?=\s|[.?!,…'\"”’)\]]|$)"
+)
+
+
+def _harmonize_josa(stem: str, josa: str) -> str:
+    if not stem or not josa:
+        return josa
+    last = stem.rstrip()[-1]
+    if not ("가" <= last <= "힣"):
+        return josa
+    jong = (ord(last) - 0xAC00) % 28
+    has_b = jong > 0
+    pairs = {
+        "을": "을" if has_b else "를",
+        "를": "을" if has_b else "를",
+        "이": "이" if has_b else "가",
+        "가": "이" if has_b else "가",
+        "은": "은" if has_b else "는",
+        "는": "은" if has_b else "는",
+        "과": "과" if has_b else "와",
+        "와": "과" if has_b else "와",
+        "으로": "으로" if (has_b and jong != 8) else "로",
+        "로": "으로" if (has_b and jong != 8) else "로",
+        "이라고": "이라고" if has_b else "라고",
+        "라고": "이라고" if has_b else "라고",
+        "이면": "이면" if has_b else "면",
+        "면": "이면" if has_b else "면",
+        "이고": "이고" if has_b else "고",
+        "고": "이고" if has_b else "고",
+        "이라": "이라" if has_b else "라",
+        "라": "이라" if has_b else "라",
+        "이란": "이란" if has_b else "란",
+        "란": "이란" if has_b else "란",
+        "이라서": "이라서" if has_b else "라서",
+        "라서": "이라서" if has_b else "라서",
+        "이라니": "이라니" if has_b else "라니",
+        "라니": "이라니" if has_b else "라니",
+    }
+    return pairs.get(josa, josa)
+
+
+def _replace_with_josa_harmony(text: str, old_term: str, new_term: str) -> str:
+    if not old_term or old_term == new_term or old_term not in text:
+        return text
+    pat = re.compile(
+        re.escape(old_term)
+        + r"(을|를|이|가|은|는|과|와|으로|로|이라고|라고|이면|면|이고|고|이라서|라서|이라니|라니|이란|란|이라|라)?(?=\s|[.?!,…'\"”’)\]]|$)"
+    )
+    return pat.sub(lambda m: new_term + _harmonize_josa(new_term, m.group(1) or ""), text)
+
+
 def _replace_fuzzy_ko_name(ko_text: str, target_ko_name: str) -> str:
     """Replace near-homophone or unspaced Hangul tokens with `target_ko_name`."""
     if not ko_text or not target_ko_name:
@@ -1092,7 +1144,7 @@ def _replace_fuzzy_ko_name(ko_text: str, target_ko_name: str) -> str:
                 and (stem[0] == tp[0] or (len(tp) >= 3 and stem[-1] == tp[-1]))
                 and _levenshtein(stem, tp) <= max_dist
             ):
-                return tp + josa
+                return tp + _harmonize_josa(tp, josa)
             return word
         out = re.sub(r"[가-힣]{2,10}", _sub_tok, out)
     return out
@@ -1126,8 +1178,8 @@ def _enforce_series_phrase_locks(
         out = re.sub(rf"(?<!\w){re.escape(en)}(?!\w)", lambda _m: canonical, out, flags=re.I)
         variants = [entry.ko for entry in entries if entry.en.casefold() == en.casefold()]
         for variant in variants:
-            if variant and variant != canonical:
-                out = out.replace(variant, canonical)
+            if variant and variant != canonical and variant in out:
+                out = _replace_with_josa_harmony(out, variant, canonical)
         kind = next((entry.kind for entry in reversed(entries) if entry.en == en), "proper_alias")
         if kind in {"proper_alias", "place_or_org"}:
             out = _replace_fuzzy_ko_name(out, canonical)

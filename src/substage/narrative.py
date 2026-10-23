@@ -504,9 +504,7 @@ def normalize_concept_glossary(context_map: ContextMap) -> ContextMap:
             and not re.search(r"[.!?\n]", definition)
             and not _PHONETIC_CONCEPT.search(definition) else None
         )
-        phonetic = bool(_PHONETIC_CONCEPT.search(entry.ko)) or (
-            composed is not None and entry.kind in {"descriptive_concept", "slogan"} and entry.ko != composed
-        )
+        phonetic = bool(_PHONETIC_CONCEPT.search(entry.ko))
         if not re.search(r"[가-힣]", entry.ko) or phonetic:
             replacement = composed or korean_definition
             if replacement is not None:

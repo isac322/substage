@@ -480,6 +480,7 @@ def _apply_picture_edits(
     """Apply picture-check edits, then the deterministic S5 pass
     (validate.finish) on each edited cue. No model call and no second
     picture check."""
+    before = dict(ko)
     out, _ = _apply_edits(ko, edits)
     if lineage is not None:
         validate.reconcile_lineage(lineage, out)
@@ -489,6 +490,12 @@ def _apply_picture_edits(
                 cues_by_id.get(cid), out[cid], settings,
                 retained_fragments=lineage.fragments_by_cue.get(cid) if lineage is not None else None,
             )
+    for sp in translate.build_utterance_spans(list(cues_by_id.values())):
+        if any(cid in {e.cue_id for e in edits} for cid in sp.cue_ids):
+            if translate.validate_span_continuity(sp, out) and not translate.validate_span_continuity(sp, before):
+                for cid in sp.cue_ids:
+                    if cid in before:
+                        out[cid] = before[cid]
     return out
 
 
@@ -1273,8 +1280,11 @@ def run(
                         vpath, o.start_ms, o.end_ms, frame_exact=translate._is_frame_exact_cue(o)
                     )
                     if (ns, ne) != (o.start_ms, o.end_ms):
-                        o = o.model_copy(update={"start_ms": ns, "end_ms": max(ne, ns + 800)})
-                    snapped_ost.append(o)
+                        o = o.model_copy(update={
+                            "start_ms": ns,
+                            "end_ms": max(ne, ns + 800),
+                            "timing_provenance": "scdet_snapped",
+                        })
                 ost = snapped_ost
                 snap_ck.put("snapped", snap_h, _Cues(items=ost))
         cues, scenes = _merge_ost(cues, scenes, ost)

@@ -4294,19 +4294,9 @@ def check_session_invariants(
         "universal_slogan_inconsistency", "universal_orphan_speaker_dash",
         "universal_unicode_ellipsis", "universal_unnormalized_quotes",
         "universal_srt_register_oscillation", "universal_missing_dialogue",
+        "universal_ungrammatical_josa",
     }
-    by_vid = {
-        "deadpool-and-wolverine-2024": {"R05_carnival_polite", "R05_nicepool_banmal", "R06_conditional_echo_if", "R07_moniker_blind_al", "R08_stripper_sov_inversion", "R10_not_all_of_you_asleep", "R11_sacred_timeline_ost", "R15_gambit_cajun_dialect_and_sling_blade", "R20_dpw_spam_ost_timing"},
-        "deadpool-2016": {"R04_deadpool_two_speaker_dashes", "R05_colossus_banmal", "R07_moniker_chastity", "R10_deadpool_fuck_me_exclamation", "R10_deadpool_no_truncated_predicate", "R16_deadpool_british_accent_basil_fawlty"},
-        "kingsman-the-secret-service-2014": {"R05_kingsman_rest_assured", "R09_kingsman_discourse_unit", "R10_kingsman_mother_to_son", "R18_kingsman_cockney_mug_slang"},
-        "spider-man-homecoming-2017": {"R07_training_wheels_echo", "R17_homecoming_delmar_and_ny_accent"},
-        "spider-man-far-from-home-2019": {"R10_ffh_pretty_value_split_and_speech_act"},
-        "logan-2017": {"R10_logan_blow_on_pills", "R11_logan_sleepwalking_and_id_ost", "R12_logan_no_phantom_title"},
-        "the-fabelmans-2022": {"R13_fabelmans_stole_car_lyric", "R13_fabelmans_scratch_dialogue"},
-    }
-    applicable_reqs = set(base_reqs) | by_vid.get(video_id, set())
-    if video_id.startswith("super-pumped-"):
-        applicable_reqs.add("R10_super_pumped_idioms")
+    applicable_reqs = set(base_reqs) | {f["req"] for f in failures}
     failed_reqs = len({f["req"] for f in failures})
     total_checks = max(len(applicable_reqs), failed_reqs, 1)
     pass_rate = round(max(0.0, (total_checks - failed_reqs) / total_checks * 100.0), 2)

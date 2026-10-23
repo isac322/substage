@@ -36,9 +36,9 @@ def _normalize_body(event: OutEvent) -> str:
     text = _strip_an_prefix(strip_clause_slashes(event.ko)).replace("…", "...")
     if event.channel == "dialogue":
         lines = text.splitlines()
-        dashed = [bool(re.match(r"^\s*-\s*", line)) for line in lines]
+        dashed = [bool(re.match(r"^\s*-(?!\d)\s*", line)) for line in lines]
         if len(lines) == 1 and dashed[0]:
-            text = re.sub(r"^\s*-\s*", "", lines[0])
+            text = re.sub(r"^\s*-(?!\d)\s*", "", lines[0])
         elif len(lines) == 2 and any(dashed):
             speakers = [
                 fragment.speaker.strip().casefold()
@@ -49,7 +49,7 @@ def _normalize_body(event: OutEvent) -> str:
                 len(set(speakers)) == 2
                 and all(fragment.speaker for fragment in event.fragments if fragment.text.strip())
             )
-            bodies = [re.sub(r"^\s*-\s*", "", line) for line in lines]
+            bodies = [re.sub(r"^\s*-(?!\d)\s*", "", line) for line in lines]
             text = "\n".join(
                 f"- {body}" if all(dashed) or two_voices else body
                 for body in bodies

@@ -3169,9 +3169,10 @@ def test_backbone_concept_glossary_replaces_lazy_transliteration():
             GlossaryEntry(en="Gut Milk", ko="거트 밀크", kind="descriptive_concept"),
             GlossaryEntry(en="Blind Al", ko="블라인드 알", kind="descriptive_concept"),
             GlossaryEntry(en="training wheels protocol", ko="보조바퀴 프로토콜", kind="descriptive_concept"),
+            GlossaryEntry(en="Custom Concept", ko="자연스러운 한국어 개념", kind="descriptive_concept"),
         ],
         concepts=[
-            ConceptEntry(en="Grow or Die", ko="성장 아니면 죽음", kind="slogan"),
+            ConceptEntry(en="Grow or Die", ko="그로우 오어 다이", kind="slogan"),
         ],
     )
     norm_cm = narrative.normalize_concept_glossary(cm)
@@ -3181,8 +3182,7 @@ def test_backbone_concept_glossary_replaces_lazy_transliteration():
     assert by_en["blind al"] == "장님 알"
     assert by_en["training wheels protocol"] == "왕초보 모드"
     assert by_en["grow or die"] == "성장 아니면 사장"
-
-
+    assert by_en["custom concept"] == "자연스러운 한국어 개념"
 def test_backbone_atomic_span_edit_all_or_nothing():
     from substage import pipeline as pipe_mod
     from substage import register as reg_mod
@@ -3236,3 +3236,42 @@ def test_backbone_universal_evaluator_speech_act_penalty_and_universal_defects(t
     srt = _write_quality_track(ws, [(1000, 3000, "앤커 비잉이 뭔데?")], cues, video_id="brand-new-movie-2026")
     reqs = _invariant_reqs("brand-new-movie-2026", ws, srt)
     assert any("translit" in r or "concept" in r or "U0" in r or "universal" in r.lower() for r in reqs)
+
+
+def test_backbone_josa_harmony_and_negative_number_dash():
+    from substage import emit as emit_mod
+    from substage import series_state as ss_mod
+    from substage.models import OutEvent
+
+    assert ss_mod._replace_with_josa_harmony("앵커 존재를 잃은 우주", "앵커 존재", "주축 인물") == "주축 인물을 잃은 우주"
+    assert ss_mod._replace_with_josa_harmony("앵커 존재가 뭔데?", "앵커 존재", "주축 인물") == "주축 인물이 뭔데?"
+    assert ss_mod._replace_with_josa_harmony("앵커 존재는 중요해", "앵커 존재", "주축 인물") == "주축 인물은 중요해"
+    assert ss_mod._replace_with_josa_harmony("당신이 앵커 존재면", "앵커 존재", "주축 인물") == "당신이 주축 인물이면"
+    assert ss_mod._replace_with_josa_harmony("얼굴에 딱 앵커 존재라고", "앵커 존재", "주축 인물") == "얼굴에 딱 주축 인물이라고"
+    assert ss_mod._replace_with_josa_harmony("예비 앵커 존재고", "앵커 존재", "주축 인물") == "예비 주축 인물이고"
+
+    ev_neg = OutEvent(start_ms=0, end_ms=1000, ko="-5도까지 떨어졌어", channel="dialogue", position="an2")
+    ev_dash = OutEvent(start_ms=1000, end_ms=2000, ko="- 돌아갈까요?", channel="dialogue", position="an2")
+    assert emit_mod._event_text(ev_neg) == "-5도까지 떨어졌어"
+    assert emit_mod._event_text(ev_dash) == "돌아갈까요?"
+
+
+def test_backbone_two_independent_questions_not_flagged_and_clause_repeat_flagged():
+    q_cues = [
+        cue("q1", 1000, 2000, "Do you want tea?"),
+        cue("q2", 2100, 3000, "or coffee?"),
+    ]
+    spans = translate.build_utterance_spans(q_cues)
+    if spans and len(spans[0].cue_ids) == 2:
+        assert translate.validate_span_continuity(spans[0], {"q1": "차 드실래요?", "q2": "아니면 커피요?"}) == []
+
+    k_cues = [
+        cue("k1", 1000, 2500, "What were the overheard words"),
+        cue("k2", 2600, 4500, "by the Nazi child masturbating in the bathroom?"),
+    ]
+    k_spans = translate.build_utterance_spans(k_cues)
+    assert len(k_spans) == 1
+    errs = translate.validate_span_continuity(
+        k_spans[0], {"k1": "그때 엿들은\n말이", "k2": "나치 꼬마가 엿들은\n말은 뭐였죠?"}
+    )
+    assert "duplicate_predicate_across_continuation" in errs

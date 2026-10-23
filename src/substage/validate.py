@@ -940,6 +940,8 @@ def check_utterance_span_continuity(
             flag(event, "unnormalized_quotes", "Dialogue quotes must be straight single quotes")
         if _DESCRIPTIVE_CALQUE.search(event.text):
             flag(event, "descriptive_concept_transliteration", "Translate descriptive meaning, not phonetic labels")
+        if re.search(r"인물(?:를|가|는|면|라고|고)(?=\s|[.?!,…'\"”’)\]]|$)", event.text):
+            flag(event, "ungrammatical_josa", "Batchim noun stem carries vowel-only particle")
         source = " ".join(cue.text for cue in matched)
         causal_clauses = [
             clause for clause in re.split(r"(?<=[.!?])\s+", source)
@@ -972,7 +974,14 @@ def check_utterance_span_continuity(
         ko_b = _REACTION_QUESTION.sub("", events[b].text.strip()).rstrip("\"'”’")
         if ko_a.endswith("?") and ko_b.endswith("?"):
             flag(events[a], "premature_question_split", f"Continuing source question closes twice across {first.id}/{second.id}")
-
+        clean_ka = re.sub(r"[^가-힣]", "", ko_a)
+        clean_kb = re.sub(r"[^가-힣]", "", ko_b)
+        _stop_en = {"that", "this", "what", "with", "from", "have", "your", "they", "will", "just", "the", "and", "for", "are", "but", "not", "you"}
+        en_wa = {w for w in re.findall(r"[a-z]{3,}", first.text.casefold())} - _stop_en
+        en_wb = {w for w in re.findall(r"[a-z]{3,}", second.text.casefold())} - _stop_en
+        if a != b and len(clean_ka) >= 4 and len(clean_kb) >= 6 and en_wa.isdisjoint(en_wb):
+            if clean_ka in clean_kb or (len(clean_ka) >= 5 and clean_ka[:-1] in clean_kb):
+                flag(events[b], "adjacent_dialogue_echoes", f"Continuation repeats clause from {first.id} in {second.id}")
     slogan_forms: dict[str, list[_ContinuityEvent]] = {}
     for event in events:
         for form in ("성장 아니면 죽음", "성장 아니면 사장"):
@@ -1007,12 +1016,15 @@ def check_utterance_span_continuity(
         gap = event.start_ms - previous.end_ms
         if gap > 3000 or gap < -500:
             continue
-        if gap <= 2000 and len(flat(event.text)) >= 6 and flat(event.text) == flat(previous.text):
+        if gap <= 2000 and len(flat(previous.text)) >= 6:
             source_a = " ".join(cue.text for cue in sources[index - 1])
             source_b = " ".join(cue.text for cue in sources[index])
-            ids_a = {cue.id for cue in sources[index - 1]}
-            ids_b = {cue.id for cue in sources[index]}
-            if source_a and source_b and ids_a.isdisjoint(ids_b) and flat(source_a) != flat(source_b):
+            _stop_en = {"that", "this", "what", "with", "from", "have", "your", "they", "will", "just", "the", "and", "for", "are", "but", "not", "you"}
+            en_wa = {w for w in re.findall(r"[a-z]{3,}", source_a.casefold())} - _stop_en
+            en_wb = {w for w in re.findall(r"[a-z]{3,}", source_b.casefold())} - _stop_en
+            exact_dup = flat(event.text) == flat(previous.text) and ((not source_a and not source_b) or (flat(source_a) != flat(source_b) and en_wa.isdisjoint(en_wb)))
+            sub_dup = flat(previous.text) in flat(event.text) and en_wa.isdisjoint(en_wb)
+            if exact_dup or sub_dup:
                 flag(event, "adjacent_dialogue_echoes", f"Different source dialogue overwrites {previous.cue_id} with identical Korean")
         if any(_EN_TURN_DASH.match(line) for ev in (previous, event) for line in ev.text.splitlines()):
             continue

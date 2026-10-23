@@ -479,18 +479,28 @@ def validate_span_continuity(
         body = ko_by_cue.get(cid, "").strip()
         if i == 0 and span.has_reaction_prefix:
             body = re.sub(r"^[가-힣]{1,5}\?\s*", "", body, count=1)
+        en_body = " ".join(sl.text for sl in source if sl.cue_id == cid).strip()
         ends_question = bool(re.search(r"\?[\"'’”)\]]*\s*$", body))
-        if question_end and ends_question and final_question:
+        if question_end and "?" not in en_body and ends_question and final_question:
             violations.append("premature_question_closure")
-        en_body = " ".join(sl.text for sl in source if sl.cue_id == cid)
         if span.relation_kind == "causal" and en_body and "?" not in en_body and ends_question:
             violations.append("causal_clause_turned_into_question")
         following = ko_by_cue.get(span.cue_ids[i + 1], "").strip()
-        tail = re.sub(r"[^가-힣]", "", body)[-16:]
-        next_tail = re.sub(r"[^가-힣]", "", following)[-16:]
+        clean_cur = re.sub(r"[^가-힣]", "", body)
+        clean_nxt = re.sub(r"[^가-힣]", "", following)
+        tail = clean_cur[-16:]
+        next_tail = clean_nxt[-16:]
         same_tail = len(tail) >= 4 and len(next_tail) >= 4 and tail[-4:] == next_tail[-4:]
-        # Inflection and topic-particle changes do not turn an echoed predicate
-        # into a new clause. Require both a shared stem and the same ending.
+        en_next = " ".join(sl.text for sl in source if sl.cue_id == span.cue_ids[i + 1]).strip()
+        en_words_a = {w for w in re.findall(r"[a-z]{4,}", en_body.casefold())}
+        en_words_b = {w for w in re.findall(r"[a-z]{4,}", en_next.casefold())}
+        shared_clause = False
+        if len(clean_cur) >= 4 and len(clean_nxt) >= 5 and en_words_a.isdisjoint(en_words_b):
+            longest = SequenceMatcher(None, clean_cur, clean_nxt, autojunk=False).find_longest_match(
+                0, len(clean_cur), 0, len(clean_nxt)
+            )
+            if longest.size >= 4:
+                shared_clause = True
         echo = False
         if ends_question and following.endswith("?") and len(tail) >= 4 and len(next_tail) >= 4:
             match = SequenceMatcher(None, tail, next_tail, autojunk=False)
@@ -498,7 +508,7 @@ def validate_span_continuity(
                 tail[-2:] == next_tail[-2:] and match.ratio() >= 0.65
                 and max((block.size for block in match.get_matching_blocks()), default=0) >= 4
             )
-        if same_tail or echo:
+        if same_tail or echo or shared_clause:
             violations.append("duplicate_predicate_across_continuation")
     return list(dict.fromkeys(violations))
 
