@@ -766,6 +766,7 @@ def materialize_snapshots(
     cues: list[Cue],
     register: RegisterMap | None = None,
     pairs_by_cue: dict[str, tuple[str, str]] | None = None,
+    observations: Sequence[ChunkObservations | CueObservation] = (),
 ) -> dict[str, Snapshot]:
     """Deterministically fold context_map + timeline (+ the register table and
     the cue -> (speaker, addressee) map of :func:`substage.register.cue_pairs`)
@@ -805,8 +806,9 @@ def materialize_snapshots(
     emo: dict[str, str] = {}
     recent: dict[str, list[str]] = {}
 
+    chunk_obs_list = [o for o in observations if isinstance(o, ChunkObservations)]
     snapshots: dict[str, Snapshot] = {}
-    for sc in ordered:
+    for idx_sc, sc in enumerate(ordered):
         beat = beats.get(sc.id)
         cue_set = set(sc.cue_ids)
         member = [p(cid) for cid in sc.cue_ids]
@@ -821,13 +823,36 @@ def materialize_snapshots(
                 wp_idx[ch] += 1
 
         snap = Snapshot(scene_id=sc.id)
-        # scene registers follow the cue speakers, never chars_present
+        # scene registers follow the cue speakers and co-present participants
         scene_pairs = {pairs_by_cue[cid] for cid in sc.cue_ids if cid in pairs_by_cue}
         speakers = {spk for spk, _ in scene_pairs}
         for cid in sc.cue_ids:
             for part in (hint_by_id.get(cid) or "").split("/"):
                 if (r := aliases.get(_norm(part))) is not None:
                     speakers.add(r)
+        # Include co-present characters from overlapping S2v ChunkObservations
+        # and adjacent conversation scenes within 20s when S2v observations exist
+        if chunk_obs_list:
+            summaries: list[str] = []
+            for ch_obs in chunk_obs_list:
+                if ch_obs.start_ms < sc.end_ms and ch_obs.end_ms > sc.start_ms:
+                    if ch_obs.summary and ch_obs.summary.strip() not in summaries:
+                        summaries.append(ch_obs.summary.strip())
+                    for raw_p in ch_obs.present_characters:
+                        if (r := rid(raw_p)) is not None and r in ko_names and r not in present:
+                            present.append(r)
+            if summaries:
+                snap.situation_summary = " ".join(summaries)
+            for neighbor_idx in (idx_sc - 1, idx_sc + 1):
+                if 0 <= neighbor_idx < len(ordered):
+                    nb = ordered[neighbor_idx]
+                    gap_nb = (sc.start_ms - nb.end_ms) if neighbor_idx < idx_sc else (nb.start_ms - sc.end_ms)
+                    if gap_nb <= 20_000:
+                        for n_cid in nb.cue_ids:
+                            if n_cid in pairs_by_cue:
+                                for ch in pairs_by_cue[n_cid]:
+                                    if ch in ko_names and ch not in present:
+                                        present.append(ch)
         # lean pipelines run with Timeline(scenes=[]): fall back to the cue
         # speakers/addressees so names, personas and voice cards survive
         for spk, adr in sorted(scene_pairs, key=lambda pr: (pr[0] or "", pr[1] or "")):
@@ -838,12 +863,18 @@ def materialize_snapshots(
             if ch in ko_names and ch not in present:
                 present.append(ch)
         for (spk, adr), e in edges.items():
-            if (spk, adr) not in scene_pairs and not (spk in speakers and (adr in speakers or adr == "group")):
+            if (
+                (spk, adr) not in scene_pairs
+                and not (spk in speakers and (adr in speakers or adr == "group"))
+                and not (bool(chunk_obs_list) and spk in speakers and adr in present)
+            ):
                 continue
             snap.registers[_pair(spk, adr)] = SceneRegister(
                 level=e.level,
                 pronoun=e.pronoun,
                 vocative=e.vocative,
+                relation=e.relation,
+                basis=e.basis,
                 shifts=[
                     sh for sh in e.shifts
                     if p(sh.at_cue) <= last and (p(sh.until_cue) if sh.until_cue else INF) > first

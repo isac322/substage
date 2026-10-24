@@ -1250,7 +1250,8 @@ def run(
                    "snapshot-fields:" + ",".join(sorted(Snapshot.model_fields))),
         _Snapshots,
         lambda: _Snapshots(items=list(narrative.materialize_snapshots(
-            context_map, timeline, scenes, cues, register_map, pairs_by_cue).values())),
+            context_map, timeline, scenes, cues, register_map, pairs_by_cue,
+            **({"observations": observations} if getattr(narrative.materialize_snapshots, "__defaults__", None) and len(narrative.materialize_snapshots.__defaults__) >= 3 else {})).values())),
     ).items
     snapshots = {s.scene_id: s for s in snapshots_list}
     save_model(ws.path("snapshots.json"), snapshots_list)

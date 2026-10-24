@@ -216,6 +216,8 @@ def _render_snapshot(snapshot: Snapshot, callback_ko: dict[str, str]) -> str:
         video.append(f"rating={snapshot.rating}")
     if video:
         lines.append(f"VIDEO: {'; '.join(video)}")
+    if snapshot.situation_summary:
+        lines.append(f"SITUATION: {snapshot.situation_summary}")
     if snapshot.character_names:
         lines.append("CHARACTER NAMES (use exactly):")
         for cid, ko_name in sorted(snapshot.character_names.items()):

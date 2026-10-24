@@ -25,13 +25,32 @@ def _assign_acts(scenes: list[Scene]) -> None:
         return
     act_count = min(_ACT_COUNT, len(scenes))
     base, remainder = divmod(len(scenes), act_count)
-    offset = 0
-    for act in range(1, act_count + 1):
-        width = base + (1 if act <= remainder else 0)
-        for scene in scenes[offset : offset + width]:
-            scene.act = act
-        offset += width
-
+    if len(scenes) <= 12 or act_count <= 1:
+        offset = 0
+        for act in range(1, act_count + 1):
+            width = base + (1 if act <= remainder else 0)
+            for scene in scenes[offset : offset + width]:
+                scene.act = act
+            offset += width
+        return
+    cuts: list[int] = [0]
+    radius = max(1, base // 5)
+    for k in range(1, act_count):
+        target = k * base + min(k, remainder)
+        lo = max(cuts[-1] + 1, target - radius)
+        hi = min(len(scenes) - (act_count - k), target + radius)
+        best_cut = target
+        best_gap = -1
+        for idx in range(lo, hi + 1):
+            gap = scenes[idx].start_ms - scenes[idx - 1].end_ms
+            if gap > best_gap:
+                best_gap = gap
+                best_cut = idx
+        cuts.append(best_cut)
+    cuts.append(len(scenes))
+    for act_idx in range(act_count):
+        for scene in scenes[cuts[act_idx] : cuts[act_idx + 1]]:
+            scene.act = act_idx + 1
 
 def group_scenes(cues: list[Cue], *, gap_ms: int, max_cues: int) -> list[Scene]:
     """Split sorted cues into scenes.

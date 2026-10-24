@@ -943,6 +943,23 @@ def check_utterance_span_continuity(
         if re.search(r"인물(?:를|가|는|면|라고|고)(?=\s|[.?!,…'\"”’)\]]|$)", event.text):
             flag(event, "ungrammatical_josa", "Batchim noun stem carries vowel-only particle")
         source = " ".join(cue.text for cue in matched)
+        if (
+            (
+                re.search(r"\b(?:he|his|him|he's|she|her|she's)\b", source, re.I)
+                and "그쪽" in event.text
+                and not re.search(r"\b(?:you|your|yours|yourself|yourselves|direction|way|toward|towards|side)\b", source, re.I)
+                and not re.match(r"^\s*[-–—]?\s*(?:please\s+)?(?:tell|ask|show|give|let|help|bring|send|take|call)\b", source, re.I)
+            )
+            or (re.search(r"\b(?:his|her)\s+\w+,?\s+not\s+yours\b", source, re.I) and "그쪽" in event.text)
+            or (
+                re.search(r"\b(?:he|his|he's|she|her|she's)\b", source, re.I)
+                and re.search(r"\b(?:terms|words|offer|request|requesting|recommendation|opinion)\b", source, re.I)
+                and not re.search(r"\b(?:side|there|way|other|them|their|they)\b", source, re.I)
+                and re.search(r"저쪽(?:이|은|에서)", event.text)
+            )
+            or (re.search(r"\b(?:he|him|his)\b", source, re.I) and re.search(r"저자(?:를|가|는|의)", event.text) and "haeyo" in addressed_levels(event.text))
+        ):
+            flag(event, "referent_and_relationship_deixis", "3rd-person referent or colleague relationship distorted by wrong deictic (그쪽/저쪽/저자)")
         causal_clauses = [
             clause for clause in re.split(r"(?<=[.!?])\s+", source)
             if re.search(r"\bbecause\b", clause, re.I) and "?" not in clause

@@ -283,6 +283,8 @@ class SceneRegister(BaseModel):
     level: EdgeLevel  # the table level (outside every shift)
     pronoun: str = "none"
     vocative: str = "none"
+    relation: str = ""
+    basis: str = ""
     shifts: list[RegisterShift] = Field(default_factory=list)  # shifts whose span overlaps the scene
 
     def level_at(self, cue_id: str, pos: dict[str, int]) -> str:
@@ -418,7 +420,7 @@ class Snapshot(BaseModel):
     tone_baseline: str = ""  # the video's overall dialogue register (video map)
     rating: str | None = None
     personas: dict[str, str] = Field(default_factory=dict)  # present character id -> one-line persona
-
+    situation_summary: str = ""  # S2v scene/chunk situation summary
     def for_prompt(self, narrative: str) -> Snapshot:
         """The snapshot a prompt may see at narrative level ``full`` (as is)
         or ``lite``: story facts plus the register table — character names,

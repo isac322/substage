@@ -3275,3 +3275,76 @@ def test_backbone_two_independent_questions_not_flagged_and_clause_repeat_flagge
         k_spans[0], {"k1": "그때 엿들은\n말이", "k2": "나치 꼬마가 엿들은\n말은 뭐였죠?"}
     )
     assert "duplicate_predicate_across_continuation" in errs
+
+
+def test_backbone_snapshot_preserves_copresent_referents_relations_and_deixis_check():
+    from substage.models import Character, ChunkObservations, ContextMap, Cue, RegisterEdge, RegisterMap, Scene, Timeline, VoiceCard
+    from substage import narrative as nar_mod
+    from substage import register as reg_mod
+    from substage import validate as val_mod
+
+    cm = ContextMap(
+        synopsis="Uber-Lyft negotiation",
+        tone_baseline="Sharp corporate drama",
+        characters=[
+            Character(id="travis", en_name="Travis Kalanick", ko_name="트래비스 캘러닉", persona="Uber CEO", voice=VoiceCard(idiolect="Aggressive")),
+            Character(id="gurley", en_name="Bill Gurley", ko_name="빌 걸리", persona="Uber board member at Benchmark", voice=VoiceCard(idiolect="Measured")),
+            Character(id="zimmer", en_name="John Zimmer", ko_name="존 지머", persona="Lyft president", voice=VoiceCard(idiolect="Earnest")),
+        ],
+    )
+    rm = RegisterMap(edges=[
+        RegisterEdge(speaker="gurley", addressee="travis", relation="mentor", apparent_generation="speaker_older", history="met_as_adults", stance="civil", step=7, level="hae", pronoun="자네", basis="Uber board mentor to CEO Travis"),
+        RegisterEdge(speaker="gurley", addressee="zimmer", relation="professional", apparent_generation="speaker_older", history="met_as_adults", stance="civil", step=9, level="haeyo", pronoun="당신", basis="Polite VC negotiation with Lyft"),
+        RegisterEdge(speaker="travis", addressee="zimmer", relation="enemy", apparent_generation="same", history="met_as_adults", stance="open_enmity", step=2, level="hae", pronoun="당신", basis="Rival rideshare CEO"),
+    ])
+    cues = [
+        cue("c0962", 2923795, 2925255, "and you won't be able to provide it."),
+        cue("c0963", 2930302, 2932930, "He's not putting it very diplomatically."),
+        cue("c0964", 2932971, 2937601, "His terms are not the ones I recommended."),
+    ]
+    scenes = [
+        Scene(id="s063", start_ms=2923795, end_ms=2925255, cue_ids=["c0962"], act=3),
+        Scene(id="s064", start_ms=2930302, end_ms=2937601, cue_ids=["c0963", "c0964"], act=4),
+    ]
+    pairs = {"c0962": ("travis", "zimmer"), "c0963": ("gurley", "zimmer"), "c0964": ("gurley", "zimmer")}
+    obs = [ChunkObservations(chunk_id="v06", start_ms=2900000, end_ms=2950000, present_characters=["Travis Kalanick", "Bill Gurley", "John Zimmer"], summary="Travis rejects Lyft's buyout while Gurley mediates.")]
+    snaps = nar_mod.materialize_snapshots(cm, Timeline(scenes=[]), scenes, cues, rm, pairs, observations=obs)
+    s64 = snaps["s064"]
+    assert "travis" in s64.character_names
+    assert "gurley>travis" in s64.registers
+    assert s64.registers["gurley>travis"].relation == "mentor"
+    assert "Uber board mentor" in s64.registers["gurley>travis"].basis
+    assert "Travis rejects Lyft" in s64.situation_summary
+
+    rendered_reg = "\n".join(reg_mod.render_scene_register("gurley>travis", s64.registers["gurley>travis"]))
+    assert "relation=mentor" in rendered_reg
+
+    bad_evs = [{"start_ms": 2932971, "end_ms": 2937601, "text": "저쪽이 내건 조건도\n제가 권한 게 아니에요"}]
+    good_evs = [{"start_ms": 2932971, "end_ms": 2937601, "text": "트래비스가 내건 조건도\n제가 권한 게 아니에요"}]
+    assert any(i.rule == "referent_and_relationship_deixis" for i in val_mod.check_utterance_span_continuity([cues[2]], bad_evs))
+    assert val_mod.check_utterance_span_continuity([cues[2]], good_evs) == []
+    imp_cues = [cue("c_imp", 1000, 2500, "Tell him he can sit.")]
+    imp_evs = [{"start_ms": 1000, "end_ms": 2500, "text": "그쪽이 가서 앉으라고 전해요"}]
+    assert val_mod.check_utterance_span_continuity(imp_cues, imp_evs) == []
+
+    assert "그쪽" not in reg_mod._rewrite_plural_address("너희의 생각은 어때?", audience=False, polite=False)
+    assert "그쪽" not in reg_mod._rewrite_plural_address("너희가 해봐", audience=False, polite=False)
+    kin_rm = RegisterMap(edges=[
+        RegisterEdge(speaker="harlan", addressee="joni", relation="elder_kin", apparent_generation="speaker_older", history="met_as_adults", stance="civil", step=7, level="hae", pronoun="none", vocative="조니"),
+    ])
+    kin_cm = ContextMap(
+        synopsis="Family",
+        tone_baseline="Drama",
+        characters=[
+            Character(id="harlan", en_name="Harlan", ko_name="할런", persona="Patriarch", voice=VoiceCard(idiolect="Firm")),
+            Character(id="joni", en_name="Joni", ko_name="조니", persona="Daughter-in-law", voice=VoiceCard(idiolect="Warm")),
+        ],
+    )
+    from substage.models import CueObservation
+    kin_cues = [cue("k_kin", 1000, 3000, "I've been wiring money to you, Joni.", speaker_hint="Harlan")]
+    repaired_kin = reg_mod.enforce_pragmatic_address(
+        {"k_kin": "조니, 당신은 알고 있었지"}, kin_cues, kin_rm, context_map=kin_cm,
+        observations=[CueObservation(cue_id="k_kin", speaker="Harlan", addressee="Joni")],
+    )
+    assert "그쪽" not in repaired_kin["k_kin"]
+    assert "당신" not in repaired_kin["k_kin"]

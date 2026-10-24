@@ -1088,11 +1088,16 @@ def cue_levels(
     return out
 
 def render_scene_register(pair: str, reg: SceneRegister) -> list[str]:
-    """``spk>adr: 해요 · 아저씨 · 당신`` plus one row per shift."""
+    """``spk>adr: 해요 · 아저씨 · 당신`` plus relationship/basis and one row per shift."""
     parts = [LEVEL_KO.get(reg.level, reg.level)]
     parts += [x for x in (reg.vocative, reg.pronoun) if x and x != "none"]
     if reg.pronoun == "none":
         parts.append("2인칭대명사생략(너/너희/당신 금지)")
+    if reg.relation:
+        rel_str = f"relation={reg.relation}"
+        if reg.basis:
+            rel_str += f" ({reg.basis})"
+        parts.append(rel_str)
     rows = [f"  {pair}: {' · '.join(parts)}"]
     for sh in reg.shifts:
         until = f" until {sh.until_cue}" if sh.until_cue else ""
@@ -1135,13 +1140,13 @@ def _rewrite_plural_address(text: str, *, audience: bool, polite: bool) -> str:
     replacements = (
         (r"\s+다(?=\s|$)\s*", "다 "),
         (r"\s+둘", "두 사람"),
-        (r"의(?![가-힣])", "두 분의" if polite else "그쪽의"),
+        (r"의(?![가-힣])", "두 분의" if polite else "두 사람의"),
         (r"(?:가|는|도)(?![가-힣])", "다들"),
         (r"\s+", ""),
     )
     for suffix, replacement in replacements:
         text = re.sub(stem + suffix, replacement, text)
-    return re.sub(stem, "두 분" if polite else "그쪽", text)
+    return re.sub(stem, "두 분" if polite else "다들", text)
 
 
 def _replace_civil_dangsin(text: str, nom: str) -> str:
@@ -1249,10 +1254,11 @@ def enforce_pragmatic_address(
                 edge is not None and edge.stance == "civil" and not hostile
                 and edge.relation in {"own_parent", "elder_kin", "surrogate_parent", "mentor", "protege", "subordinate"}
             ):
-                nom = edge.vocative if edge.vocative and edge.vocative != "none" else names.get(edge.addressee, "그쪽")
-                if re.search(rf"(?:^|[\s,!?]){re.escape(nom)}(?:[,!?]|$)", unquoted):
-                    nom = "그쪽"
-                part = _replace_civil_dangsin(part, nom)
+                nom = edge.vocative if edge.vocative and edge.vocative != "none" else names.get(edge.addressee, "")
+                if not nom or re.search(rf"(?:^|[\s,!?]){re.escape(nom)}(?:[,!?]|$)", unquoted):
+                    part = re.sub(r"(?<![가-힣])당신(?:이|은|는|을|를)?\s*", "", part).strip()
+                else:
+                    part = _replace_civil_dangsin(part, nom)
             if pair == ("travis", GROUP) and re.search(r"당신도 그렇게\s+생각해요\?", part):
                 part = re.sub(r"(?<![가-힣])당신도", "다들", part)
             parts[idx] = part

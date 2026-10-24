@@ -4294,7 +4294,7 @@ def check_session_invariants(
         "universal_slogan_inconsistency", "universal_orphan_speaker_dash",
         "universal_unicode_ellipsis", "universal_unnormalized_quotes",
         "universal_srt_register_oscillation", "universal_missing_dialogue",
-        "universal_ungrammatical_josa",
+        "universal_ungrammatical_josa", "universal_referent_and_relationship_deixis",
     }
     applicable_reqs = set(base_reqs) | {f["req"] for f in failures}
     failed_reqs = len({f["req"] for f in failures})
