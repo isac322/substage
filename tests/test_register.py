@@ -812,25 +812,41 @@ def test_two_tier_group_footing_resolver_and_pronoun_sanitization():
     )
     # c0003 raw_adr=='audience' must NOT be overwritten to ('travis', 'emil')
     assert locked["c0003"] == ("travis", "group")
-    # c0005 and c0006 contiguous answer run (<3s) binds to the journalist questioner
-    assert locked["c0005"] == ("travis", "ep:femalejournalist")
-    assert locked["c0006"] == ("travis", "ep:femalejournalist")
-
-    # 3. apply_scene_footing_shifts shifts travis>group to haeyo in press scene s002 while keeping s001 hae
+    # 3. apply_scene_footing_shifts is idempotent and shifts travis>group to haeyo in press scene s002 while keeping s001 hae
     scenes = [
         Scene(id="s001", start_ms=1000, end_ms=6500, cue_ids=["c0001", "c0002", "c0003"]),
         Scene(id="s002", start_ms=10000, end_ms=16500, cue_ids=["c0004", "c0005", "c0006"]),
     ]
     rm = RegisterMap(edges=[register.canonicalize_edge(grp_edge)])
+    decs = {
+        "s001__travis": {"footing_class": {"choice": "in_group_subordinate_or_crew_B", "probabilities": {"in_group_subordinate_or_crew_B": 0.95}}},
+        "s002__travis": {"footing_class": {"choice": "public_press_customers_or_strangers_J", "probabilities": {"public_press_customers_or_strangers_J": 0.99}}},
+    }
     rm_shifted = register.apply_scene_footing_shifts(
         rm, scenes, cues, obs, cm,
         pairs_by_cue={**init_pairs, "c0005": ("travis", "group"), "c0006": ("travis", "group")},
-        footing_decisions={
-            "s001__travis": {"footing_class": {"choice": "in_group_subordinate_or_crew_B", "probabilities": {"in_group_subordinate_or_crew_B": 0.95}}},
-            "s002__travis": {"footing_class": {"choice": "public_press_customers_or_strangers_J", "probabilities": {"public_press_customers_or_strangers_J": 0.99}}},
-        },
+        footing_decisions=decs,
     )
+    rm_shifted_twice = register.apply_scene_footing_shifts(
+        rm_shifted, scenes, cues, obs, cm,
+        pairs_by_cue={**init_pairs, "c0005": ("travis", "group"), "c0006": ("travis", "group")},
+        footing_decisions=decs,
+    )
+    assert rm_shifted_twice.edges[0].shifts == rm_shifted.edges[0].shifts
     tb = register.RegisterTable(rm_shifted, [c.id for c in cues])
     assert tb.level_at("travis", "group", "c0003") == "hae"
     assert tb.level_at("travis", "group", "c0005") == "haeyo"
     assert tb.level_at("travis", "group", "c0006") == "haeyo"
+
+    # 4. derive_cue_footings records unresolved endpoints with provenance='inherited_footing_episode'
+    footings = {
+        cf.cue_id: cf
+        for cf in register.derive_cue_footings(
+            rm_shifted, scenes, cues, obs, cm,
+            pairs_by_cue={**init_pairs, "c0005": ("travis", "group"), "c0006": ("travis", "group")},
+            footing_decisions=decs,
+        )
+    }
+    assert footings["c0004"].effective_level == "haeyo"
+    assert footings["c0004"].provenance == "inherited_footing_episode"
+    assert footings["c0004"].footing_episode_id == footings["c0005"].footing_episode_id

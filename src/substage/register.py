@@ -39,6 +39,7 @@ from .levels import DASHES, Level, addressed_levels, analyze_turn_morphemes, end
 from .models import (
     ChunkObservations,
     Cue,
+    CueFooting,
     CueObservation,
     CuePerception,
     PerceptionCandidate,
@@ -664,36 +665,6 @@ def lock_scene_pairs(
                     if m in raw_s:
                         out[cid] = (m, other_of[m])
                         break
-
-    # I-QA-BIND & I-STAB: bind contiguous answer runs (gap <= 3000ms, raw_adr == 'group')
-    # immediately following an addressed question ('?' in text) to the questioner
-    spoken_ordered = [cid for cid in ordered_cids if cid in cues_by_id and not (cues_by_id[cid].id.startswith("ost-") or cues_by_id[cid].source == "ost")]
-    idx_c = 0
-    while idx_c < len(spoken_ordered) - 1:
-        cid_q = spoken_ordered[idx_c]
-        c_q = cues_by_id[cid_q]
-        p_q = out.get(cid_q)
-        if p_q is not None and "?" in c_q.text and p_q[1] not in (GROUP, NARRATION, SYSTEM_AI) and p_q[0] != p_q[1]:
-            q_spk, q_adr = p_q
-            j = idx_c + 1
-            prev_end = c_q.end_ms
-            while j < len(spoken_ordered):
-                cid_a = spoken_ordered[j]
-                c_a = cues_by_id[cid_a]
-                p_a = out.get(cid_a)
-                o_a = obs_map.get(cid_a)
-                raw_a_low = (o_a.addressee or "").strip().lower() if o_a else ""
-                if (
-                    p_a == (q_adr, GROUP)
-                    and raw_a_low not in ("audience", "viewers", "viewer")
-                    and (c_a.start_ms - prev_end) <= 3000
-                ):
-                    out[cid_a] = (q_adr, q_spk)
-                    prev_end = c_a.end_ms
-                    j += 1
-                else:
-                    break
-        idx_c += 1
     return out
 
 
@@ -820,20 +791,21 @@ def apply_scene_footing_shifts(
     pairs_by_cue: Mapping[str, Pair] | None = None,
     footing_decisions: Mapping[str, Mapping[str, Any]] | None = None,
     tau: float = 0.72,
+    tau_jb: float = 0.78,
 ) -> RegisterMap:
     """Apply scene-scoped footing shifts to ``speaker>group`` edges using the
     Two-Tier Ratified-Addressee & Scene-Footing Resolver (Goffman 1981 Footing,
     Bell 1984 Audience Design, Portner et al. 2022 Glossa).
 
-    Satisfies invariants I-AGREE, I-NOREG, I-FLIP-PRECISION, I-RATIFIED-ONLY,
-    I-GROUP-IDENTITY, I-STAB, and I-BIDIR.
+    Idempotent: scene-boundary ``role_on`` shifts from earlier invocations are
+    replaced cleanly without duplication. Satisfies invariants I-AGREE, I-NOREG,
+    I-FLIP-PRECISION, I-RATIFIED-ONLY, I-GROUP-IDENTITY, I-STAB, and I-BIDIR.
     """
     if not footing_decisions or not scenes or not cues:
         return register_map
     ordered_cues = sorted(cues, key=lambda c: (c.start_ms, c.end_ms, c.id))
     cue_order = [c.id for c in ordered_cues]
     pos = {cid: i for i, cid in enumerate(cue_order)}
-    obs_flat = _flat_observations(observations)
     chunk_obs = [o for o in (observations or []) if isinstance(o, ChunkObservations)]
     rid = name_resolver(context_map) if context_map is not None else (lambda _: None)
     ko_names = {ch.id: ch.ko_name for ch in (context_map.characters if context_map else ())}
@@ -844,10 +816,20 @@ def apply_scene_footing_shifts(
     pairs = dict(pairs_by_cue) if pairs_by_cue is not None else (
         cue_pairs(context_map, list(cues), observations) if context_map is not None else {}
     )
-    tb = RegisterTable(register_map, cue_order)
-    edges_by_pair = {(e.speaker, e.addressee): e for e in register_map.edges}
     ordered_scenes = sorted(scenes, key=lambda s: s.start_ms)
+    # Strip only prior auto-generated scene_footing shifts on group edges for idempotency
+    clean_edges: list[RegisterEdge] = []
+    for e in register_map.edges:
+        if e.addressee == GROUP and e.shifts:
+            kept_sh = [sh for sh in e.shifts if getattr(sh, "source", "table") != "scene_footing"]
+            clean_edges.append(e.model_copy(update={"shifts": kept_sh}))
+        else:
+            clean_edges.append(e)
+    base_rmap = register_map.model_copy(update={"edges": clean_edges})
+    tb = RegisterTable(base_rmap, cue_order)
+    edges_by_pair = {(e.speaker, e.addressee): e for e in base_rmap.edges}
     new_shifts_by_spk: dict[str, list[RegisterShift]] = {}
+    scene_resolved_by_spk: dict[str, list[tuple[int, str, str | None, str]]] = {}
 
     for idx_sc, sc in enumerate(ordered_scenes):
         if not sc.cue_ids:
@@ -858,7 +840,6 @@ def apply_scene_footing_shifts(
             if idx_sc + 1 < len(ordered_scenes) and ordered_scenes[idx_sc + 1].cue_ids
             else None
         )
-        # Determine co-present characters in this scene (same logic as materialize_snapshots)
         in_scene_present: set[str] = set()
         for cid in sc.cue_ids:
             if cid in pairs:
@@ -896,95 +877,200 @@ def apply_scene_footing_shifts(
             g_edge = edges_by_pair.get((spk, GROUP))
             if g_edge is None:
                 continue
+            cur_lvs = [
+                binary(tb.level_at(spk, GROUP, cid))
+                for cid in sc.cue_ids
+                if pairs.get(cid) == (spk, GROUP)
+            ]
+            cur_lvs = [x for x in cur_lvs if x is not None]
+            if not cur_lvs:
+                continue
+            cur_lv = cur_lvs[0]
+            has_mixed_cur = len(set(cur_lvs)) > 1
             dec = footing_decisions.get(f"{sc.id}__{spk}") or footing_decisions.get((sc.id, spk))  # type: ignore[arg-type]
-            if not dec:
-                continue
-            fc_obj = dec.get("footing_class", dec)
-            fc = fc_obj.get("choice", "") if isinstance(fc_obj, dict) else str(fc_obj)
-            probs = fc_obj.get("probabilities", {}) if isinstance(fc_obj, dict) else {}
-            p_fc = float(probs.get(fc, 1.0)) if isinstance(probs, dict) else 1.0
-            if p_fc < tau or not fc:
-                continue
-            lv_c = "J" if fc.endswith("_J") or fc in ("public_or_external_audience", "fourth_wall_polite_narration") else "B"
-            cur_lv = binary(tb.level_at(spk, GROUP, sc_first))
-            if cur_lv is None or lv_c == cur_lv:
-                continue
+            eff_lv = cur_lv
+            if dec:
+                fc_obj = dec.get("footing_class", dec)
+                fc = fc_obj.get("choice", "") if isinstance(fc_obj, dict) else str(fc_obj)
+                probs = fc_obj.get("probabilities", {}) if isinstance(fc_obj, dict) else {}
+                p_fc = float(probs.get(fc, 1.0)) if isinstance(probs, dict) else 1.0
+                lv_c = "J" if fc.endswith("_J") or fc in ("public_or_external_audience", "fourth_wall_polite_narration") else "B"
+                req_tau = tau if lv_c == "J" else tau_jb
+                if fc and p_fc >= req_tau and (lv_c != cur_lv or has_mixed_cur):
+                    spk_out_B = 0
+                    spk_out_J = 0
+                    for cid in sc.cue_ids:
+                        p = pairs.get(cid)
+                        if p and p[0] == spk and p[1] != GROUP and not p[1].startswith("ep:") and p[1] != NARRATION:
+                            lv = binary(tb.level_at(*p, cid))
+                            if lv == "B":
+                                spk_out_B += 1
+                            elif lv == "J":
+                                spk_out_J += 1
 
-            spk_out_B = 0
-            spk_out_J = 0
-            for cid in sc.cue_ids:
-                p = pairs.get(cid)
-                if p and p[0] == spk and p[1] != GROUP and not p[1].startswith("ep:") and p[1] != NARRATION:
-                    lv = binary(tb.level_at(*p, cid))
-                    if lv == "B":
-                        spk_out_B += 1
-                    elif lv == "J":
-                        spk_out_J += 1
+                    copresent_polite_J = sum(
+                        1 for other in present
+                        if other != spk and (spk, other) in edges_by_pair
+                        and binary(edges_by_pair[(spk, other)].level) == "J"
+                        and edges_by_pair[(spk, other)].relation != "enemy"
+                    )
+                    in_sc_upward_J = sum(
+                        1 for other in in_scene_present
+                        if other != spk and (spk, other) in edges_by_pair
+                        and binary(edges_by_pair[(spk, other)].level) == "J"
+                        and edges_by_pair[(spk, other)].relation in ("boss", "elder_kin", "own_parent", "surrogate_parent", "mentor")
+                    )
+                    ok_flip = True
+                    if lv_c == "B" and fc in ("in_group_subordinate_or_crew_B", "intimate_family_child_or_peer_B", "in_group_subordinate_or_crew", "intimate_family_or_peer"):
+                        if (spk_out_J > 0 and spk_out_B == 0) or (copresent_polite_J > 0 and spk_out_B == 0) or in_sc_upward_J > 0:
+                            ok_flip = False
+                    if ok_flip:
+                        eff_lv = lv_c
+            scene_resolved_by_spk.setdefault(spk, []).append((idx_sc, sc_first, next_first, eff_lv))
 
-            copresent_polite_J = sum(
-                1 for other in present
-                if other != spk and (spk, other) in edges_by_pair
-                and binary(edges_by_pair[(spk, other)].level) == "J"
-                and edges_by_pair[(spk, other)].relation != "enemy"
-            )
-            copresent_B = sum(
-                1 for other in present
-                if other != spk and (spk, other) in edges_by_pair
-                and binary(edges_by_pair[(spk, other)].level) == "B"
-                and edges_by_pair[(spk, other)].relation != "enemy"
-            )
-
-            # Guard 1: Co-Present Polite In-Group Dominance on J -> B
-            if lv_c == "B" and fc in ("in_group_subordinate_or_crew_B", "intimate_family_child_or_peer_B", "in_group_subordinate_or_crew", "intimate_family_or_peer"):
-                if (spk_out_J > 0 and spk_out_B == 0) or (copresent_polite_J > 0 and spk_out_B == 0):
-                    continue
-            # Guard 2: In-Group Isolation Guard on B -> J
-            if lv_c == "J" and fc in ("public_press_customers_or_strangers_J", "public_or_external_audience"):
-                in_sc_polite_J = sum(
-                    1 for other in in_scene_present
-                    if other != spk and (spk, other) in edges_by_pair
-                    and binary(edges_by_pair[(spk, other)].level) == "J"
-                    and edges_by_pair[(spk, other)].relation != "enemy"
+    # I-STAB bridge: if a single-scene 1-cue group occurrence sits immediately between two shifted scenes of the same speaker, bridge it
+    for spk, seq in scene_resolved_by_spk.items():
+        g_edge = edges_by_pair[(spk, GROUP)]
+        base_b = binary(g_edge.level)
+        for i in range(1, len(seq) - 1):
+            idx_prev, _, _, lv_prev = seq[i - 1]
+            idx_cur, sc_f, nxt_f, lv_cur = seq[i]
+            idx_nxt, _, _, lv_nxt = seq[i + 1]
+            if lv_prev == lv_nxt and lv_cur != lv_prev and (idx_nxt - idx_prev) <= 6:
+                sc_cids = ordered_scenes[idx_cur].cue_ids
+                grp_cnt = sum(1 for c in sc_cids if pairs.get(c) == (spk, GROUP))
+                if grp_cnt <= 1:
+                    seq[i] = (idx_cur, sc_f, nxt_f, lv_prev)
+        for idx_cur, sc_first, next_first, eff_lv in seq:
+            sc_cids = [c for c in ordered_scenes[idx_cur].cue_ids if pairs.get(c) == (spk, GROUP)]
+            cur_lvs = {binary(tb.level_at(spk, GROUP, c)) for c in sc_cids}
+            if eff_lv not in cur_lvs or len(cur_lvs) > 1:
+                target_lvl = "haeyo" if eff_lv == "J" else "hae"
+                new_shifts_by_spk.setdefault(spk, []).append(
+                    RegisterShift(
+                        at_cue=sc_first,
+                        until_cue=next_first,
+                        level=target_lvl,
+                        reason="role_on",
+                        source="scene_footing",
+                    )
                 )
-                has_any_J_or_ep_or_aud = (in_sc_polite_J > 0)
-                for cid in sc.cue_ids:
-                    o = obs_flat.get(cid)
-                    if o and o.addressee and o.addressee.strip().lower() in ("audience", "press", "crowd", "viewers"):
-                        has_any_J_or_ep_or_aud = True
-                    p = pairs.get(cid)
-                    if p:
-                        other_actor = p[1] if p[0] == spk else (p[0] if p[1] == spk else None)
-                        if p[0].startswith("ep:") or p[1].startswith("ep:"):
-                            has_any_J_or_ep_or_aud = True
-                        elif other_actor and binary(tb.level_at(spk, other_actor, cid)) == "J":
-                            has_any_J_or_ep_or_aud = True
-                if (spk_out_B > 0 or copresent_B > 0) and not has_any_J_or_ep_or_aud:
-                    continue
-
-            target_lvl = "haeyo" if lv_c == "J" else "hae"
-            new_shifts_by_spk.setdefault(spk, []).append(
-                RegisterShift(
-                    at_cue=sc_first,
-                    until_cue=next_first,
-                    level=target_lvl,
-                    reason="role_on",
-                )
-            )
 
     if not new_shifts_by_spk:
-        return register_map
+        return base_rmap
 
     updated_edges: list[RegisterEdge] = []
-    for e in register_map.edges:
+    for e in base_rmap.edges:
         if e.addressee == GROUP and e.speaker in new_shifts_by_spk:
+            seen_keys = {(sh.at_cue, sh.until_cue, sh.level, sh.reason) for sh in e.shifts}
+            dedup_new = [
+                sh for sh in new_shifts_by_spk[e.speaker]
+                if (sh.at_cue, sh.until_cue, sh.level, sh.reason) not in seen_keys
+            ]
             merged_shifts = sorted(
-                [*e.shifts, *new_shifts_by_spk[e.speaker]],
+                [*e.shifts, *dedup_new],
                 key=lambda sh: pos.get(sh.at_cue, 0),
             )
             updated_edges.append(e.model_copy(update={"shifts": merged_shifts, "pronoun": "none"}))
         else:
             updated_edges.append(e)
-    return register_map.model_copy(update={"edges": updated_edges})
+    return base_rmap.model_copy(update={"edges": updated_edges})
+
+
+def derive_cue_footings(
+    register_map: RegisterMap,
+    scenes: Sequence[Scene],
+    cues: Sequence[Cue],
+    observations: Iterable[ChunkObservations | CueObservation],
+    context_map: ContextMap | None = None,
+    *,
+    pairs_by_cue: Mapping[str, Pair] | None = None,
+    footing_decisions: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[CueFooting]:
+    """Build derived per-cue footing records across globally ordered cues.
+
+    Every cue — including cues whose raw speaker or addressee could not be resolved
+    to a known character ID (e.g. ``raw_speaker='group'`` in a Q&A transaction) —
+    receives a ``CueFooting`` record with a ``footing_episode_id``. Unresolved
+    cues inside an active footing episode inherit the episode's effective speech
+    level with ``provenance='inherited_footing_episode'``.
+    """
+    ordered_cues = sorted(cues, key=lambda c: (c.start_ms, c.end_ms, c.id))
+    cue_order = [c.id for c in ordered_cues]
+    obs_flat = _flat_observations(observations)
+    pairs = dict(pairs_by_cue) if pairs_by_cue is not None else (
+        cue_pairs(context_map, list(cues), observations) if context_map is not None else {}
+    )
+    tb = RegisterTable(register_map, cue_order)
+    scene_of = {cid: sc.id for sc in scenes for cid in sc.cue_ids}
+
+    # Partition globally ordered spoken cues into footing episodes (continuous conversational runs <= 5000ms gap)
+    ep_idx = 1
+    ep_id_by_cid: dict[str, str] = {}
+    prev_end_ms: int | None = None
+    for c in ordered_cues:
+        if prev_end_ms is not None and (c.start_ms - prev_end_ms) > 5000:
+            ep_idx += 1
+        ep_id_by_cid[c.id] = f"fe{ep_idx:04d}"
+        prev_end_ms = max(prev_end_ms or 0, c.end_ms)
+
+    # Compute dominant resolved level per footing_episode_id for inheritance by unresolved cues
+    ep_levels: dict[str, list[str]] = {}
+    for c in ordered_cues:
+        fe_id = ep_id_by_cid[c.id]
+        p = pairs.get(c.id)
+        if p is not None:
+            lv = tb.level_at(*p, c.id)
+            if lv is None and (p[0].startswith("ep:") or p[1].startswith("ep:")):
+                lv = "haeyo"
+            if lv is not None:
+                ep_levels.setdefault(fe_id, []).append(lv)
+
+    ep_dominant_level: dict[str, str] = {}
+    for fe_id, lv_list in ep_levels.items():
+        j_cnt = sum(1 for x in lv_list if binary(x) == "J")
+        b_cnt = sum(1 for x in lv_list if binary(x) == "B")
+        ep_dominant_level[fe_id] = "haeyo" if j_cnt >= b_cnt else "hae"
+
+    out: list[CueFooting] = []
+    for c in ordered_cues:
+        o = obs_flat.get(c.id)
+        raw_s = (o.speaker if o and o.speaker else c.speaker_hint) or None
+        raw_a = (o.addressee if o and o.addressee else None)
+        p = pairs.get(c.id)
+        spk_id = p[0] if p else None
+        adr_id = p[1] if p else None
+        fe_id = ep_id_by_cid[c.id]
+        sc_id = scene_of.get(c.id, "")
+        fc = ""
+        if spk_id and adr_id == GROUP and footing_decisions:
+            dec = footing_decisions.get(f"{sc_id}__{spk_id}") or footing_decisions.get((sc_id, spk_id))  # type: ignore[arg-type]
+            if dec:
+                fc_obj = dec.get("footing_class", dec)
+                fc = fc_obj.get("choice", "") if isinstance(fc_obj, dict) else str(fc_obj)
+        if p is not None:
+            eff_lv = tb.level_at(*p, c.id)
+            prov = "scene_footing_shift" if (adr_id == GROUP and tb.in_shift(*p, c.id)) else "table"
+            if eff_lv is None and (spk_id and spk_id.startswith("ep:") or adr_id and adr_id.startswith("ep:")):
+                eff_lv = ep_dominant_level.get(fe_id, "haeyo")
+                prov = "inherited_footing_episode"
+        else:
+            eff_lv = ep_dominant_level.get(fe_id)
+            prov = "inherited_footing_episode" if eff_lv is not None else "unresolved"
+        out.append(
+            CueFooting(
+                cue_id=c.id,
+                raw_speaker=raw_s,
+                speaker_id=spk_id,
+                raw_addressee=raw_a,
+                addressee_id=adr_id,
+                footing_episode_id=fe_id,
+                footing_class=fc,
+                effective_level=eff_lv,
+                provenance=prov,
+            )
+        )
+    return out
 def cue_turn_pairs(
     context_map: ContextMap,
     observations: Iterable[ChunkObservations | CueObservation | CuePerception],

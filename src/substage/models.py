@@ -223,20 +223,34 @@ class RegisterShift(BaseModel):
     level: EdgeLevel
     reason: ShiftReason
     until_cue: str | None = None  # first cue back at the edge level; None = to the video's end
+    source: str = "table"  # "table" (authored/S2r) or "scene_footing" (derived scene footing shift)
 
 
 def shifted_level(level: str, shifts: list[RegisterShift], cue_id: str, pos: dict[str, int]) -> str:
     """*level* with the shift whose span ``[at_cue, until_cue)`` holds *cue_id*
-    applied; *pos* maps cue id -> video-order index. Unknown cues keep *level*."""
+    applied; *pos* maps cue id -> video-order index. Unknown cues keep *level*.
+    A ``scene_footing`` shift overrides ``table`` shifts within its scene span."""
     at = pos.get(cue_id)
     if at is None:
         return level
+    out = level
     for sh in shifts:
+        if getattr(sh, "source", "table") == "scene_footing":
+            continue
         start = pos.get(sh.at_cue)
         end = pos.get(sh.until_cue, len(pos)) if sh.until_cue else len(pos)
         if start is not None and start <= at < end:
-            return sh.level
-    return level
+            out = sh.level
+            break
+    for sh in shifts:
+        if getattr(sh, "source", "table") != "scene_footing":
+            continue
+        start = pos.get(sh.at_cue)
+        end = pos.get(sh.until_cue, len(pos)) if sh.until_cue else len(pos)
+        if start is not None and start <= at < end:
+            out = sh.level
+            break
+    return out
 
 
 class RegisterEdge(BaseModel):
@@ -444,6 +458,20 @@ class Snapshot(BaseModel):
             }
         )
 
+
+
+class CueFooting(BaseModel):
+    """Derived per-cue footing record preserving raw and resolved endpoints plus footing episode inheritance."""
+
+    cue_id: str
+    raw_speaker: str | None = None
+    speaker_id: str | None = None
+    raw_addressee: str | None = None
+    addressee_id: str | None = None
+    footing_episode_id: str = ""
+    footing_class: str = ""
+    effective_level: str | None = None
+    provenance: str = "table"
 
 # ---------------------------------------------------------------- S3 translation
 

@@ -1234,17 +1234,21 @@ def run(
     for sc in scenes:
         pairs_by_cue.update(register_mod.lock_scene_pairs(sc.cue_ids, cues_by_id_init, pairs_by_cue, observations, context_map=context_map))
     footing_file = ws.path("footing_decisions.json")
+    footing_decs: dict[str, Any] = {}
     if footing_file.is_file():
-        try:
-            footing_decs = json.loads(footing_file.read_text(encoding="utf-8"))
-            if isinstance(footing_decs, dict):
-                register_map = register_mod.apply_scene_footing_shifts(
-                    register_map, scenes, cues, observations, context_map,
-                    pairs_by_cue=pairs_by_cue, footing_decisions=footing_decs,
-                )
-                save_model(ws.path("register.yaml"), register_map)
-        except Exception:
-            pass
+        loaded_decs = json.loads(footing_file.read_text(encoding="utf-8"))
+        if isinstance(loaded_decs, dict):
+            footing_decs = loaded_decs
+            register_map = register_mod.apply_scene_footing_shifts(
+                register_map, scenes, cues, observations, context_map,
+                pairs_by_cue=pairs_by_cue, footing_decisions=footing_decs,
+            )
+            save_model(ws.path("register.yaml"), register_map)
+    cue_footings = register_mod.derive_cue_footings(
+        register_map, scenes, cues, observations, context_map,
+        pairs_by_cue=pairs_by_cue, footing_decisions=footing_decs,
+    )
+    save_model(ws.path("cue_footings.json"), cue_footings)
     turn_pairs_by_cue = register_mod.cue_turn_pairs(context_map, register_observations)
     for sc in scenes:
         for cid, dp in register_mod.scene_dash_turn_pairs(sc.cue_ids, cues_by_id_init, pairs_by_cue).items():
