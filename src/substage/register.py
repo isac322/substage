@@ -32,7 +32,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-
+from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .levels import DASHES, Level, addressed_levels, analyze_turn_morphemes, ending_level, has_dialect_marker, has_internal_register_clash, jongseong, speaker_turns, strips_dialect_marker
@@ -46,6 +46,7 @@ from .models import (
     ContextMap,
     RegisterEdge,
     RegisterMap,
+    RegisterShift,
     Scene,
     SceneRegister,
     SceneTranslation,
@@ -195,7 +196,9 @@ def canonicalize_edge(edge: RegisterEdge, *, reverse: RegisterEdge | None = None
         kept = [sh for sh in edge.shifts if binary(sh.level) == "J" or sh.reason in ("role_on", "role_off")]
         if len(kept) != len(edge.shifts):
             updates["shifts"] = kept
-    if edge.stance == "civil":
+    if edge.addressee == GROUP and edge.pronoun != "none":
+        updates["pronoun"] = "none"
+    elif edge.stance == "civil":
         if edge.relation in ("own_parent", "elder_kin", "surrogate_parent", "kid_to_adult") and edge.pronoun != "none":
             updates["pronoun"] = "none"
         elif (
@@ -640,7 +643,15 @@ def lock_scene_pairs(
             pair = out.get(cid)
             if pair is not None:
                 spk, adr = pair
-                if spk in other_of and adr == GROUP and any(abs(c.start_ms - dt) <= 8000 for dt in dyad_times):
+                o_cur = obs_map.get(cid)
+                raw_adr_low = (o_cur.addressee or "").strip().lower() if o_cur else ""
+                # I-RAW-AUDIENCE: never rewrite raw 'audience'/'press'/'crowd'/'viewers' into a 2-person dyad
+                if (
+                    spk in other_of
+                    and adr == GROUP
+                    and raw_adr_low not in ("audience", "viewers", "viewer", "press", "crowd")
+                    and any(abs(c.start_ms - dt) <= 8000 for dt in dyad_times)
+                ):
                     words = set(_words(c.text))
                     if not (words & GROUP_WORDS):
                         out[cid] = (spk, other_of[spk])
@@ -653,6 +664,36 @@ def lock_scene_pairs(
                     if m in raw_s:
                         out[cid] = (m, other_of[m])
                         break
+
+    # I-QA-BIND & I-STAB: bind contiguous answer runs (gap <= 3000ms, raw_adr == 'group')
+    # immediately following an addressed question ('?' in text) to the questioner
+    spoken_ordered = [cid for cid in ordered_cids if cid in cues_by_id and not (cues_by_id[cid].id.startswith("ost-") or cues_by_id[cid].source == "ost")]
+    idx_c = 0
+    while idx_c < len(spoken_ordered) - 1:
+        cid_q = spoken_ordered[idx_c]
+        c_q = cues_by_id[cid_q]
+        p_q = out.get(cid_q)
+        if p_q is not None and "?" in c_q.text and p_q[1] not in (GROUP, NARRATION, SYSTEM_AI) and p_q[0] != p_q[1]:
+            q_spk, q_adr = p_q
+            j = idx_c + 1
+            prev_end = c_q.end_ms
+            while j < len(spoken_ordered):
+                cid_a = spoken_ordered[j]
+                c_a = cues_by_id[cid_a]
+                p_a = out.get(cid_a)
+                o_a = obs_map.get(cid_a)
+                raw_a_low = (o_a.addressee or "").strip().lower() if o_a else ""
+                if (
+                    p_a == (q_adr, GROUP)
+                    and raw_a_low not in ("audience", "viewers", "viewer")
+                    and (c_a.start_ms - prev_end) <= 3000
+                ):
+                    out[cid_a] = (q_adr, q_spk)
+                    prev_end = c_a.end_ms
+                    j += 1
+                else:
+                    break
+        idx_c += 1
     return out
 
 
@@ -726,7 +767,20 @@ def lock_scene_dyad_levels(
         if adr == NARRATION:
             locked[pair] = "hae"
             continue
+        spk_voice = voice_by_id.get(spk, "")
+        if table is not None:
+            tb_lvls = [table.level_at(spk, adr, cid) for cid in cids]
+            tb_known = [lv for lv in tb_lvls if lv is not None]
+            if tb_known:
+                if (spk == "nicepool" or adr == "nicepool") and _voice_forces_banmal_to_peer(spk_voice):
+                    locked[pair] = "hae"
+                else:
+                    locked[pair] = tb_known[0]
+                continue
         if spk.startswith("ep:") or adr.startswith("ep:"):
+            if (spk.endswith("nicepool") or adr.endswith("nicepool")) and _voice_forces_banmal_to_peer(spk_voice):
+                locked[pair] = "hae"
+                continue
             votes = _votes_for(cids)
             rev_votes = _votes_for(pair_cids.get((adr, spk), []))
             both_votes = votes + rev_votes
@@ -740,23 +794,197 @@ def lock_scene_dyad_levels(
             else:
                 locked[pair] = "hae"
             continue
-        spk_voice = voice_by_id.get(spk, "")
-        if table is not None:
-            tb_lvls = [table.level_at(spk, adr, cid) for cid in cids]
-            tb_known = [lv for lv in tb_lvls if lv is not None]
-            if tb_known:
-                if (spk == "nicepool" or adr == "nicepool") and _voice_forces_banmal_to_peer(spk_voice):
-                    locked[pair] = "hae"
-                else:
-                    locked[pair] = tb_known[0]
-                continue
         if _voice_forces_banmal_to_peer(spk_voice) and adr != GROUP:
             locked[pair] = "hae"
             continue
         votes = _votes_for(cids)
         if votes:
             locked[pair] = "hae" if votes["hae"] >= votes["haeyo"] else "haeyo"
+
     return locked
+
+
+_POLITE_INGROUP_RELATIONS = frozenset({
+    "peer", "professional", "elder_kin", "own_parent", "surrogate_parent",
+    "mentor", "protege", "sibling", "crew_buddy",
+})
+
+
+def apply_scene_footing_shifts(
+    register_map: RegisterMap,
+    scenes: Sequence[Scene],
+    cues: Sequence[Cue],
+    observations: Iterable[ChunkObservations | CueObservation],
+    context_map: ContextMap | None = None,
+    *,
+    pairs_by_cue: Mapping[str, Pair] | None = None,
+    footing_decisions: Mapping[str, Mapping[str, Any]] | None = None,
+    tau: float = 0.72,
+) -> RegisterMap:
+    """Apply scene-scoped footing shifts to ``speaker>group`` edges using the
+    Two-Tier Ratified-Addressee & Scene-Footing Resolver (Goffman 1981 Footing,
+    Bell 1984 Audience Design, Portner et al. 2022 Glossa).
+
+    Satisfies invariants I-AGREE, I-NOREG, I-FLIP-PRECISION, I-RATIFIED-ONLY,
+    I-GROUP-IDENTITY, I-STAB, and I-BIDIR.
+    """
+    if not footing_decisions or not scenes or not cues:
+        return register_map
+    ordered_cues = sorted(cues, key=lambda c: (c.start_ms, c.end_ms, c.id))
+    cue_order = [c.id for c in ordered_cues]
+    pos = {cid: i for i, cid in enumerate(cue_order)}
+    obs_flat = _flat_observations(observations)
+    chunk_obs = [o for o in (observations or []) if isinstance(o, ChunkObservations)]
+    rid = name_resolver(context_map) if context_map is not None else (lambda _: None)
+    ko_names = {ch.id: ch.ko_name for ch in (context_map.characters if context_map else ())}
+    narrator_ids = {
+        ch.id for ch in (context_map.characters if context_map else ())
+        if "narrator" in (ch.en_name or "").lower() or "narrator" in (ch.persona or "").lower()
+    }
+    pairs = dict(pairs_by_cue) if pairs_by_cue is not None else (
+        cue_pairs(context_map, list(cues), observations) if context_map is not None else {}
+    )
+    tb = RegisterTable(register_map, cue_order)
+    edges_by_pair = {(e.speaker, e.addressee): e for e in register_map.edges}
+    ordered_scenes = sorted(scenes, key=lambda s: s.start_ms)
+    new_shifts_by_spk: dict[str, list[RegisterShift]] = {}
+
+    for idx_sc, sc in enumerate(ordered_scenes):
+        if not sc.cue_ids:
+            continue
+        sc_first = sc.cue_ids[0]
+        next_first = (
+            ordered_scenes[idx_sc + 1].cue_ids[0]
+            if idx_sc + 1 < len(ordered_scenes) and ordered_scenes[idx_sc + 1].cue_ids
+            else None
+        )
+        # Determine co-present characters in this scene (same logic as materialize_snapshots)
+        in_scene_present: set[str] = set()
+        for cid in sc.cue_ids:
+            if cid in pairs:
+                for ch_id in pairs[cid]:
+                    if ch_id in ko_names:
+                        in_scene_present.add(ch_id)
+            c_obj = next((x for x in ordered_cues if x.id == cid), None)
+            if c_obj and c_obj.speaker_hint:
+                for part in c_obj.speaker_hint.split("/"):
+                    if (r := rid(part)) is not None and r in ko_names:
+                        in_scene_present.add(r)
+        present: set[str] = set(in_scene_present)
+        for ch_o in chunk_obs:
+            if ch_o.start_ms < sc.end_ms and ch_o.end_ms > sc.start_ms:
+                for raw_p in ch_o.present_characters:
+                    if (r := rid(raw_p)) is not None and r in ko_names:
+                        present.add(r)
+        for n_idx in (idx_sc - 1, idx_sc, idx_sc + 1):
+            if 0 <= n_idx < len(ordered_scenes):
+                nb = ordered_scenes[n_idx]
+                gap = 0 if n_idx == idx_sc else (
+                    (sc.start_ms - nb.end_ms) if n_idx < idx_sc else (nb.start_ms - sc.end_ms)
+                )
+                if gap <= 20_000:
+                    for n_cid in nb.cue_ids:
+                        if n_cid in pairs:
+                            for ch_id in pairs[n_cid]:
+                                if ch_id in ko_names:
+                                    present.add(ch_id)
+
+        spks_in_sc = sorted({pairs[cid][0] for cid in sc.cue_ids if cid in pairs and pairs[cid][1] == GROUP})
+        for spk in spks_in_sc:
+            if spk in ("narrator", NARRATION, SYSTEM_AI) or spk in narrator_ids:
+                continue
+            g_edge = edges_by_pair.get((spk, GROUP))
+            if g_edge is None:
+                continue
+            dec = footing_decisions.get(f"{sc.id}__{spk}") or footing_decisions.get((sc.id, spk))  # type: ignore[arg-type]
+            if not dec:
+                continue
+            fc_obj = dec.get("footing_class", dec)
+            fc = fc_obj.get("choice", "") if isinstance(fc_obj, dict) else str(fc_obj)
+            probs = fc_obj.get("probabilities", {}) if isinstance(fc_obj, dict) else {}
+            p_fc = float(probs.get(fc, 1.0)) if isinstance(probs, dict) else 1.0
+            if p_fc < tau or not fc:
+                continue
+            lv_c = "J" if fc.endswith("_J") or fc in ("public_or_external_audience", "fourth_wall_polite_narration") else "B"
+            cur_lv = binary(tb.level_at(spk, GROUP, sc_first))
+            if cur_lv is None or lv_c == cur_lv:
+                continue
+
+            spk_out_B = 0
+            spk_out_J = 0
+            for cid in sc.cue_ids:
+                p = pairs.get(cid)
+                if p and p[0] == spk and p[1] != GROUP and not p[1].startswith("ep:") and p[1] != NARRATION:
+                    lv = binary(tb.level_at(*p, cid))
+                    if lv == "B":
+                        spk_out_B += 1
+                    elif lv == "J":
+                        spk_out_J += 1
+
+            copresent_polite_J = sum(
+                1 for other in present
+                if other != spk and (spk, other) in edges_by_pair
+                and binary(edges_by_pair[(spk, other)].level) == "J"
+                and edges_by_pair[(spk, other)].relation != "enemy"
+            )
+            copresent_B = sum(
+                1 for other in present
+                if other != spk and (spk, other) in edges_by_pair
+                and binary(edges_by_pair[(spk, other)].level) == "B"
+                and edges_by_pair[(spk, other)].relation != "enemy"
+            )
+
+            # Guard 1: Co-Present Polite In-Group Dominance on J -> B
+            if lv_c == "B" and fc in ("in_group_subordinate_or_crew_B", "intimate_family_child_or_peer_B", "in_group_subordinate_or_crew", "intimate_family_or_peer"):
+                if (spk_out_J > 0 and spk_out_B == 0) or (copresent_polite_J > 0 and spk_out_B == 0):
+                    continue
+            # Guard 2: In-Group Isolation Guard on B -> J
+            if lv_c == "J" and fc in ("public_press_customers_or_strangers_J", "public_or_external_audience"):
+                in_sc_polite_J = sum(
+                    1 for other in in_scene_present
+                    if other != spk and (spk, other) in edges_by_pair
+                    and binary(edges_by_pair[(spk, other)].level) == "J"
+                    and edges_by_pair[(spk, other)].relation != "enemy"
+                )
+                has_any_J_or_ep_or_aud = (in_sc_polite_J > 0)
+                for cid in sc.cue_ids:
+                    o = obs_flat.get(cid)
+                    if o and o.addressee and o.addressee.strip().lower() in ("audience", "press", "crowd", "viewers"):
+                        has_any_J_or_ep_or_aud = True
+                    p = pairs.get(cid)
+                    if p:
+                        other_actor = p[1] if p[0] == spk else (p[0] if p[1] == spk else None)
+                        if p[0].startswith("ep:") or p[1].startswith("ep:"):
+                            has_any_J_or_ep_or_aud = True
+                        elif other_actor and binary(tb.level_at(spk, other_actor, cid)) == "J":
+                            has_any_J_or_ep_or_aud = True
+                if (spk_out_B > 0 or copresent_B > 0) and not has_any_J_or_ep_or_aud:
+                    continue
+
+            target_lvl = "haeyo" if lv_c == "J" else "hae"
+            new_shifts_by_spk.setdefault(spk, []).append(
+                RegisterShift(
+                    at_cue=sc_first,
+                    until_cue=next_first,
+                    level=target_lvl,
+                    reason="role_on",
+                )
+            )
+
+    if not new_shifts_by_spk:
+        return register_map
+
+    updated_edges: list[RegisterEdge] = []
+    for e in register_map.edges:
+        if e.addressee == GROUP and e.speaker in new_shifts_by_spk:
+            merged_shifts = sorted(
+                [*e.shifts, *new_shifts_by_spk[e.speaker]],
+                key=lambda sh: pos.get(sh.at_cue, 0),
+            )
+            updated_edges.append(e.model_copy(update={"shifts": merged_shifts, "pronoun": "none"}))
+        else:
+            updated_edges.append(e)
+    return register_map.model_copy(update={"edges": updated_edges})
 def cue_turn_pairs(
     context_map: ContextMap,
     observations: Iterable[ChunkObservations | CueObservation | CuePerception],

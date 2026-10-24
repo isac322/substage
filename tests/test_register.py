@@ -766,3 +766,71 @@ def test_voice_card_dialect_policy_defaults_to_none():
 
     assert VoiceCard(idiolect="plain").dialect_policy == "none"
     assert VoiceCard(idiolect="Cajun drawl", dialect_policy="comic_dialect").dialect_policy == "comic_dialect"
+
+
+def test_two_tier_group_footing_resolver_and_pronoun_sanitization():
+    from substage.models import Character, ChunkObservations, ContextMap, Cue, CueObservation, RegisterMap, Scene, VoiceCard
+
+    # 1. Group pronoun sanitization in canonicalize_edge
+    grp_edge = _edge("travis", "group", "hae", step=7, relation="boss", pronoun="너")
+    assert register.canonicalize_edge(grp_edge).pronoun == "none"
+
+    # 2. I-RAW-AUDIENCE preserved and I-QA-BIND question->answer run propagated in lock_scene_pairs
+    cm = ContextMap(
+        synopsis="Uber press dinner",
+        tone_baseline="drama",
+        characters=[
+            Character(id="travis", en_name="Travis Kalanick", ko_name="트래비스 캘러닉", aliases=["TK"], persona="CEO", voice=VoiceCard(idiolect="casual")),
+            Character(id="emil", en_name="Emil Michael", ko_name="에밀 마이클", aliases=["Emil"], persona="CBO", voice=VoiceCard(idiolect="casual")),
+        ],
+    )
+    cues = [
+        Cue(id="c0001", start_ms=1000, end_ms=2500, text="Hey Emil.", raw="Hey Emil."),
+        Cue(id="c0002", start_ms=2600, end_ms=4000, text="Hey TK.", raw="Hey TK."),
+        Cue(id="c0003", start_ms=4500, end_ms=6000, text="You know what happens next.", raw="You know what happens next."),
+        Cue(id="c0004", start_ms=10000, end_ms=12000, text="You must hate us press guys, huh, Travis?", raw="You must hate us press guys, huh, Travis?"),
+        Cue(id="c0005", start_ms=12500, end_ms=14000, text="Oh, no, no.", raw="Oh, no, no."),
+        Cue(id="c0006", start_ms=14200, end_ms=16000, text="Is that what you want?", raw="Is that what you want?"),
+    ]
+    obs = [
+        ChunkObservations(
+            chunk_id="v01", start_ms=0, end_ms=20000, present_characters=["Travis Kalanick", "Emil Michael"],
+            cues=[
+                CueObservation(cue_id="c0001", speaker="Travis Kalanick", addressee="Emil Michael"),
+                CueObservation(cue_id="c0002", speaker="Emil Michael", addressee="Travis Kalanick"),
+                CueObservation(cue_id="c0003", speaker="Travis Kalanick", addressee="audience"),
+                CueObservation(cue_id="c0004", speaker="Female journalist", addressee="Travis Kalanick"),
+                CueObservation(cue_id="c0005", speaker="Travis Kalanick", addressee="group"),
+                CueObservation(cue_id="c0006", speaker="Travis Kalanick", addressee="group"),
+            ],
+        )
+    ]
+    init_pairs = register.cue_pairs(cm, cues, obs)
+    init_pairs["c0004"] = ("ep:femalejournalist", "travis")
+    locked = register.lock_scene_pairs(
+        [c.id for c in cues], {c.id: c for c in cues}, init_pairs, obs, context_map=cm
+    )
+    # c0003 raw_adr=='audience' must NOT be overwritten to ('travis', 'emil')
+    assert locked["c0003"] == ("travis", "group")
+    # c0005 and c0006 contiguous answer run (<3s) binds to the journalist questioner
+    assert locked["c0005"] == ("travis", "ep:femalejournalist")
+    assert locked["c0006"] == ("travis", "ep:femalejournalist")
+
+    # 3. apply_scene_footing_shifts shifts travis>group to haeyo in press scene s002 while keeping s001 hae
+    scenes = [
+        Scene(id="s001", start_ms=1000, end_ms=6500, cue_ids=["c0001", "c0002", "c0003"]),
+        Scene(id="s002", start_ms=10000, end_ms=16500, cue_ids=["c0004", "c0005", "c0006"]),
+    ]
+    rm = RegisterMap(edges=[register.canonicalize_edge(grp_edge)])
+    rm_shifted = register.apply_scene_footing_shifts(
+        rm, scenes, cues, obs, cm,
+        pairs_by_cue={**init_pairs, "c0005": ("travis", "group"), "c0006": ("travis", "group")},
+        footing_decisions={
+            "s001__travis": {"footing_class": {"choice": "in_group_subordinate_or_crew_B", "probabilities": {"in_group_subordinate_or_crew_B": 0.95}}},
+            "s002__travis": {"footing_class": {"choice": "public_press_customers_or_strangers_J", "probabilities": {"public_press_customers_or_strangers_J": 0.99}}},
+        },
+    )
+    tb = register.RegisterTable(rm_shifted, [c.id for c in cues])
+    assert tb.level_at("travis", "group", "c0003") == "hae"
+    assert tb.level_at("travis", "group", "c0005") == "haeyo"
+    assert tb.level_at("travis", "group", "c0006") == "haeyo"
